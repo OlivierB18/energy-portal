@@ -3,6 +3,7 @@ import MultiEnvironmentOverview from './pages/MultiEnvironmentOverview'
 import Dashboard from './pages/Dashboard'
 import './App.css'
 
+// Automatic deployment test - v1.1
 function App() {
   const [currentView, setCurrentView] = useState<'overview' | 'dashboard'>('overview')
 
