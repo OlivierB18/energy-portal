@@ -1,54 +1,15 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
+import { useAuth0 } from '@auth0/auth0-react'
 import MultiEnvironmentOverview from './pages/MultiEnvironmentOverview'
 import Dashboard from './pages/Dashboard'
 import './App.css'
-import 'netlify-identity-widget'
 
 // Automatic deployment test - v1.1
 function App() {
   const [currentView, setCurrentView] = useState<'overview' | 'dashboard'>('overview')
-  const [user, setUser] = useState<any>(null)
-  const [loading, setLoading] = useState(true)
+  const { isAuthenticated, isLoading, loginWithRedirect, logout } = useAuth0()
 
-  useEffect(() => {
-    // Initialize Netlify Identity
-    const netlifyIdentity = (window as any).netlifyIdentity
-
-    if (netlifyIdentity) {
-      // Check if user is already logged in
-      const currentUser = netlifyIdentity.currentUser()
-      setUser(currentUser)
-      setLoading(false)
-
-      // Listen for login/logout events
-      netlifyIdentity.on('login', (user: any) => {
-        setUser(user)
-        netlifyIdentity.close()
-      })
-
-      netlifyIdentity.on('logout', () => {
-        setUser(null)
-      })
-    } else {
-      setLoading(false)
-    }
-  }, [])
-
-  const handleLogin = () => {
-    const netlifyIdentity = (window as any).netlifyIdentity
-    if (netlifyIdentity) {
-      netlifyIdentity.open()
-    }
-  }
-
-  const handleLogout = () => {
-    const netlifyIdentity = (window as any).netlifyIdentity
-    if (netlifyIdentity) {
-      netlifyIdentity.logout()
-    }
-  }
-
-  if (loading) {
+  if (isLoading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-brand-4 via-brand-3 to-brand-2 flex items-center justify-center">
         <div className="text-light-2 text-xl">Loading...</div>
@@ -56,7 +17,7 @@ function App() {
     )
   }
 
-  if (!user) {
+  if (!isAuthenticated) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-brand-4 via-brand-3 to-brand-2 flex items-center justify-center">
         <div className="bg-light-2 bg-opacity-10 backdrop-blur-sm rounded-2xl p-8 shadow-2xl max-w-md w-full mx-4">
@@ -67,7 +28,7 @@ function App() {
               Secure access to your energy monitoring dashboard
             </p>
             <button
-              onClick={handleLogin}
+              onClick={() => loginWithRedirect()}
               className="w-full bg-brand-2 hover:bg-brand-1 text-light-2 font-semibold py-3 px-6 rounded-lg transition-all duration-200 shadow-lg hover:shadow-xl"
             >
               Sign In
@@ -109,7 +70,7 @@ function App() {
           Environment
         </button>
         <button
-          onClick={handleLogout}
+          onClick={() => logout({ logoutParams: { returnTo: window.location.origin } })}
           className="px-4 py-2 rounded-lg font-medium transition-all bg-red-500 bg-opacity-20 text-red-100 hover:bg-opacity-30 backdrop-blur-sm"
         >
           Logout
