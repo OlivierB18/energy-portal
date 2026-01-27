@@ -83,5 +83,6 @@ const fetchUsers = async (domain, token) => {
     name: user.name,
     last_login: user.last_login,
     created_at: user.created_at,
+    environmentIds: Array.isArray(user.app_metadata?.environmentIds) ? user.app_metadata.environmentIds : [],
   }))
 }

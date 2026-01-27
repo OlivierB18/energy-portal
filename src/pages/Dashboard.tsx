@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import EnergyCard from '../components/EnergyCard'
 import EnergyChart from '../components/EnergyChart'
 import { Zap, TrendingUp, Clock, Home, Settings } from 'lucide-react'
+import { useAuth0 } from '@auth0/auth0-react'
 
 interface Environment {
   id: string
@@ -13,6 +14,8 @@ interface Environment {
 export default function Dashboard() {
   const [selectedEnvironment, setSelectedEnvironment] = useState<string>('home')
   const [timeRange, setTimeRange] = useState<'today' | 'week' | 'month'>('today')
+  const [allowedEnvironmentIds, setAllowedEnvironmentIds] = useState<string[] | null>(null)
+  const { isAuthenticated, getIdTokenClaims } = useAuth0()
 
   // Mock environments - in real app, this would come from config
   const environments: Environment[] = [
@@ -20,6 +23,36 @@ export default function Dashboard() {
     { id: 'office', name: 'Office', url: 'http://office-ha.local:8123', token: 'your_token_here' },
     { id: 'vacation', name: 'Vacation Home', url: 'http://vacation-ha.local:8123', token: 'your_token_here' }
   ]
+
+  useEffect(() => {
+    const loadAssignments = async () => {
+      if (!isAuthenticated) {
+        setAllowedEnvironmentIds(null)
+        return
+      }
+
+      try {
+        const claims = await getIdTokenClaims()
+        const envClaim = 'https://brouwer-ems/environments'
+        const envs = (claims?.[envClaim] as string[] | undefined) ?? null
+        setAllowedEnvironmentIds(envs && envs.length > 0 ? envs : null)
+      } catch {
+        setAllowedEnvironmentIds(null)
+      }
+    }
+
+    void loadAssignments()
+  }, [getIdTokenClaims, isAuthenticated])
+
+  const visibleEnvironments = allowedEnvironmentIds
+    ? environments.filter((env) => allowedEnvironmentIds.includes(env.id))
+    : environments
+
+  useEffect(() => {
+    if (visibleEnvironments.length > 0 && !visibleEnvironments.find((env) => env.id === selectedEnvironment)) {
+      setSelectedEnvironment(visibleEnvironments[0].id)
+    }
+  }, [selectedEnvironment, visibleEnvironments])
 
   // Mock data for demonstration - in real app, this would fetch from selected environment
   const mockData = {
@@ -63,7 +96,7 @@ export default function Dashboard() {
                 onChange={(e) => setSelectedEnvironment(e.target.value)}
                 className="bg-light-2 bg-opacity-20 text-light-2 border border-light-2 border-opacity-30 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-brand-2"
               >
-                {environments.map((env) => (
+                {visibleEnvironments.map((env) => (
                   <option key={env.id} value={env.id} className="bg-dark-1 text-light-2">
                     {env.name}
                   </option>

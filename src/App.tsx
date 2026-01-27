@@ -49,20 +49,12 @@ function App() {
             <p className="text-light-2 mb-8 opacity-80">
               Secure access to your energy monitoring dashboard
             </p>
-            <div className="flex flex-col gap-3">
-              <button
-                onClick={() => loginWithRedirect()}
-                className="w-full bg-brand-2 hover:bg-brand-1 text-light-2 font-semibold py-3 px-6 rounded-lg transition-all duration-200 shadow-lg hover:shadow-xl"
-              >
-                Sign In
-              </button>
-              <button
-                onClick={() => loginWithRedirect({ authorizationParams: { screen_hint: 'signup' } })}
-                className="w-full bg-light-2 bg-opacity-20 hover:bg-opacity-30 text-light-2 font-semibold py-3 px-6 rounded-lg transition-all duration-200 backdrop-blur-sm"
-              >
-                Sign Up
-              </button>
-            </div>
+            <button
+              onClick={() => loginWithRedirect({ authorizationParams: { scope: 'openid profile email' } })}
+              className="w-full bg-brand-2 hover:bg-brand-1 text-light-2 font-semibold py-3 px-6 rounded-lg transition-all duration-200 shadow-lg hover:shadow-xl"
+            >
+              Sign In
+            </button>
           </div>
         </div>
       </div>

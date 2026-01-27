@@ -1,10 +1,13 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Home, Zap, Activity, Wifi, WifiOff, Settings } from 'lucide-react'
 import EnvironmentConfig from '../components/EnvironmentConfig'
 import { Environment } from '../types'
+import { useAuth0 } from '@auth0/auth0-react'
 
 export default function MultiEnvironmentOverview() {
   const [showConfig, setShowConfig] = useState(false)
+  const [allowedEnvironmentIds, setAllowedEnvironmentIds] = useState<string[] | null>(null)
+  const { isAuthenticated, getIdTokenClaims } = useAuth0()
   const [environments, setEnvironments] = useState<Environment[]>([
     {
       id: 'home',
@@ -32,6 +35,30 @@ export default function MultiEnvironmentOverview() {
       lastUpdate: '3 hours ago'
     }
   ])
+
+  useEffect(() => {
+    const loadAssignments = async () => {
+      if (!isAuthenticated) {
+        setAllowedEnvironmentIds(null)
+        return
+      }
+
+      try {
+        const claims = await getIdTokenClaims()
+        const envClaim = 'https://brouwer-ems/environments'
+        const envs = (claims?.[envClaim] as string[] | undefined) ?? null
+        setAllowedEnvironmentIds(envs && envs.length > 0 ? envs : null)
+      } catch {
+        setAllowedEnvironmentIds(null)
+      }
+    }
+
+    void loadAssignments()
+  }, [getIdTokenClaims, isAuthenticated])
+
+  const visibleEnvironments = allowedEnvironmentIds
+    ? environments.filter((env) => allowedEnvironmentIds.includes(env.id))
+    : environments
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -63,6 +90,7 @@ export default function MultiEnvironmentOverview() {
                   Multi-Environment Overview
                 </h1>
                 <p className="text-light-1 text-lg">Monitor all your Home Assistant environments in one place</p>
+                <p className="text-light-1 text-sm opacity-80">Developer: Olivier Brouwer</p>
               </div>
             </div>
             <button
@@ -77,7 +105,7 @@ export default function MultiEnvironmentOverview() {
 
         {/* Environment Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
-          {environments.map((env) => (
+          {visibleEnvironments.map((env) => (
             <div
               key={env.id}
               className="bg-light-2 bg-opacity-95 rounded-2xl p-6 shadow-xl hover:shadow-2xl transition-all cursor-pointer backdrop-blur-lg"
@@ -137,19 +165,19 @@ export default function MultiEnvironmentOverview() {
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             <div className="text-center">
               <div className="text-3xl font-heavy text-brand-2 mb-2">
-                {environments.filter(e => e.status === 'online').length}/{environments.length}
+                {visibleEnvironments.filter(e => e.status === 'online').length}/{visibleEnvironments.length}
               </div>
               <p className="text-dark-2">Environments Online</p>
             </div>
             <div className="text-center">
               <div className="text-3xl font-heavy text-brand-3 mb-2">
-                {environments.reduce((sum, env) => sum + (env.currentPower || 0), 0).toFixed(1)}
+                {visibleEnvironments.reduce((sum, env) => sum + (env.currentPower || 0), 0).toFixed(1)}
               </div>
               <p className="text-dark-2">Total Current Power (kW)</p>
             </div>
             <div className="text-center">
               <div className="text-3xl font-heavy text-brand-4 mb-2">
-                {environments.reduce((sum, env) => sum + (env.dailyUsage || 0), 0).toFixed(1)}
+                {visibleEnvironments.reduce((sum, env) => sum + (env.dailyUsage || 0), 0).toFixed(1)}
               </div>
               <p className="text-dark-2">Total Daily Usage (kWh)</p>
             </div>
