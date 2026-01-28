@@ -1,7 +1,10 @@
+const domain = (import.meta.env.VITE_AUTH0_DOMAIN as string | undefined) ?? ''
+const clientId = (import.meta.env.VITE_AUTH0_CLIENT_ID as string | undefined) ?? ''
+
 export const auth0Config = {
-  domain: "dev-17q5zgad7zxotyze.us.auth0.com",
-  clientId: "9jCW7uLStMV2oEuCUr3qhueJMUtqNlLI",
+  domain,
+  clientId,
   authorizationParams: {
     redirect_uri: window.location.origin,
   },
-};
+}
