@@ -9,7 +9,64 @@ import './App.css'
 function App() {
   const [currentView, setCurrentView] = useState<'overview' | 'dashboard' | 'users'>('overview')
   const [isAdmin, setIsAdmin] = useState(false)
-  const { isAuthenticated, isLoading, loginWithRedirect, logout, getIdTokenClaims } = useAuth0()
+  const [assignedEnvironmentIds, setAssignedEnvironmentIds] = useState<string[] | null>(null)
+  const { isAuthenticated, isLoading, loginWithRedirect, logout, getIdTokenClaims, getAccessTokenSilently, user } = useAuth0()
+
+  const environmentLabelMap: Record<string, string> = {
+    home: 'Home',
+    office: 'Office',
+    vacation: 'Vacation Home',
+    dhvw: 'DHVW',
+  }
+
+  const decodeJwtPayload = (token: string) => {
+    try {
+      const payload = token.split('.')[1]
+      if (!payload) {
+        return null
+      }
+      const base64 = payload.replace(/-/g, '+').replace(/_/g, '/')
+      const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), '=')
+      const json = atob(padded)
+      return JSON.parse(json) as Record<string, unknown>
+    } catch {
+      return null
+    }
+  }
+
+  const getRolesFromClaims = (claims: Record<string, unknown> | null | undefined) => {
+    if (!claims) {
+      return [] as string[]
+    }
+
+    const roleClaimCandidates = [
+      'https://brouwer-ems/roles',
+      'https://brouwer-ems/role',
+      'roles',
+      'role',
+    ]
+
+    for (const key of roleClaimCandidates) {
+      const value = claims[key]
+      if (Array.isArray(value)) {
+        return value.filter((item) => typeof item === 'string') as string[]
+      }
+      if (typeof value === 'string') {
+        return [value]
+      }
+    }
+
+    return [] as string[]
+  }
+
+  const getEmailFromClaims = (claims: Record<string, unknown> | null | undefined) => {
+    if (!claims) {
+      return ''
+    }
+
+    const emailValue = claims.email ?? claims['https://brouwer-ems/email']
+    return typeof emailValue === 'string' ? emailValue : ''
+  }
 
   useEffect(() => {
     const loadRoles = async () => {
@@ -19,17 +76,87 @@ function App() {
       }
 
       try {
-        const claims = await getIdTokenClaims()
-        const rolesClaim = 'https://brouwer-ems/roles'
-        const roles = (claims?.[rolesClaim] as string[] | undefined) ?? []
-        setIsAdmin(roles.includes('admin'))
+        const claims = (await getIdTokenClaims()) as Record<string, unknown> | undefined
+        let roles = getRolesFromClaims(claims)
+
+        if (roles.length === 0) {
+          const accessToken = await getAccessTokenSilently().catch(() => null)
+          if (accessToken) {
+            const accessClaims = decodeJwtPayload(accessToken)
+            roles = getRolesFromClaims(accessClaims)
+          }
+        }
+
+        const allowlist = ((import.meta.env.VITE_ADMIN_EMAILS as string | undefined) ?? 'olivier@inside-out.tech')
+          .split(',')
+          .map((email) => email.trim().toLowerCase())
+          .filter(Boolean)
+        const claimEmail = getEmailFromClaims(claims)
+        const email = (user?.email || claimEmail).toLowerCase()
+        const isAllowedEmail = email.length > 0 && allowlist.includes(email)
+
+        const nextIsAdmin = roles.includes('admin') || isAllowedEmail
+        setIsAdmin(nextIsAdmin)
+        setCurrentView((prev) => (nextIsAdmin ? prev : 'dashboard'))
       } catch {
         setIsAdmin(false)
+        setCurrentView('dashboard')
       }
     }
 
     void loadRoles()
-  }, [getIdTokenClaims, isAuthenticated])
+  }, [getAccessTokenSilently, getIdTokenClaims, isAuthenticated, user?.email])
+
+  useEffect(() => {
+    const getAuthToken = async () => {
+      const idTokenClaims = await getIdTokenClaims().catch(() => null)
+      const rawIdToken = idTokenClaims?.__raw
+      if (rawIdToken) {
+        return rawIdToken
+      }
+      return getAccessTokenSilently()
+    }
+
+    const loadAssignments = async () => {
+      if (!isAuthenticated) {
+        setAssignedEnvironmentIds(null)
+        return
+      }
+
+      if (isAdmin) {
+        setAssignedEnvironmentIds(null)
+        return
+      }
+
+      try {
+        const claims = await getIdTokenClaims()
+        const envClaim = 'https://brouwer-ems/environments'
+        const envs = (claims?.[envClaim] as string[] | undefined) ?? null
+
+        if (envs && envs.length > 0) {
+          setAssignedEnvironmentIds(envs)
+          return
+        }
+
+        const token = await getAuthToken()
+        const response = await fetch('/.netlify/functions/get-user-environments', {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+
+        if (!response.ok) {
+          throw new Error('Unable to load user environments')
+        }
+
+        const data = await response.json()
+        const ids = Array.isArray(data?.environmentIds) ? data.environmentIds : []
+        setAssignedEnvironmentIds(ids)
+      } catch {
+        setAssignedEnvironmentIds([])
+      }
+    }
+
+    void loadAssignments()
+  }, [getAccessTokenSilently, getIdTokenClaims, isAuthenticated, isAdmin])
 
   if (isLoading) {
     return (
@@ -63,22 +190,56 @@ function App() {
 
   return (
     <div className="App">
-      {currentView === 'overview' && <MultiEnvironmentOverview />}
-      {currentView === 'dashboard' && <Dashboard />}
-      {currentView === 'users' && <Users isAdmin={isAdmin} />}
+      {isAdmin && currentView === 'overview' && (
+        <MultiEnvironmentOverview
+          isAdmin={isAdmin}
+          onManageUsers={() => setCurrentView('users')}
+        />
+      )}
+      {currentView === 'dashboard' && <Dashboard isAdmin={isAdmin} />}
+      {isAdmin && currentView === 'users' && <Users isAdmin={isAdmin} />}
+
+      {isAuthenticated && (
+        <div className="fixed bottom-6 left-6 z-40 bg-light-2 bg-opacity-30 text-light-2 rounded-xl px-4 py-3 backdrop-blur-sm shadow-lg max-w-xs">
+          <div className="text-xs uppercase tracking-wide opacity-80">Logged in as</div>
+          <div className="text-sm font-medium truncate">{user?.name || user?.email || 'Unknown user'}</div>
+          <div className="mt-3 text-xs uppercase tracking-wide opacity-80">Environments</div>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {(assignedEnvironmentIds === null
+              ? Object.keys(environmentLabelMap)
+              : assignedEnvironmentIds
+            )
+              .map((envId) => environmentLabelMap[envId])
+              .filter(Boolean)
+              .map((label) => (
+                <span
+                  key={label}
+                  className="px-2 py-1 rounded-full bg-light-2 bg-opacity-20 text-xs text-light-2"
+                >
+                  {label}
+                </span>
+              ))}
+            {assignedEnvironmentIds && assignedEnvironmentIds.length === 0 && (
+              <span className="text-xs text-light-1 opacity-80">No environments assigned</span>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Simple Navigation */}
       <div className="fixed bottom-6 right-6 flex gap-2">
-        <button
-          onClick={() => setCurrentView('overview')}
-          className={`px-4 py-2 rounded-lg font-medium transition-all ${
-            currentView === 'overview'
-              ? 'bg-brand-2 text-light-2 shadow-lg'
-              : 'bg-light-2 bg-opacity-20 text-light-2 hover:bg-opacity-30 backdrop-blur-sm'
-          }`}
-        >
-          Overview
-        </button>
+        {isAdmin && (
+          <button
+            onClick={() => setCurrentView('overview')}
+            className={`px-4 py-2 rounded-lg font-medium transition-all ${
+              currentView === 'overview'
+                ? 'bg-brand-2 text-light-2 shadow-lg'
+                : 'bg-light-2 bg-opacity-20 text-light-2 hover:bg-opacity-30 backdrop-blur-sm'
+            }`}
+          >
+            Overview
+          </button>
+        )}
         <button
           onClick={() => setCurrentView('dashboard')}
           className={`px-4 py-2 rounded-lg font-medium transition-all ${

@@ -1,5 +1,4 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose'
-import crypto from 'crypto'
 
 const getEnv = (key) => {
   const value = process.env[key]
@@ -34,40 +33,33 @@ export const handler = async (event) => {
     }
 
     const body = JSON.parse(event.body || '{}')
-    const email = body.email?.trim()
-    const name = body.name?.trim()
+    const userId = body.userId?.trim()
     const environmentIds = Array.isArray(body.environmentIds)
       ? body.environmentIds.map((env) => String(env))
       : []
 
-    if (!email) {
-      return { statusCode: 400, body: JSON.stringify({ error: 'Email is required' }) }
+    if (!userId) {
+      return { statusCode: 400, body: JSON.stringify({ error: 'User ID is required' }) }
     }
 
-    const connection = getEnv('AUTH0_DB_CONNECTION')
     const managementToken = await getManagementToken(domain)
-    const user = await createUser(domain, managementToken, {
-      email,
-      name,
-      connection,
-      environmentIds,
-    })
-
-    const passwordEmailSent = await sendPasswordResetEmail(domain, email, connection)
-    const inviteLink = await createInviteLink(domain, managementToken, user.user_id)
+    const user = await updateUserMetadata(domain, managementToken, userId, environmentIds)
 
     return {
       statusCode: 200,
       body: JSON.stringify({
-        user,
-        inviteLink,
-        passwordEmailSent,
+        user: {
+          user_id: user.user_id,
+          environmentIds: Array.isArray(user.app_metadata?.environmentIds)
+            ? user.app_metadata.environmentIds
+            : [],
+        },
       }),
     }
   } catch (error) {
     return {
       statusCode: 500,
-      body: JSON.stringify({ error: error instanceof Error ? error.message : 'Server error' })
+      body: JSON.stringify({ error: error instanceof Error ? error.message : 'Server error' }),
     }
   }
 }
@@ -109,21 +101,14 @@ const getManagementToken = async (domain) => {
   return data.access_token
 }
 
-const createUser = async (domain, token, { email, name, connection, environmentIds }) => {
-  const password = generatePassword()
-  const response = await fetch(`https://${domain}/api/v2/users`, {
-    method: 'POST',
+const updateUserMetadata = async (domain, token, userId, environmentIds) => {
+  const response = await fetch(`https://${domain}/api/v2/users/${encodeURIComponent(userId)}`, {
+    method: 'PATCH',
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      email,
-      name: name || undefined,
-      connection,
-      password,
-      email_verified: false,
-      verify_email: true,
       app_metadata: {
         environmentIds,
       },
@@ -132,63 +117,8 @@ const createUser = async (domain, token, { email, name, connection, environmentI
 
   if (!response.ok) {
     const error = await response.json().catch(() => null)
-    throw new Error(error?.message || 'Unable to create user')
+    throw new Error(error?.message || 'Unable to update user')
   }
 
   return response.json()
-}
-
-const generatePassword = () => {
-  return crypto.randomBytes(24).toString('base64url')
-}
-
-const sendPasswordResetEmail = async (domain, email, connection) => {
-  const clientId = process.env.AUTH0_APP_CLIENT_ID
-
-  if (!clientId) {
-    return false
-  }
-
-  try {
-    const response = await fetch(`https://${domain}/dbconnections/change_password`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        client_id: clientId,
-        email,
-        connection,
-      }),
-    })
-
-    return response.ok
-  } catch {
-    return false
-  }
-}
-
-const createInviteLink = async (domain, token, userId) => {
-  try {
-    const response = await fetch(`https://${domain}/api/v2/tickets/password-change`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        user_id: userId,
-        result_url: process.env.AUTH0_INVITE_REDIRECT_URL || undefined,
-        mark_email_as_verified: false,
-        ttl_sec: 60 * 60 * 24 * 7,
-      }),
-    })
-
-    if (!response.ok) {
-      return null
-    }
-
-    const data = await response.json()
-    return data.ticket || null
-  } catch {
-    return null
-  }
 }

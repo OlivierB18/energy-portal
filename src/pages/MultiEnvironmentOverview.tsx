@@ -4,10 +4,15 @@ import EnvironmentConfig from '../components/EnvironmentConfig'
 import { Environment } from '../types'
 import { useAuth0 } from '@auth0/auth0-react'
 
-export default function MultiEnvironmentOverview() {
+interface MultiEnvironmentOverviewProps {
+  isAdmin: boolean
+  onManageUsers: () => void
+}
+
+export default function MultiEnvironmentOverview({ isAdmin, onManageUsers }: MultiEnvironmentOverviewProps) {
   const [showConfig, setShowConfig] = useState(false)
   const [allowedEnvironmentIds, setAllowedEnvironmentIds] = useState<string[] | null>(null)
-  const { isAuthenticated, getIdTokenClaims } = useAuth0()
+  const { isAuthenticated, getIdTokenClaims, getAccessTokenSilently } = useAuth0()
   const [environments, setEnvironments] = useState<Environment[]>([
     {
       id: 'home',
@@ -33,12 +38,33 @@ export default function MultiEnvironmentOverview() {
       url: 'http://vacation-ha.local:8123',
       status: 'offline',
       lastUpdate: '3 hours ago'
+    },
+    {
+      id: 'dhvw',
+      name: 'DHVW',
+      url: 'http://dhvw-ha.local:8123',
+      status: 'offline',
+      lastUpdate: 'just now'
     }
   ])
 
   useEffect(() => {
+    const getAuthToken = async () => {
+      const idTokenClaims = await getIdTokenClaims().catch(() => null)
+      const rawIdToken = idTokenClaims?.__raw
+      if (rawIdToken) {
+        return rawIdToken
+      }
+      return getAccessTokenSilently()
+    }
+
     const loadAssignments = async () => {
       if (!isAuthenticated) {
+        setAllowedEnvironmentIds(null)
+        return
+      }
+
+      if (isAdmin) {
         setAllowedEnvironmentIds(null)
         return
       }
@@ -47,14 +73,31 @@ export default function MultiEnvironmentOverview() {
         const claims = await getIdTokenClaims()
         const envClaim = 'https://brouwer-ems/environments'
         const envs = (claims?.[envClaim] as string[] | undefined) ?? null
-        setAllowedEnvironmentIds(envs && envs.length > 0 ? envs : null)
+
+        if (envs && envs.length > 0) {
+          setAllowedEnvironmentIds(envs)
+          return
+        }
+
+        const token = await getAuthToken()
+        const response = await fetch('/.netlify/functions/get-user-environments', {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+
+        if (!response.ok) {
+          throw new Error('Unable to load user environments')
+        }
+
+        const data = await response.json()
+        const ids = Array.isArray(data?.environmentIds) ? data.environmentIds : []
+        setAllowedEnvironmentIds(ids)
       } catch {
-        setAllowedEnvironmentIds(null)
+        setAllowedEnvironmentIds([])
       }
     }
 
     void loadAssignments()
-  }, [getIdTokenClaims, isAuthenticated])
+  }, [getAccessTokenSilently, getIdTokenClaims, isAuthenticated, isAdmin])
 
   const visibleEnvironments = allowedEnvironmentIds
     ? environments.filter((env) => allowedEnvironmentIds.includes(env.id))
@@ -93,13 +136,33 @@ export default function MultiEnvironmentOverview() {
                 <p className="text-light-1 text-sm opacity-80">Developer: Olivier Brouwer</p>
               </div>
             </div>
-            <button
-              onClick={() => setShowConfig(true)}
-              className="flex items-center gap-2 px-4 py-2 bg-light-2 bg-opacity-20 text-light-2 rounded-lg hover:bg-opacity-30 transition-all backdrop-blur-sm"
-            >
-              <Settings className="w-5 h-5" />
-              Configure
-            </button>
+            <div className="flex items-center gap-2">
+              {isAdmin && (
+                <button
+                  onClick={onManageUsers}
+                  className="flex items-center gap-2 px-4 py-2 bg-light-2 bg-opacity-20 text-light-2 rounded-lg hover:bg-opacity-30 transition-all backdrop-blur-sm"
+                >
+                  <Settings className="w-5 h-5" />
+                  Users
+                </button>
+              )}
+              {isAdmin && (
+                <button
+                  onClick={() => setShowConfig(true)}
+                  className="flex items-center gap-2 px-4 py-2 bg-brand-2 text-light-2 rounded-lg hover:bg-brand-3 transition-all"
+                >
+                  <Settings className="w-5 h-5" />
+                  Add environment
+                </button>
+              )}
+              <button
+                onClick={() => setShowConfig(true)}
+                className="flex items-center gap-2 px-4 py-2 bg-light-2 bg-opacity-20 text-light-2 rounded-lg hover:bg-opacity-30 transition-all backdrop-blur-sm"
+              >
+                <Settings className="w-5 h-5" />
+                Configure
+              </button>
+            </div>
           </div>
         </div>
 

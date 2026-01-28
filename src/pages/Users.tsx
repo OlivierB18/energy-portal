@@ -16,7 +16,7 @@ interface UserRow {
 }
 
 export default function Users({ isAdmin }: UsersProps) {
-  const { getAccessTokenSilently } = useAuth0()
+  const { getAccessTokenSilently, getIdTokenClaims } = useAuth0()
   const [users, setUsers] = useState<UserRow[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -25,12 +25,20 @@ export default function Users({ isAdmin }: UsersProps) {
   const [inviteEnvironments, setInviteEnvironments] = useState<string[]>([])
   const [inviteLink, setInviteLink] = useState<string | null>(null)
   const [isInviting, setIsInviting] = useState(false)
+  const [savingUserId, setSavingUserId] = useState<string | null>(null)
+  const [resettingUserId, setResettingUserId] = useState<string | null>(null)
 
   const environmentOptions = [
     { id: 'home', label: 'Home' },
     { id: 'office', label: 'Office' },
     { id: 'vacation', label: 'Vacation Home' },
+    { id: 'dhvw', label: 'DHVW' },
   ]
+
+  const adminEmailAllowlist = ((import.meta.env.VITE_ADMIN_EMAILS as string | undefined) ?? 'olivier@inside-out.tech')
+    .split(',')
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean)
 
   useEffect(() => {
     const loadUsers = async () => {
@@ -40,7 +48,7 @@ export default function Users({ isAdmin }: UsersProps) {
       }
 
       try {
-        const token = await getAccessTokenSilently()
+        const token = await getAuthToken()
         const response = await fetch('/.netlify/functions/list-users', {
           headers: {
             Authorization: `Bearer ${token}`,
@@ -61,7 +69,18 @@ export default function Users({ isAdmin }: UsersProps) {
     }
 
     void loadUsers()
-  }, [getAccessTokenSilently, isAdmin])
+  }, [getAccessTokenSilently, getIdTokenClaims, isAdmin])
+
+  const getAuthToken = async () => {
+    const idTokenClaims = await getIdTokenClaims().catch(() => null)
+    const rawIdToken = idTokenClaims?.__raw
+
+    if (rawIdToken) {
+      return rawIdToken
+    }
+
+    return getAccessTokenSilently()
+  }
 
   const handleInvite = async () => {
     if (!inviteEmail) {
@@ -74,7 +93,7 @@ export default function Users({ isAdmin }: UsersProps) {
     setIsInviting(true)
 
     try {
-      const token = await getAccessTokenSilently()
+      const token = await getAuthToken()
       const response = await fetch('/.netlify/functions/create-user', {
         method: 'POST',
         headers: {
@@ -103,6 +122,69 @@ export default function Users({ isAdmin }: UsersProps) {
       setError(err instanceof Error ? err.message : 'Unable to create user')
     } finally {
       setIsInviting(false)
+    }
+  }
+
+  const updateUserEnvironments = async (userId: string, environmentIds: string[]) => {
+    setError(null)
+    setSavingUserId(userId)
+
+    try {
+      const token = await getAuthToken()
+      const response = await fetch('/.netlify/functions/update-user', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ userId, environmentIds }),
+      })
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => null)
+        throw new Error(data?.error || 'Unable to update user environments')
+      }
+
+      const data = await response.json()
+      const updatedEnvIds = Array.isArray(data?.user?.environmentIds)
+        ? data.user.environmentIds
+        : environmentIds
+
+      setUsers((prev) =>
+        prev.map((user) =>
+          user.user_id === userId ? { ...user, environmentIds: updatedEnvIds } : user,
+        ),
+      )
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to update user environments')
+    } finally {
+      setSavingUserId(null)
+    }
+  }
+
+  const sendPasswordReset = async (email: string) => {
+    setError(null)
+    setResettingUserId(email)
+
+    try {
+      const token = await getAuthToken()
+      const response = await fetch('/.netlify/functions/send-password-reset', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ email }),
+      })
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => null)
+        throw new Error(data?.error || 'Unable to send reset email')
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to send reset email')
+    } finally {
+      setResettingUserId(null)
     }
   }
 
@@ -197,19 +279,69 @@ export default function Users({ isAdmin }: UsersProps) {
                     <th className="py-2">Name</th>
                     <th className="py-2">Email</th>
                     <th className="py-2">Environments</th>
+                    <th className="py-2">Actions</th>
                     <th className="py-2">Last login</th>
                     <th className="py-2">Created</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {users.map((user) => (
+                  {users.map((user) => {
+                    const isAdminUser = !!user.email && adminEmailAllowlist.includes(user.email.toLowerCase())
+
+                    return (
                     <tr key={user.user_id} className="border-t border-dark-2 border-opacity-10">
                       <td className="py-3 font-medium text-dark-1">{user.name ?? '—'}</td>
                       <td className="py-3 text-dark-1">{user.email ?? '—'}</td>
                       <td className="py-3 text-dark-2">
-                        {user.environmentIds?.length
-                          ? user.environmentIds.map((env) => environmentOptions.find((option) => option.id === env)?.label ?? env).join(', ')
-                          : '—'}
+                        <div className="flex flex-wrap gap-2">
+                          {environmentOptions.map((env) => (
+                            <label key={env.id} className="flex items-center gap-2 text-xs text-dark-2">
+                              <input
+                                type="checkbox"
+                                checked={user.environmentIds?.includes(env.id) ?? false}
+                                disabled={isAdminUser}
+                                onChange={(event) => {
+                                  if (isAdminUser) {
+                                    return
+                                  }
+                                  const current = user.environmentIds ?? []
+                                  const next = event.target.checked
+                                    ? [...current, env.id]
+                                    : current.filter((id) => id !== env.id)
+
+                                  setUsers((prev) =>
+                                    prev.map((row) =>
+                                      row.user_id === user.user_id
+                                        ? { ...row, environmentIds: next }
+                                        : row,
+                                    ),
+                                  )
+                                }}
+                              />
+                              {env.label}
+                            </label>
+                          ))}
+                        </div>
+                      </td>
+                      <td className="py-3 text-dark-2">
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            onClick={() => updateUserEnvironments(user.user_id, user.environmentIds ?? [])}
+                            disabled={savingUserId === user.user_id || isAdminUser}
+                            className="px-3 py-1 rounded-lg bg-brand-2 text-light-2 text-xs font-medium hover:bg-brand-3 transition-all disabled:opacity-60"
+                          >
+                            {isAdminUser ? 'Admin' : savingUserId === user.user_id ? 'Saving...' : 'Save'}
+                          </button>
+                          {user.email && (
+                            <button
+                              onClick={() => sendPasswordReset(user.email ?? '')}
+                              disabled={resettingUserId === user.email}
+                              className="px-3 py-1 rounded-lg bg-dark-2 bg-opacity-10 text-dark-2 text-xs font-medium hover:bg-opacity-20 transition-all disabled:opacity-60"
+                            >
+                              {resettingUserId === user.email ? 'Sending...' : 'Send reset'}
+                            </button>
+                          )}
+                        </div>
                       </td>
                       <td className="py-3 text-dark-2">
                         {user.last_login ? new Date(user.last_login).toLocaleString() : '—'}
@@ -218,7 +350,8 @@ export default function Users({ isAdmin }: UsersProps) {
                         {user.created_at ? new Date(user.created_at).toLocaleDateString() : '—'}
                       </td>
                     </tr>
-                  ))}
+                    )
+                  })}
                 </tbody>
               </table>
             </div>

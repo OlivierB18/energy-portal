@@ -11,22 +11,41 @@ interface Environment {
   token: string
 }
 
-export default function Dashboard() {
+interface DashboardProps {
+  isAdmin: boolean
+}
+
+export default function Dashboard({ isAdmin }: DashboardProps) {
   const [selectedEnvironment, setSelectedEnvironment] = useState<string>('home')
   const [timeRange, setTimeRange] = useState<'today' | 'week' | 'month'>('today')
   const [allowedEnvironmentIds, setAllowedEnvironmentIds] = useState<string[] | null>(null)
-  const { isAuthenticated, getIdTokenClaims } = useAuth0()
+  const { isAuthenticated, getIdTokenClaims, getAccessTokenSilently } = useAuth0()
 
   // Mock environments - in real app, this would come from config
   const environments: Environment[] = [
     { id: 'home', name: 'Home', url: 'http://homeassistant.local:8123', token: 'your_token_here' },
     { id: 'office', name: 'Office', url: 'http://office-ha.local:8123', token: 'your_token_here' },
-    { id: 'vacation', name: 'Vacation Home', url: 'http://vacation-ha.local:8123', token: 'your_token_here' }
+    { id: 'vacation', name: 'Vacation Home', url: 'http://vacation-ha.local:8123', token: 'your_token_here' },
+    { id: 'dhvw', name: 'DHVW', url: 'http://dhvw-ha.local:8123', token: 'your_token_here' }
   ]
 
   useEffect(() => {
+    const getAuthToken = async () => {
+      const idTokenClaims = await getIdTokenClaims().catch(() => null)
+      const rawIdToken = idTokenClaims?.__raw
+      if (rawIdToken) {
+        return rawIdToken
+      }
+      return getAccessTokenSilently()
+    }
+
     const loadAssignments = async () => {
       if (!isAuthenticated) {
+        setAllowedEnvironmentIds(null)
+        return
+      }
+
+      if (isAdmin) {
         setAllowedEnvironmentIds(null)
         return
       }
@@ -35,18 +54,39 @@ export default function Dashboard() {
         const claims = await getIdTokenClaims()
         const envClaim = 'https://brouwer-ems/environments'
         const envs = (claims?.[envClaim] as string[] | undefined) ?? null
-        setAllowedEnvironmentIds(envs && envs.length > 0 ? envs : null)
+
+        if (envs && envs.length > 0) {
+          setAllowedEnvironmentIds(envs)
+          return
+        }
+
+        const token = await getAuthToken()
+        const response = await fetch('/.netlify/functions/get-user-environments', {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+
+        if (!response.ok) {
+          throw new Error('Unable to load user environments')
+        }
+
+        const data = await response.json()
+        const ids = Array.isArray(data?.environmentIds) ? data.environmentIds : []
+        setAllowedEnvironmentIds(ids)
       } catch {
-        setAllowedEnvironmentIds(null)
+        setAllowedEnvironmentIds([])
       }
     }
 
     void loadAssignments()
-  }, [getIdTokenClaims, isAuthenticated])
+  }, [getAccessTokenSilently, getIdTokenClaims, isAuthenticated, isAdmin])
 
   const visibleEnvironments = allowedEnvironmentIds
     ? environments.filter((env) => allowedEnvironmentIds.includes(env.id))
     : environments
+
+  const assignedEnvironmentLabels = allowedEnvironmentIds
+    ? visibleEnvironments.map((env) => env.name)
+    : []
 
   useEffect(() => {
     if (visibleEnvironments.length > 0 && !visibleEnvironments.find((env) => env.id === selectedEnvironment)) {
@@ -112,6 +152,27 @@ export default function Dashboard() {
               <span className="font-medium">
                 Currently monitoring: {environments.find(e => e.id === selectedEnvironment)?.name}
               </span>
+            </div>
+            <div className="mt-3 text-light-1 text-sm">
+              {allowedEnvironmentIds ? (
+                assignedEnvironmentLabels.length > 0 ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="opacity-80">Your environments:</span>
+                    {assignedEnvironmentLabels.map((label) => (
+                      <span
+                        key={label}
+                        className="px-2 py-1 rounded-full bg-light-2 bg-opacity-20 text-light-2 text-xs"
+                      >
+                        {label}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <span className="opacity-80">No environments assigned.</span>
+                )
+              ) : (
+                <span className="opacity-80">All environments available.</span>
+              )}
             </div>
           </div>
         </div>

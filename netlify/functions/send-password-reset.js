@@ -10,6 +10,10 @@ const getEnv = (key) => {
 
 export const handler = async (event) => {
   try {
+    if (event.httpMethod !== 'POST') {
+      return { statusCode: 405, body: JSON.stringify({ error: 'Method not allowed' }) }
+    }
+
     const authHeader = event.headers.authorization || event.headers.Authorization
     if (!authHeader?.startsWith('Bearer ')) {
       return { statusCode: 401, body: JSON.stringify({ error: 'Missing token' }) }
@@ -28,12 +32,37 @@ export const handler = async (event) => {
       return { statusCode: 403, body: JSON.stringify({ error: 'Admin only' }) }
     }
 
-    const managementToken = await getManagementToken(domain)
-    const users = await fetchUsers(domain, managementToken)
+    const body = JSON.parse(event.body || '{}')
+    const email = body.email?.trim()
+    const connection = body.connection?.trim() || getEnv('AUTH0_DB_CONNECTION')
+
+    if (!email) {
+      return { statusCode: 400, body: JSON.stringify({ error: 'Email is required' }) }
+    }
+
+    const clientId = process.env.AUTH0_APP_CLIENT_ID
+    if (!clientId) {
+      return { statusCode: 500, body: JSON.stringify({ error: 'Missing AUTH0_APP_CLIENT_ID' }) }
+    }
+
+    const response = await fetch(`https://${domain}/dbconnections/change_password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id: clientId,
+        email,
+        connection,
+      }),
+    })
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => null)
+      throw new Error(error?.description || error?.error || 'Unable to send reset email')
+    }
 
     return {
       statusCode: 200,
-      body: JSON.stringify({ users }),
+      body: JSON.stringify({ success: true }),
     }
   } catch (error) {
     return {
@@ -58,47 +87,4 @@ const isAdminFromClaims = (payload, rolesClaim) => {
   const email = typeof emailValue === 'string' ? emailValue.toLowerCase() : ''
   const isAllowedEmail = email.length > 0 && allowlist.includes(email)
   return roles.includes('admin') || isAllowedEmail
-}
-
-const getManagementToken = async (domain) => {
-  const response = await fetch(`https://${domain}/oauth/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      client_id: getEnv('AUTH0_M2M_CLIENT_ID'),
-      client_secret: getEnv('AUTH0_M2M_CLIENT_SECRET'),
-      audience: `https://${domain}/api/v2/`,
-      grant_type: 'client_credentials',
-    }),
-  })
-
-  if (!response.ok) {
-    throw new Error('Unable to get management token')
-  }
-
-  const data = await response.json()
-  return data.access_token
-}
-
-const fetchUsers = async (domain, token) => {
-  const response = await fetch(
-    `https://${domain}/api/v2/users?per_page=50&page=0&include_totals=false&sort=created_at:-1`,
-    {
-      headers: { Authorization: `Bearer ${token}` },
-    },
-  )
-
-  if (!response.ok) {
-    throw new Error('Unable to fetch users')
-  }
-
-  const users = await response.json()
-  return users.map((user) => ({
-    user_id: user.user_id,
-    email: user.email,
-    name: user.name,
-    last_login: user.last_login,
-    created_at: user.created_at,
-    environmentIds: Array.isArray(user.app_metadata?.environmentIds) ? user.app_metadata.environmentIds : [],
-  }))
 }
