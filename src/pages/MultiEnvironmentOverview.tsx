@@ -121,7 +121,7 @@ export default function MultiEnvironmentOverview({ isAdmin, onManageUsers }: Mul
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-dark-1 via-brand-2 to-brand-1 p-4 md:p-8">
+    <div className="app-shell min-h-screen p-4 md:p-8">
       <div className="max-w-6xl mx-auto">
         {/* Header */}
         <div className="mb-8">
@@ -171,7 +171,7 @@ export default function MultiEnvironmentOverview({ isAdmin, onManageUsers }: Mul
           {visibleEnvironments.map((env) => (
             <div
               key={env.id}
-              className="bg-light-2 bg-opacity-95 rounded-2xl p-6 shadow-xl hover:shadow-2xl transition-all cursor-pointer backdrop-blur-lg"
+              className="glass-card rounded-2xl p-6 shadow-xl hover:shadow-2xl transition-all cursor-pointer"
             >
               {/* Environment Header */}
               <div className="flex items-center justify-between mb-4">
@@ -210,7 +210,7 @@ export default function MultiEnvironmentOverview({ isAdmin, onManageUsers }: Mul
 
               {/* Action Button */}
               <button
-                className="w-full mt-4 bg-gradient-to-r from-brand-2 to-brand-3 text-light-2 py-2 px-4 rounded-lg font-medium hover:shadow-lg transition-all"
+                className="w-full mt-4 glass-button py-2 px-4 rounded-lg font-medium transition-all"
                 onClick={() => {
                   // In real app, this would navigate to the specific environment dashboard
                   console.log(`Navigate to ${env.name} dashboard`)
@@ -223,7 +223,7 @@ export default function MultiEnvironmentOverview({ isAdmin, onManageUsers }: Mul
         </div>
 
         {/* Summary Stats */}
-        <div className="bg-light-2 bg-opacity-95 rounded-2xl p-6 shadow-xl backdrop-blur-lg">
+        <div className="glass-panel rounded-2xl p-6 shadow-xl">
           <h2 className="text-2xl font-heavy text-dark-1 mb-6">Environment Summary</h2>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             <div className="text-center">

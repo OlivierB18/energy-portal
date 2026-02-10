@@ -160,7 +160,7 @@ function App() {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-brand-4 via-brand-3 to-brand-2 flex items-center justify-center">
+      <div className="app-shell min-h-screen flex items-center justify-center">
         <div className="text-light-2 text-xl">Loading...</div>
       </div>
     )
@@ -168,7 +168,7 @@ function App() {
 
   if (!isAuthenticated) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-brand-4 via-brand-3 to-brand-2 flex items-center justify-center">
+      <div className="app-shell min-h-screen flex items-center justify-center">
         <div className="bg-light-2 bg-opacity-10 backdrop-blur-sm rounded-2xl p-8 shadow-2xl max-w-md w-full mx-4">
           <div className="text-center">
             <h1 className="text-3xl font-bold text-light-2 mb-2">Inside Out</h1>

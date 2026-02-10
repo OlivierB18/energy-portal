@@ -38,7 +38,7 @@ export default function EnvironmentConfig({ environments: initialEnvironments, o
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-light-2 rounded-2xl shadow-2xl max-w-4xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+      <div className="glass-panel rounded-2xl shadow-2xl max-w-4xl w-full mx-4 max-h-[90vh] overflow-y-auto">
         <div className="p-6">
           {/* Header */}
           <div className="flex items-center justify-between mb-6">
@@ -48,16 +48,16 @@ export default function EnvironmentConfig({ environments: initialEnvironments, o
             </div>
             <button
               onClick={onClose}
-              className="p-2 hover:bg-dark-2 hover:bg-opacity-10 rounded-lg transition-colors"
+              className="p-2 hover:bg-light-2 hover:bg-opacity-10 rounded-lg transition-colors"
             >
-              <X className="w-5 h-5 text-dark-2" />
+              <X className="w-5 h-5 text-light-1" />
             </button>
           </div>
 
           {/* Instructions */}
-          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
-            <h3 className="font-medium text-blue-900 mb-2">How to configure Home Assistant access:</h3>
-            <ol className="text-sm text-blue-800 space-y-1">
+          <div className="glass-panel border border-brand-2 border-opacity-30 rounded-lg p-4 mb-6">
+            <h3 className="font-medium text-light-2 mb-2">How to configure Home Assistant access:</h3>
+            <ol className="text-sm text-light-1 space-y-1">
               <li>1. Go to your Home Assistant instance</li>
               <li>2. Navigate to Settings → People → Long-Lived Access Tokens</li>
               <li>3. Create a new token and copy it</li>
@@ -70,7 +70,7 @@ export default function EnvironmentConfig({ environments: initialEnvironments, o
             {environments.map((env, index) => (
               <div key={env.id} className="border border-dark-2 border-opacity-20 rounded-lg p-4">
                 <div className="flex items-center justify-between mb-3">
-                  <h4 className="font-medium text-dark-1">Environment {index + 1}</h4>
+                  <h4 className="font-medium text-light-2">Environment {index + 1}</h4>
                   <button
                     onClick={() => removeEnvironment(env.id)}
                     className="p-1 text-red-500 hover:bg-red-50 rounded transition-colors"
@@ -82,7 +82,7 @@ export default function EnvironmentConfig({ environments: initialEnvironments, o
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   <div>
-                    <label className="block text-sm font-medium text-dark-2 mb-1">
+                    <label className="block text-sm font-medium text-light-1 mb-1">
                       Environment Name
                     </label>
                     <input
@@ -95,7 +95,7 @@ export default function EnvironmentConfig({ environments: initialEnvironments, o
                   </div>
 
                   <div>
-                    <label className="block text-sm font-medium text-dark-2 mb-1">
+                    <label className="block text-sm font-medium text-light-1 mb-1">
                       Home Assistant URL
                     </label>
                     <input
@@ -108,7 +108,7 @@ export default function EnvironmentConfig({ environments: initialEnvironments, o
                   </div>
 
                   <div>
-                    <label className="block text-sm font-medium text-dark-2 mb-1">
+                    <label className="block text-sm font-medium text-light-1 mb-1">
                       Access Token
                     </label>
                     <input
@@ -137,7 +137,7 @@ export default function EnvironmentConfig({ environments: initialEnvironments, o
           <div className="flex justify-end gap-3">
             <button
               onClick={onClose}
-              className="px-4 py-2 text-dark-2 hover:bg-dark-2 hover:bg-opacity-10 rounded-lg transition-colors"
+              className="px-4 py-2 text-light-1 hover:bg-light-2 hover:bg-opacity-10 rounded-lg transition-colors"
             >
               Cancel
             </button>

@@ -190,9 +190,9 @@ export default function Users({ isAdmin }: UsersProps) {
 
   if (!isAdmin) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-dark-1 via-brand-2 to-brand-1 p-4 md:p-8">
+      <div className="app-shell min-h-screen p-4 md:p-8">
         <div className="max-w-4xl mx-auto">
-          <div className="bg-light-2 bg-opacity-10 rounded-2xl p-8 backdrop-blur-sm text-center">
+          <div className="glass-panel rounded-2xl p-8 text-center">
             <ShieldAlert className="w-10 h-10 text-yellow-300 mx-auto mb-4" />
             <h1 className="text-2xl font-heavy text-light-2 mb-2">Admin access required</h1>
             <p className="text-light-1">You don’t have permission to view users.</p>
@@ -203,7 +203,7 @@ export default function Users({ isAdmin }: UsersProps) {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-dark-1 via-brand-2 to-brand-1 p-4 md:p-8">
+    <div className="app-shell min-h-screen p-4 md:p-8">
       <div className="max-w-5xl mx-auto">
         <div className="flex items-center gap-3 mb-6">
           <UsersIcon className="w-8 h-8 text-brand-2" />
@@ -213,7 +213,7 @@ export default function Users({ isAdmin }: UsersProps) {
           </div>
         </div>
 
-        <div className="bg-light-2 bg-opacity-95 rounded-2xl p-6 shadow-xl backdrop-blur-lg mb-6">
+        <div className="glass-panel rounded-2xl p-6 shadow-xl mb-6">
           <h2 className="text-xl font-heavy text-dark-1 mb-4">Invite user</h2>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <input
@@ -264,7 +264,7 @@ export default function Users({ isAdmin }: UsersProps) {
           </div>
         </div>
 
-        <div className="bg-light-2 bg-opacity-95 rounded-2xl p-6 shadow-xl backdrop-blur-lg">
+        <div className="glass-panel rounded-2xl p-6 shadow-xl">
           {isLoading && <p className="text-dark-2">Loading users...</p>}
           {error && <p className="text-red-600">{error}</p>}
           {!isLoading && !error && users.length === 0 && (

@@ -23,21 +23,21 @@ export default function EnergyCard({ title, value, unit, cost, icon }: EnergyCar
   }
 
   return (
-    <div className="bg-gradient-to-br from-light-1 to-light-2 rounded-2xl p-6 shadow-lg hover:shadow-xl transition-shadow">
+    <div className="glass-card rounded-2xl p-6 shadow-lg hover:shadow-xl transition-all">
       <div className="flex items-start justify-between mb-4">
         <div>
-          <p className="text-dark-2 text-sm font-medium mb-2">{title}</p>
+          <p className="text-light-1 text-sm font-medium mb-2">{title}</p>
           <div className="flex items-baseline gap-2">
-            <span className="text-3xl font-heavy text-dark-1">{value}</span>
-            {unit && <span className="text-dark-2 font-medium">{unit}</span>}
+            <span className="text-3xl font-heavy text-light-2">{value}</span>
+            {unit && <span className="text-light-1 font-medium">{unit}</span>}
           </div>
         </div>
-        <div className="bg-gradient-to-br from-brand-1 to-brand-2 p-3 rounded-xl">{getIcon()}</div>
+        <div className="bg-gradient-to-br from-brand-2 to-brand-3 p-3 rounded-xl">{getIcon()}</div>
       </div>
       {cost !== null && (
         <div className="pt-4 border-t border-dark-2 border-opacity-10">
-          <p className="text-dark-2 text-sm">Estimated cost</p>
-          <p className="text-xl font-heavy text-dark-1">€{cost.toFixed(2)}</p>
+          <p className="text-light-1 text-sm">Estimated cost</p>
+          <p className="text-xl font-heavy text-light-2">€{cost.toFixed(2)}</p>
         </div>
       )}
     </div>

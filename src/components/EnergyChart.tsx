@@ -27,26 +27,26 @@ export default function EnergyChart({ data, timeRange }: EnergyChartProps) {
               <stop offset="95%" stopColor="rgb(2, 125, 94)" stopOpacity={0.1} />
             </linearGradient>
           </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke="rgb(234, 233, 229)" />
+          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255, 255, 255, 0.08)" />
           <XAxis
             dataKey="time"
-            stroke="rgb(18, 22, 24)"
+            stroke="rgb(234, 233, 229)"
             style={{ fontSize: '0.875rem' }}
           />
           <YAxis
-            stroke="rgb(18, 22, 24)"
+            stroke="rgb(234, 233, 229)"
             label={{ value: 'kW', angle: -90, position: 'insideLeft' }}
             style={{ fontSize: '0.875rem' }}
           />
           <Tooltip
             contentStyle={{
-              backgroundColor: 'rgb(255, 255, 255)',
-              border: 'none',
+              backgroundColor: 'rgba(10, 10, 10, 0.95)',
+              border: '1px solid rgba(255, 255, 255, 0.08)',
               borderRadius: '0.5rem',
-              boxShadow: '0 10px 25px rgba(0, 0, 0, 0.1)',
+              boxShadow: '0 10px 25px rgba(0, 0, 0, 0.4)',
             }}
             formatter={(value: number) => [`${value.toFixed(2)} kW`, 'Power']}
-            labelStyle={{ color: 'rgb(18, 22, 24)' }}
+            labelStyle={{ color: 'rgb(234, 233, 229)' }}
           />
           <Line
             type="monotone"
@@ -61,7 +61,7 @@ export default function EnergyChart({ data, timeRange }: EnergyChartProps) {
           />
         </LineChart>
       </ResponsiveContainer>
-      <p className="text-center text-dark-2 text-sm mt-4">
+      <p className="text-center text-light-1 text-sm mt-4">
         Energy consumption for {timeRange === 'today' ? 'today' : timeRange === 'week' ? 'this week' : 'this month'}
       </p>
     </div>

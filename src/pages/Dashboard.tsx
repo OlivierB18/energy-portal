@@ -115,7 +115,7 @@ export default function Dashboard({ isAdmin }: DashboardProps) {
   ]
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-dark-1 via-brand-2 to-brand-1 p-4 md:p-8">
+    <div className="app-shell min-h-screen p-4 md:p-8">
       <div className="max-w-6xl mx-auto">
         {/* Header with Environment Selector */}
         <div className="mb-8">
@@ -178,7 +178,7 @@ export default function Dashboard({ isAdmin }: DashboardProps) {
         </div>
 
         {/* Main Current Power Display */}
-        <div className="bg-light-2 rounded-3xl shadow-2xl p-8 mb-8 backdrop-blur-lg bg-opacity-95">
+        <div className="glass-panel rounded-3xl shadow-2xl p-8 mb-8">
           <div className="flex items-center justify-between mb-6">
             <div>
               <p className="text-dark-2 text-sm font-medium uppercase">Current Power Usage</p>
@@ -225,14 +225,14 @@ export default function Dashboard({ isAdmin }: DashboardProps) {
         </div>
 
         {/* Time Range Selector */}
-        <div className="bg-light-2 rounded-xl shadow-lg p-4 mb-8 backdrop-blur-lg bg-opacity-95">
+        <div className="glass-panel rounded-xl shadow-lg p-4 mb-8">
           <div className="flex gap-4">
             <button
               onClick={() => setTimeRange('today')}
               className={`flex-1 py-3 px-4 rounded-lg font-medium transition-all ${
                 timeRange === 'today'
-                  ? 'bg-gradient-to-r from-brand-2 to-brand-3 text-light-2'
-                  : 'bg-light-1 text-dark-1 hover:bg-brand-1 hover:bg-opacity-10'
+                  ? 'glass-button'
+                  : 'bg-dark-2 bg-opacity-70 text-light-1 hover:bg-opacity-90'
               }`}
             >
               Today
@@ -241,8 +241,8 @@ export default function Dashboard({ isAdmin }: DashboardProps) {
               onClick={() => setTimeRange('week')}
               className={`flex-1 py-3 px-4 rounded-lg font-medium transition-all ${
                 timeRange === 'week'
-                  ? 'bg-gradient-to-r from-brand-2 to-brand-3 text-light-2'
-                  : 'bg-light-1 text-dark-1 hover:bg-brand-1 hover:bg-opacity-10'
+                  ? 'glass-button'
+                  : 'bg-dark-2 bg-opacity-70 text-light-1 hover:bg-opacity-90'
               }`}
             >
               This Week
@@ -251,8 +251,8 @@ export default function Dashboard({ isAdmin }: DashboardProps) {
               onClick={() => setTimeRange('month')}
               className={`flex-1 py-3 px-4 rounded-lg font-medium transition-all ${
                 timeRange === 'month'
-                  ? 'bg-gradient-to-r from-brand-2 to-brand-3 text-light-2'
-                  : 'bg-light-1 text-dark-1 hover:bg-brand-1 hover:bg-opacity-10'
+                  ? 'glass-button'
+                  : 'bg-dark-2 bg-opacity-70 text-light-1 hover:bg-opacity-90'
               }`}
             >
               This Month
@@ -261,7 +261,7 @@ export default function Dashboard({ isAdmin }: DashboardProps) {
         </div>
 
         {/* Chart Section */}
-        <div className="bg-light-2 rounded-3xl shadow-2xl p-8 backdrop-blur-lg bg-opacity-95">
+        <div className="glass-panel rounded-3xl shadow-2xl p-8">
           <h2 className="text-2xl font-heavy text-dark-1 mb-6 flex items-center gap-2">
             <Clock className="w-6 h-6 text-brand-2" />
             Energy Consumption Chart
