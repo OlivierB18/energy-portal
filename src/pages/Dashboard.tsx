@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react'
 import EnergyCard from '../components/EnergyCard'
 import EnergyChart from '../components/EnergyChart'
+import HomeAssistantConfig from '../components/HomeAssistantConfig'
 import { Zap, TrendingUp, Clock, Home, Settings } from 'lucide-react'
 import { useAuth0 } from '@auth0/auth0-react'
+import { HaEntity } from '../types'
 
 interface Environment {
   id: string
@@ -19,13 +21,19 @@ export default function Dashboard({ isAdmin }: DashboardProps) {
   const [selectedEnvironment, setSelectedEnvironment] = useState<string>('home')
   const [timeRange, setTimeRange] = useState<'today' | 'week' | 'month'>('today')
   const [allowedEnvironmentIds, setAllowedEnvironmentIds] = useState<string[] | null>(null)
+  const [haEntities, setHaEntities] = useState<HaEntity[]>([])
+  const [haLoading, setHaLoading] = useState(false)
+  const [haError, setHaError] = useState<string | null>(null)
+  const [haActionId, setHaActionId] = useState<string | null>(null)
+  const [showHaConfig, setShowHaConfig] = useState(false)
+  const [haRefreshKey, setHaRefreshKey] = useState(0)
   const { isAuthenticated, getIdTokenClaims, getAccessTokenSilently } = useAuth0()
 
   // Mock environments - in real app, this would come from config
   const environments: Environment[] = [
     { id: 'home', name: 'Home', url: 'http://homeassistant.local:8123', token: 'your_token_here' },
     { id: 'office', name: 'Office', url: 'http://office-ha.local:8123', token: 'your_token_here' },
-    { id: 'vacation', name: 'Vacation Home', url: 'http://vacation-ha.local:8123', token: 'your_token_here' },
+    { id: 'vacation', name: 'Brouwer TEST', url: 'https://olivierbrouwer.iofoxtrot.work', token: 'your_token_here' },
     { id: 'dhvw', name: 'DHVW', url: 'http://dhvw-ha.local:8123', token: 'your_token_here' }
   ]
 
@@ -93,6 +101,97 @@ export default function Dashboard({ isAdmin }: DashboardProps) {
       setSelectedEnvironment(visibleEnvironments[0].id)
     }
   }, [selectedEnvironment, visibleEnvironments])
+
+  useEffect(() => {
+    const loadHaEntities = async () => {
+      if (!isAuthenticated) {
+        setHaEntities([])
+        return
+      }
+
+      setHaLoading(true)
+      setHaError(null)
+
+      try {
+        const token = await getAccessTokenSilently()
+        const response = await fetch(`/.netlify/functions/ha-entities?environmentId=${selectedEnvironment}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+
+        if (!response.ok) {
+          const data = await response.json().catch(() => null)
+          throw new Error(data?.error || 'Unable to load Home Assistant data')
+        }
+
+        const data = await response.json()
+        setHaEntities(Array.isArray(data?.entities) ? data.entities : [])
+      } catch (error) {
+        setHaError(error instanceof Error ? error.message : 'Unable to load Home Assistant data')
+        setHaEntities([])
+      } finally {
+        setHaLoading(false)
+      }
+    }
+
+    void loadHaEntities()
+  }, [getAccessTokenSilently, isAuthenticated, selectedEnvironment, haRefreshKey])
+
+  const getControlActions = (domain: string) => {
+    switch (domain) {
+      case 'switch':
+      case 'light':
+      case 'input_boolean':
+        return [
+          { label: 'On', action: 'turn_on' },
+          { label: 'Off', action: 'turn_off' },
+        ]
+      case 'button':
+        return [{ label: 'Press', action: 'press' }]
+      case 'script':
+        return [{ label: 'Run', action: 'turn_on' }]
+      case 'scene':
+        return [{ label: 'Activate', action: 'turn_on' }]
+      default:
+        return []
+    }
+  }
+
+  const runHaAction = async (entityId: string, action: string) => {
+    try {
+      setHaActionId(entityId)
+      const token = await getAccessTokenSilently()
+      const response = await fetch('/.netlify/functions/ha-service', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          environmentId: selectedEnvironment,
+          entityId,
+          action,
+        }),
+      })
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => null)
+        throw new Error(data?.error || 'Unable to run action')
+      }
+
+      const refresh = await fetch(`/.netlify/functions/ha-entities?environmentId=${selectedEnvironment}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+
+      if (refresh.ok) {
+        const data = await refresh.json()
+        setHaEntities(Array.isArray(data?.entities) ? data.entities : [])
+      }
+    } catch (error) {
+      setHaError(error instanceof Error ? error.message : 'Unable to run action')
+    } finally {
+      setHaActionId(null)
+    }
+  }
 
   // Mock data for demonstration - in real app, this would fetch from selected environment
   const mockData = {
@@ -269,10 +368,79 @@ export default function Dashboard({ isAdmin }: DashboardProps) {
           <EnergyChart data={chartData} timeRange={timeRange} />
         </div>
 
+        {/* Home Assistant Panel */}
+        <div className="glass-panel rounded-3xl shadow-2xl p-8 mt-8">
+          <div className="flex items-center justify-between mb-6">
+            <h2 className="text-2xl font-heavy text-dark-1">Home Assistant</h2>
+            {isAdmin && (
+              <button
+                onClick={() => setShowHaConfig(true)}
+                className="glass-button px-4 py-2 rounded-lg font-medium"
+              >
+                Configure sensors
+              </button>
+            )}
+          </div>
+
+          {haLoading && <p className="text-light-1">Loading Home Assistant data...</p>}
+          {haError && <p className="text-red-300">{haError}</p>}
+          {!haLoading && !haError && haEntities.length === 0 && (
+            <p className="text-light-1">No sensors selected for this environment.</p>
+          )}
+
+          {!haLoading && haEntities.length > 0 && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {haEntities.map((entity) => {
+                const actions = getControlActions(entity.domain)
+                return (
+                  <div key={entity.entity_id} className="glass-card rounded-2xl p-5">
+                    <div className="flex items-start justify-between mb-3">
+                      <div>
+                        <p className="text-light-1 text-xs uppercase">{entity.domain}</p>
+                        <p className="text-light-2 font-medium">
+                          {entity.friendly_name || entity.entity_id}
+                        </p>
+                        <p className="text-light-1 text-xs">{entity.entity_id}</p>
+                      </div>
+                      <div className="text-light-2 text-sm">{entity.state}</div>
+                    </div>
+                    {actions.length > 0 && (
+                      <div className="flex flex-wrap gap-2">
+                        {actions.map((action) => (
+                          <button
+                            key={`${entity.entity_id}-${action.action}`}
+                            onClick={() => runHaAction(entity.entity_id, action.action)}
+                            disabled={haActionId === entity.entity_id}
+                            className="px-3 py-2 rounded-lg bg-dark-2 bg-opacity-70 text-light-1 hover:bg-opacity-90 transition-all disabled:opacity-60"
+                          >
+                            {action.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+
         {/* Footer Info */}
         <div className="mt-8 text-center text-light-1 text-sm">
           <p>Last updated: {new Date().toLocaleTimeString()}</p>
         </div>
+
+        {showHaConfig && (
+          <HomeAssistantConfig
+            environmentId={selectedEnvironment}
+            environmentName={environments.find((env) => env.id === selectedEnvironment)?.name || selectedEnvironment}
+            onClose={() => setShowHaConfig(false)}
+            onSaved={() => {
+              setHaError(null)
+              setHaRefreshKey((prev) => prev + 1)
+            }}
+          />
+        )}
       </div>
     </div>
   )

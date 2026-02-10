@@ -90,7 +90,7 @@ export default function EnvironmentConfig({ environments: initialEnvironments, o
                       value={env.name}
                       onChange={(e) => updateEnvironment(env.id, 'name', e.target.value)}
                       className="w-full px-3 py-2 border border-dark-2 border-opacity-20 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-2"
-                      placeholder="e.g., Home, Office, Vacation Home"
+                      placeholder="e.g., Home, Office, Brouwer TEST"
                     />
                   </div>
 

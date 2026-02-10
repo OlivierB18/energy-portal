@@ -15,7 +15,7 @@ function App() {
   const environmentLabelMap: Record<string, string> = {
     home: 'Home',
     office: 'Office',
-    vacation: 'Vacation Home',
+    vacation: 'Brouwer TEST',
     dhvw: 'DHVW',
   }
 

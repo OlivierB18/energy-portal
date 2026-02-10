@@ -34,8 +34,8 @@ export default function MultiEnvironmentOverview({ isAdmin, onManageUsers }: Mul
     },
     {
       id: 'vacation',
-      name: 'Vacation Home',
-      url: 'http://vacation-ha.local:8123',
+      name: 'Brouwer TEST',
+      url: 'https://olivierbrouwer.iofoxtrot.work',
       status: 'offline',
       lastUpdate: '3 hours ago'
     },
@@ -155,13 +155,15 @@ export default function MultiEnvironmentOverview({ isAdmin, onManageUsers }: Mul
                   Add environment
                 </button>
               )}
-              <button
-                onClick={() => setShowConfig(true)}
-                className="flex items-center gap-2 px-4 py-2 bg-light-2 bg-opacity-20 text-light-2 rounded-lg hover:bg-opacity-30 transition-all backdrop-blur-sm"
-              >
-                <Settings className="w-5 h-5" />
-                Configure
-              </button>
+              {isAdmin && (
+                <button
+                  onClick={() => setShowConfig(true)}
+                  className="flex items-center gap-2 px-4 py-2 bg-light-2 bg-opacity-20 text-light-2 rounded-lg hover:bg-opacity-30 transition-all backdrop-blur-sm"
+                >
+                  <Settings className="w-5 h-5" />
+                  Configure
+                </button>
+              )}
             </div>
           </div>
         </div>

@@ -8,3 +8,10 @@ export interface Environment {
   dailyUsage?: number
   lastUpdate?: string
 }
+
+export interface HaEntity {
+  entity_id: string
+  state: string
+  domain: string
+  friendly_name?: string
+}

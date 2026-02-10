@@ -31,7 +31,7 @@ export default function Users({ isAdmin }: UsersProps) {
   const environmentOptions = [
     { id: 'home', label: 'Home' },
     { id: 'office', label: 'Office' },
-    { id: 'vacation', label: 'Vacation Home' },
+    { id: 'vacation', label: 'Brouwer TEST' },
     { id: 'dhvw', label: 'DHVW' },
   ]
 
