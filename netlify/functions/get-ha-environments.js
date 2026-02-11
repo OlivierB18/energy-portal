@@ -8,6 +8,36 @@ const getEnv = (key) => {
   return value
 }
 
+const getOptionalEnv = (key) => {
+  const value = process.env[key]
+  return value && value.trim().length > 0 ? value : null
+}
+
+const HA_ENVIRONMENTS = {
+  vacation: {
+    name: 'Brouwer TEST',
+    urlEnv: 'HA_BROUWER_TEST_URL',
+    tokenEnv: 'HA_BROUWER_TEST_TOKEN',
+  },
+}
+
+const getFallbackEnvironments = () =>
+  Object.entries(HA_ENVIRONMENTS)
+    .map(([id, env]) => {
+      const url = getOptionalEnv(env.urlEnv)
+      const token = getOptionalEnv(env.tokenEnv)
+      if (!url || !token) {
+        return null
+      }
+      return {
+        id,
+        name: env.name || id,
+        url,
+        token,
+      }
+    })
+    .filter(Boolean)
+
 const getManagementToken = async (domain) => {
   const response = await fetch(`https://${domain}/oauth/token`, {
     method: 'POST',
@@ -82,21 +112,32 @@ export const handler = async (event) => {
     }
 
     const { isAdmin } = await verifyAuth(event)
-    const domain = getEnv('AUTH0_DOMAIN')
-    const managementToken = await getManagementToken(domain)
-    const metadata = await getClientMetadata(domain, managementToken)
-    const haEnvironments = metadata.ha_environments || {}
+    const fallbackEnvironments = getFallbackEnvironments()
+    let environments = []
 
-    const environments = Object.entries(haEnvironments).map(([id, env]) => ({
-      id,
-      name: env?.name || id,
-      url: env?.base_url || env?.url || '',
-      token: env?.token,
-    }))
+    try {
+      const domain = getEnv('AUTH0_DOMAIN')
+      const managementToken = await getManagementToken(domain)
+      const metadata = await getClientMetadata(domain, managementToken)
+      const haEnvironments = metadata.ha_environments || {}
+
+      environments = Object.entries(haEnvironments).map(([id, env]) => ({
+        id,
+        name: env?.name || id,
+        url: env?.base_url || env?.url || '',
+        token: env?.token,
+      }))
+    } catch (error) {
+      if (fallbackEnvironments.length === 0) {
+        throw error
+      }
+    }
+
+    const resolved = environments.length > 0 ? environments : fallbackEnvironments
 
     const payload = isAdmin
-      ? environments
-      : environments.map((env) => ({ id: env.id, name: env.name }))
+      ? resolved
+      : resolved.map((env) => ({ id: env.id, name: env.name }))
 
     return {
       statusCode: 200,
