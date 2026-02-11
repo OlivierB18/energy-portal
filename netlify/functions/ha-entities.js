@@ -160,10 +160,20 @@ export const handler = async (event) => {
 
     const { isAdmin } = await verifyAuth(event)
     const domain = getEnv('AUTH0_DOMAIN')
-    const managementToken = await getManagementToken(domain)
-    const metadata = await getClientMetadata(domain, managementToken)
-    const { baseUrl, token } = getHaConfig(metadata, environmentId)
-    const visibleEntityIds = isAdmin ? null : getVisibleEntityIds(metadata, environmentId)
+    let metadata = null
+
+    try {
+      const managementToken = await getManagementToken(domain)
+      metadata = await getClientMetadata(domain, managementToken)
+    } catch (error) {
+      if (!isAdmin) {
+        throw error
+      }
+    }
+
+    const resolvedMetadata = metadata || {}
+    const { baseUrl, token } = getHaConfig(resolvedMetadata, environmentId)
+    const visibleEntityIds = isAdmin ? null : getVisibleEntityIds(resolvedMetadata, environmentId)
 
     if (!isAdmin && visibleEntityIds.length === 0) {
       return { statusCode: 200, body: JSON.stringify({ entities: [] }) }

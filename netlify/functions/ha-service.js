@@ -179,17 +179,27 @@ export const handler = async (event) => {
     }
 
     const domain = getEnv('AUTH0_DOMAIN')
-    const managementToken = await getManagementToken(domain)
-    const metadata = await getClientMetadata(domain, managementToken)
+    let metadata = null
+
+    try {
+      const managementToken = await getManagementToken(domain)
+      metadata = await getClientMetadata(domain, managementToken)
+    } catch (error) {
+      if (!isAdmin) {
+        throw error
+      }
+    }
+
+    const resolvedMetadata = metadata || {}
 
     if (!isAdmin) {
-      const visibleEntityIds = getVisibleEntityIds(metadata, environmentId)
+      const visibleEntityIds = getVisibleEntityIds(resolvedMetadata, environmentId)
       if (!visibleEntityIds.includes(entityId)) {
         return { statusCode: 403, body: JSON.stringify({ error: 'Entity not permitted' }) }
       }
     }
 
-    const { baseUrl, token } = getHaConfig(metadata, environmentId)
+    const { baseUrl, token } = getHaConfig(resolvedMetadata, environmentId)
 
     const response = await fetch(`${baseUrl}/api/services/${domain}/${action}`, {
       method: 'POST',
