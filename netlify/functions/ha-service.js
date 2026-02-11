@@ -25,12 +25,27 @@ const ALLOWED_ACTIONS = {
 }
 
 const getHaConfig = (metadata, environmentId) => {
-  const haEnvironments = metadata.ha_environments || {}
-  const envConfig = haEnvironments[environmentId]
+  const envMap = metadata.environments || {}
+  const envConfig = envMap[environmentId]
 
   if (envConfig) {
-    const baseUrl = envConfig.base_url || envConfig.url
-    const token = envConfig.token
+    if (envConfig.type && envConfig.type !== 'home_assistant') {
+      throw new Error('Environment is not Home Assistant')
+    }
+
+    const config = envConfig.config || {}
+    const baseUrl = config.base_url || config.baseUrl || envConfig.base_url || envConfig.url
+    const token = config.api_key || config.apiKey || envConfig.token
+    if (baseUrl && token) {
+      return { baseUrl, token }
+    }
+  }
+
+  const legacyMap = metadata.ha_environments || {}
+  const legacy = legacyMap[environmentId]
+  if (legacy) {
+    const baseUrl = legacy.base_url || legacy.url
+    const token = legacy.token
     if (baseUrl && token) {
       return { baseUrl, token }
     }

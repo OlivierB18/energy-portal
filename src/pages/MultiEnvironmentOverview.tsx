@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Home, Zap, Activity, Wifi, WifiOff, Settings } from 'lucide-react'
 import EnvironmentConfig from '../components/EnvironmentConfig'
+import EnvironmentDetails from '../components/EnvironmentDetails'
 import { Environment } from '../types'
 import { useAuth0 } from '@auth0/auth0-react'
 
@@ -13,8 +14,20 @@ interface MultiEnvironmentOverviewProps {
 interface HaEnvironmentPayload {
   id: string
   name?: string
-  url?: string
-  token?: string
+  type?: string
+  config?: {
+    baseUrl?: string
+    apiKey?: string
+    siteId?: string
+    notes?: string
+  }
+}
+
+interface UserSummary {
+  user_id: string
+  name?: string
+  email?: string
+  environmentIds?: string[]
 }
 
 export default function MultiEnvironmentOverview({
@@ -26,6 +39,10 @@ export default function MultiEnvironmentOverview({
   const [allowedEnvironmentIds, setAllowedEnvironmentIds] = useState<string[] | null>(null)
   const [envLoading, setEnvLoading] = useState(false)
   const [envError, setEnvError] = useState<string | null>(null)
+  const [detailEnvironment, setDetailEnvironment] = useState<Environment | null>(null)
+  const [detailUsers, setDetailUsers] = useState<UserSummary[]>([])
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [detailError, setDetailError] = useState<string | null>(null)
   const { isAuthenticated, getIdTokenClaims, getAccessTokenSilently } = useAuth0()
   const [environments, setEnvironments] = useState<Environment[]>([])
 
@@ -63,8 +80,13 @@ export default function MultiEnvironmentOverview({
         const nextEnvironments: Environment[] = loaded.map((env: HaEnvironmentPayload) => ({
           id: String(env.id),
           name: String(env.name || env.id),
-          url: String(env.url || ''),
-          token: typeof env.token === 'string' ? env.token : undefined,
+          type: (env.type as Environment['type']) || 'home_assistant',
+          config: {
+            baseUrl: env.config?.baseUrl || '',
+            apiKey: env.config?.apiKey || '',
+            siteId: env.config?.siteId || '',
+            notes: env.config?.notes || '',
+          },
           status: 'offline',
           lastUpdate: 'just now',
         }))
@@ -82,12 +104,10 @@ export default function MultiEnvironmentOverview({
 
   useEffect(() => {
     const getAuthToken = async () => {
-      const idTokenClaims = await getIdTokenClaims().catch(() => null)
-      const rawIdToken = idTokenClaims?.__raw
-      if (rawIdToken) {
-        return rawIdToken
-      }
-      return getAccessTokenSilently()
+      const audience = import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined
+      return getAccessTokenSilently({
+        authorizationParams: { audience },
+      })
     }
 
     const loadAssignments = async () => {
@@ -131,6 +151,48 @@ export default function MultiEnvironmentOverview({
     void loadAssignments()
   }, [getAccessTokenSilently, getIdTokenClaims, isAuthenticated, isAdmin])
 
+  const loadEnvironmentUsers = async (environmentId: string) => {
+    if (!isAdmin) {
+      setDetailUsers([])
+      return
+    }
+
+    setDetailLoading(true)
+    setDetailError(null)
+
+    try {
+      const token = await getAuthToken()
+      const response = await fetch('/.netlify/functions/list-users', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+
+      if (!response.ok) {
+        throw new Error('Unable to load users')
+      }
+
+      const data = await response.json()
+      const users = Array.isArray(data?.users) ? data.users : []
+      const filtered = users.filter((user: UserSummary) =>
+        Array.isArray(user.environmentIds)
+          ? user.environmentIds.includes(environmentId)
+          : false,
+      )
+      setDetailUsers(filtered)
+    } catch (error) {
+      setDetailError(error instanceof Error ? error.message : 'Unable to load users')
+      setDetailUsers([])
+    } finally {
+      setDetailLoading(false)
+    }
+  }
+
+  const openDetails = (env: Environment) => {
+    setDetailEnvironment(env)
+    setDetailUsers([])
+    setDetailError(null)
+    void loadEnvironmentUsers(env.id)
+  }
+
   const visibleEnvironments = allowedEnvironmentIds
     ? environments.filter((env) => allowedEnvironmentIds.includes(env.id))
     : environments
@@ -150,8 +212,8 @@ export default function MultiEnvironmentOverview({
           environments: nextEnvironments.map((env) => ({
             id: env.id,
             name: env.name,
-            url: env.url,
-            token: env.token,
+            type: env.type,
+            config: env.config,
           })),
         }),
       })
@@ -288,9 +350,7 @@ export default function MultiEnvironmentOverview({
               {/* Action Button */}
               <button
                 className="w-full mt-4 glass-button py-2 px-4 rounded-lg font-medium transition-all"
-                onClick={() => {
-                  onOpenEnvironment(env.id)
-                }}
+                onClick={() => openDetails(env)}
               >
                 View Details
               </button>
@@ -329,6 +389,20 @@ export default function MultiEnvironmentOverview({
             environments={environments}
             onSave={handleSaveEnvironments}
             onClose={() => setShowConfig(false)}
+          />
+        )}
+
+        {detailEnvironment && (
+          <EnvironmentDetails
+            environment={detailEnvironment}
+            users={detailUsers}
+            isLoading={detailLoading}
+            error={detailError}
+            onClose={() => setDetailEnvironment(null)}
+            onOpenDashboard={() => {
+              onOpenEnvironment(detailEnvironment.id)
+              setDetailEnvironment(null)
+            }}
           />
         )}
       </div>

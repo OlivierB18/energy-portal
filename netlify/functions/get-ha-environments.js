@@ -32,11 +32,49 @@ const getFallbackEnvironments = () =>
       return {
         id,
         name: env.name || id,
-        url,
-        token,
+        type: 'home_assistant',
+        config: {
+          baseUrl: url,
+          apiKey: token,
+        },
       }
     })
     .filter(Boolean)
+
+const normalizeConfigValue = (value) => (value ? String(value) : '')
+
+const mapMetadataEnvironments = (metadata) => {
+  const envMap = metadata?.environments || {}
+  return Object.entries(envMap).map(([id, env]) => {
+    const config = env?.config || {}
+    return {
+      id,
+      name: env?.name || id,
+      type: env?.type || 'home_assistant',
+      config: {
+        baseUrl: normalizeConfigValue(config.base_url || config.baseUrl || env?.base_url || env?.url),
+        apiKey: normalizeConfigValue(config.api_key || config.apiKey || env?.token),
+        siteId: normalizeConfigValue(config.site_id || config.siteId),
+        notes: normalizeConfigValue(config.notes),
+      },
+    }
+  })
+}
+
+const mapLegacyHaEnvironments = (metadata) => {
+  const haEnvironments = metadata?.ha_environments || {}
+  return Object.entries(haEnvironments).map(([id, env]) => ({
+    id,
+    name: env?.name || id,
+    type: 'home_assistant',
+    config: {
+      baseUrl: normalizeConfigValue(env?.base_url || env?.url),
+      apiKey: normalizeConfigValue(env?.token),
+      siteId: '',
+      notes: '',
+    },
+  }))
+}
 
 const getManagementToken = async (domain) => {
   const response = await fetch(`https://${domain}/oauth/token`, {
@@ -119,14 +157,8 @@ export const handler = async (event) => {
       const domain = getEnv('AUTH0_DOMAIN')
       const managementToken = await getManagementToken(domain)
       const metadata = await getClientMetadata(domain, managementToken)
-      const haEnvironments = metadata.ha_environments || {}
-
-      environments = Object.entries(haEnvironments).map(([id, env]) => ({
-        id,
-        name: env?.name || id,
-        url: env?.base_url || env?.url || '',
-        token: env?.token,
-      }))
+      const mapped = mapMetadataEnvironments(metadata)
+      environments = mapped.length > 0 ? mapped : mapLegacyHaEnvironments(metadata)
     } catch (error) {
       if (fallbackEnvironments.length === 0) {
         throw error
@@ -137,7 +169,7 @@ export const handler = async (event) => {
 
     const payload = isAdmin
       ? resolved
-      : resolved.map((env) => ({ id: env.id, name: env.name }))
+      : resolved.map((env) => ({ id: env.id, name: env.name, type: env.type }))
 
     return {
       statusCode: 200,

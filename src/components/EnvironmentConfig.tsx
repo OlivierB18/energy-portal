@@ -15,8 +15,13 @@ export default function EnvironmentConfig({ environments: initialEnvironments, o
     const newEnv: Environment = {
       id: `env_${Date.now()}`,
       name: `Environment ${environments.length + 1}`,
-      url: '',
-      token: '',
+      type: 'home_assistant',
+      config: {
+        baseUrl: '',
+        apiKey: '',
+        siteId: '',
+        notes: '',
+      },
       status: 'offline'
     }
     setEnvironments([...environments, newEnv])
@@ -26,9 +31,15 @@ export default function EnvironmentConfig({ environments: initialEnvironments, o
     setEnvironments(environments.filter(env => env.id !== id))
   }
 
-  const updateEnvironment = (id: string, field: keyof Environment, value: string) => {
+  const updateEnvironment = (id: string, field: 'id' | 'name' | 'type', value: string) => {
     setEnvironments(environments.map(env =>
       env.id === id ? { ...env, [field]: value } : env
+    ))
+  }
+
+  const updateEnvironmentConfig = (id: string, field: keyof Environment['config'], value: string) => {
+    setEnvironments(environments.map(env =>
+      env.id === id ? { ...env, config: { ...env.config, [field]: value } } : env
     ))
   }
 
@@ -56,12 +67,12 @@ export default function EnvironmentConfig({ environments: initialEnvironments, o
 
           {/* Instructions */}
           <div className="glass-panel border border-brand-2 border-opacity-30 rounded-lg p-4 mb-6">
-            <h3 className="font-medium text-light-2 mb-2">How to configure Home Assistant access:</h3>
+            <h3 className="font-medium text-light-2 mb-2">How to configure API access:</h3>
             <ol className="text-sm text-light-1 space-y-1">
-              <li>1. Go to your Home Assistant instance</li>
-              <li>2. Navigate to Settings → People → Long-Lived Access Tokens</li>
-              <li>3. Create a new token and copy it</li>
-              <li>4. Enter your HA URL (e.g., http://homeassistant.local:8123) and token below</li>
+              <li>1. Choose the source type (Home Assistant, Solar, Website, Other)</li>
+              <li>2. Add the base URL of the API endpoint</li>
+              <li>3. Add the API key or token for that source</li>
+              <li>4. Optionally add a site/device ID and notes</li>
             </ol>
           </div>
 
@@ -80,7 +91,19 @@ export default function EnvironmentConfig({ environments: initialEnvironments, o
                   </button>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-light-1 mb-1">
+                      Environment ID
+                    </label>
+                    <input
+                      type="text"
+                      value={env.id}
+                      onChange={(e) => updateEnvironment(env.id, 'id', e.target.value)}
+                      className="w-full px-3 py-2 border border-dark-2 border-opacity-20 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-2"
+                      placeholder="e.g., vacation"
+                    />
+                  </div>
                   <div>
                     <label className="block text-sm font-medium text-light-1 mb-1">
                       Environment Name
@@ -96,27 +119,69 @@ export default function EnvironmentConfig({ environments: initialEnvironments, o
 
                   <div>
                     <label className="block text-sm font-medium text-light-1 mb-1">
-                      Home Assistant URL
+                      Source Type
+                    </label>
+                    <select
+                      value={env.type}
+                      onChange={(e) => updateEnvironment(env.id, 'type', e.target.value)}
+                      className="w-full px-3 py-2 border border-dark-2 border-opacity-20 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-2"
+                    >
+                      <option value="home_assistant">Home Assistant</option>
+                      <option value="solar">Solar / Inverter</option>
+                      <option value="website">Website</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-light-1 mb-1">
+                      Base URL
                     </label>
                     <input
                       type="url"
-                      value={env.url}
-                      onChange={(e) => updateEnvironment(env.id, 'url', e.target.value)}
+                      value={env.config.baseUrl ?? ''}
+                      onChange={(e) => updateEnvironmentConfig(env.id, 'baseUrl', e.target.value)}
                       className="w-full px-3 py-2 border border-dark-2 border-opacity-20 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-2"
-                      placeholder="http://homeassistant.local:8123"
+                      placeholder="https://api.example.com"
                     />
                   </div>
 
                   <div>
                     <label className="block text-sm font-medium text-light-1 mb-1">
-                      Access Token
+                      API Key / Token
                     </label>
                     <input
                       type="password"
-                      value={env.token}
-                      onChange={(e) => updateEnvironment(env.id, 'token', e.target.value)}
+                      value={env.config.apiKey ?? ''}
+                      onChange={(e) => updateEnvironmentConfig(env.id, 'apiKey', e.target.value)}
                       className="w-full px-3 py-2 border border-dark-2 border-opacity-20 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-2"
-                      placeholder="Your long-lived access token"
+                      placeholder="API key or token"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-light-1 mb-1">
+                      Site / Device ID
+                    </label>
+                    <input
+                      type="text"
+                      value={env.config.siteId ?? ''}
+                      onChange={(e) => updateEnvironmentConfig(env.id, 'siteId', e.target.value)}
+                      className="w-full px-3 py-2 border border-dark-2 border-opacity-20 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-2"
+                      placeholder="Optional"
+                    />
+                  </div>
+
+                  <div className="md:col-span-2 lg:col-span-4">
+                    <label className="block text-sm font-medium text-light-1 mb-1">
+                      Notes
+                    </label>
+                    <textarea
+                      value={env.config.notes ?? ''}
+                      onChange={(e) => updateEnvironmentConfig(env.id, 'notes', e.target.value)}
+                      className="w-full px-3 py-2 border border-dark-2 border-opacity-20 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-2"
+                      placeholder="Optional notes about this environment"
+                      rows={2}
                     />
                   </div>
                 </div>

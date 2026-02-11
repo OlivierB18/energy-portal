@@ -102,10 +102,15 @@ const normalizeEnvironments = (environments) => {
     .map((env) => ({
       id: String(env.id || '').trim(),
       name: String(env.name || '').trim(),
-      url: String(env.url || '').trim(),
-      token: String(env.token || '').trim(),
+      type: String(env.type || 'home_assistant').trim(),
+      config: {
+        baseUrl: String(env.config?.baseUrl || env.baseUrl || env.url || '').trim(),
+        apiKey: String(env.config?.apiKey || env.apiKey || env.token || '').trim(),
+        siteId: String(env.config?.siteId || env.siteId || '').trim(),
+        notes: String(env.config?.notes || env.notes || '').trim(),
+      },
     }))
-    .filter((env) => env.id && env.name && env.url && env.token)
+    .filter((env) => env.id && env.name)
 }
 
 export const handler = async (event) => {
@@ -130,15 +135,20 @@ export const handler = async (event) => {
     const nextMap = environments.reduce((acc, env) => {
       acc[env.id] = {
         name: env.name,
-        base_url: env.url,
-        token: env.token,
+        type: env.type,
+        config: {
+          base_url: env.config.baseUrl,
+          api_key: env.config.apiKey,
+          site_id: env.config.siteId,
+          notes: env.config.notes,
+        },
       }
       return acc
     }, {})
 
     await updateClientMetadata(domain, managementToken, {
       ...metadata,
-      ha_environments: nextMap,
+      environments: nextMap,
     })
 
     return {

@@ -1,8 +1,17 @@
+export type EnvironmentType = 'home_assistant' | 'website' | 'solar' | 'other'
+
+export interface EnvironmentConfigFields {
+  baseUrl?: string
+  apiKey?: string
+  siteId?: string
+  notes?: string
+}
+
 export interface Environment {
   id: string
   name: string
-  url: string
-  token?: string
+  type: EnvironmentType
+  config: EnvironmentConfigFields
   status: 'online' | 'offline' | 'connecting'
   currentPower?: number
   dailyUsage?: number

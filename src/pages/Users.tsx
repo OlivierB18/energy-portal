@@ -15,6 +15,12 @@ interface UserRow {
   environmentIds?: string[]
 }
 
+interface EnvironmentOption {
+  id: string
+  label: string
+  type?: string
+}
+
 export default function Users({ isAdmin }: UsersProps) {
   const { getAccessTokenSilently, getIdTokenClaims } = useAuth0()
   const [users, setUsers] = useState<UserRow[]>([])
@@ -27,13 +33,8 @@ export default function Users({ isAdmin }: UsersProps) {
   const [isInviting, setIsInviting] = useState(false)
   const [savingUserId, setSavingUserId] = useState<string | null>(null)
   const [resettingUserId, setResettingUserId] = useState<string | null>(null)
-
-  const environmentOptions = [
-    { id: 'home', label: 'Home' },
-    { id: 'office', label: 'Office' },
-    { id: 'vacation', label: 'Brouwer TEST' },
-    { id: 'dhvw', label: 'DHVW' },
-  ]
+  const [environmentOptions, setEnvironmentOptions] = useState<EnvironmentOption[]>([])
+  const [envError, setEnvError] = useState<string | null>(null)
 
   const adminEmailAllowlist = ((import.meta.env.VITE_ADMIN_EMAILS as string | undefined) ?? 'olivier@inside-out.tech')
     .split(',')
@@ -71,15 +72,43 @@ export default function Users({ isAdmin }: UsersProps) {
     void loadUsers()
   }, [getAccessTokenSilently, getIdTokenClaims, isAdmin])
 
-  const getAuthToken = async () => {
-    const idTokenClaims = await getIdTokenClaims().catch(() => null)
-    const rawIdToken = idTokenClaims?.__raw
+  useEffect(() => {
+    const loadEnvironments = async () => {
+      if (!isAdmin) {
+        return
+      }
 
-    if (rawIdToken) {
-      return rawIdToken
+      try {
+        const token = await getAuthToken()
+        const response = await fetch('/.netlify/functions/get-ha-environments', {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+
+        if (!response.ok) {
+          throw new Error('Unable to load environments')
+        }
+
+        const data = await response.json()
+        const loaded = Array.isArray(data?.environments) ? data.environments : []
+        const options = loaded.map((env: { id: string; name?: string; type?: string }) => ({
+          id: String(env.id),
+          label: String(env.name || env.id),
+          type: env.type,
+        }))
+        setEnvironmentOptions(options)
+      } catch (err) {
+        setEnvError(err instanceof Error ? err.message : 'Unable to load environments')
+      }
     }
 
-    return getAccessTokenSilently()
+    void loadEnvironments()
+  }, [isAdmin])
+
+  const getAuthToken = async () => {
+    const audience = import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined
+    return getAccessTokenSilently({
+      authorizationParams: { audience },
+    })
   }
 
   const handleInvite = async () => {
@@ -215,6 +244,7 @@ export default function Users({ isAdmin }: UsersProps) {
 
         <div className="glass-panel rounded-2xl p-6 shadow-xl mb-6">
           <h2 className="text-xl font-heavy text-dark-1 mb-4">Invite user</h2>
+          {envError && <p className="text-red-600 mb-4">{envError}</p>}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <input
               value={inviteName}
@@ -246,6 +276,9 @@ export default function Users({ isAdmin }: UsersProps) {
                   {env.label}
                 </label>
               ))}
+              {environmentOptions.length === 0 && (
+                <span className="text-xs text-dark-2">No environments available</span>
+              )}
             </div>
           </div>
           <div className="mt-4 flex items-center gap-3">

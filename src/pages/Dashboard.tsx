@@ -9,13 +9,16 @@ import { HaEntity } from '../types'
 interface EnvironmentConfig {
   id: string
   name: string
-  url: string
+  type?: string
 }
 
 interface HaEnvironmentPayload {
   id: string
   name?: string
-  url?: string
+  type?: string
+  config?: {
+    baseUrl?: string
+  }
 }
 
 interface DashboardProps {
@@ -77,7 +80,7 @@ export default function Dashboard({
         const next = loaded.map((env: HaEnvironmentPayload) => ({
           id: String(env.id),
           name: String(env.name || env.id),
-          url: String(env.url || ''),
+          type: env.type,
         }))
         setEnvironments(next)
       } catch (error) {
@@ -93,12 +96,10 @@ export default function Dashboard({
 
   useEffect(() => {
     const getAuthToken = async () => {
-      const idTokenClaims = await getIdTokenClaims().catch(() => null)
-      const rawIdToken = idTokenClaims?.__raw
-      if (rawIdToken) {
-        return rawIdToken
-      }
-      return getAccessTokenSilently()
+      const audience = import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined
+      return getAccessTokenSilently({
+        authorizationParams: { audience },
+      })
     }
 
     const loadAssignments = async () => {

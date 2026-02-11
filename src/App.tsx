@@ -119,12 +119,10 @@ function App() {
 
   useEffect(() => {
     const getAuthToken = async () => {
-      const idTokenClaims = await getIdTokenClaims().catch(() => null)
-      const rawIdToken = idTokenClaims?.__raw
-      if (rawIdToken) {
-        return rawIdToken
-      }
-      return getAccessTokenSilently()
+      const audience = import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined
+      return getAccessTokenSilently({
+        authorizationParams: { audience },
+      })
     }
 
     const loadAssignments = async () => {
