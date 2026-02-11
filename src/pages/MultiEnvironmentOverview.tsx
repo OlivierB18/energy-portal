@@ -7,9 +7,14 @@ import { useAuth0 } from '@auth0/auth0-react'
 interface MultiEnvironmentOverviewProps {
   isAdmin: boolean
   onManageUsers: () => void
+  onOpenEnvironment: (environmentId: string) => void
 }
 
-export default function MultiEnvironmentOverview({ isAdmin, onManageUsers }: MultiEnvironmentOverviewProps) {
+export default function MultiEnvironmentOverview({
+  isAdmin,
+  onManageUsers,
+  onOpenEnvironment,
+}: MultiEnvironmentOverviewProps) {
   const [showConfig, setShowConfig] = useState(false)
   const [allowedEnvironmentIds, setAllowedEnvironmentIds] = useState<string[] | null>(null)
   const [envLoading, setEnvLoading] = useState(false)
@@ -275,8 +280,7 @@ export default function MultiEnvironmentOverview({ isAdmin, onManageUsers }: Mul
               <button
                 className="w-full mt-4 glass-button py-2 px-4 rounded-lg font-medium transition-all"
                 onClick={() => {
-                  // In real app, this would navigate to the specific environment dashboard
-                  console.log(`Navigate to ${env.name} dashboard`)
+                  onOpenEnvironment(env.id)
                 }}
               >
                 View Details

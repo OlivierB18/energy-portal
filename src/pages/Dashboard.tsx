@@ -14,10 +14,16 @@ interface EnvironmentConfig {
 
 interface DashboardProps {
   isAdmin: boolean
+  selectedEnvironmentId?: string
+  onEnvironmentChange?: (environmentId: string) => void
 }
 
-export default function Dashboard({ isAdmin }: DashboardProps) {
-  const [selectedEnvironment, setSelectedEnvironment] = useState<string>('')
+export default function Dashboard({
+  isAdmin,
+  selectedEnvironmentId,
+  onEnvironmentChange,
+}: DashboardProps) {
+  const [selectedEnvironment, setSelectedEnvironment] = useState<string>(selectedEnvironmentId ?? '')
   const [timeRange, setTimeRange] = useState<'today' | 'week' | 'month'>('today')
   const [allowedEnvironmentIds, setAllowedEnvironmentIds] = useState<string[] | null>(null)
   const [environments, setEnvironments] = useState<EnvironmentConfig[]>([])
@@ -146,6 +152,12 @@ export default function Dashboard({ isAdmin }: DashboardProps) {
       setSelectedEnvironment(visibleEnvironments[0].id)
     }
   }, [selectedEnvironment, visibleEnvironments])
+
+  useEffect(() => {
+    if (selectedEnvironmentId && selectedEnvironmentId !== selectedEnvironment) {
+      setSelectedEnvironment(selectedEnvironmentId)
+    }
+  }, [selectedEnvironment, selectedEnvironmentId])
 
   useEffect(() => {
     const loadHaEntities = async () => {
@@ -282,7 +294,11 @@ export default function Dashboard({ isAdmin }: DashboardProps) {
               <Settings className="w-5 h-5 text-light-2" />
               <select
                 value={selectedEnvironment}
-                onChange={(e) => setSelectedEnvironment(e.target.value)}
+                onChange={(e) => {
+                  const nextId = e.target.value
+                  setSelectedEnvironment(nextId)
+                  onEnvironmentChange?.(nextId)
+                }}
                 disabled={visibleEnvironments.length === 0}
                 className="bg-light-2 bg-opacity-20 text-light-2 border border-light-2 border-opacity-30 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-brand-2"
               >

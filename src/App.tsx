@@ -11,6 +11,7 @@ function App() {
   const [isAdmin, setIsAdmin] = useState(false)
   const [assignedEnvironmentIds, setAssignedEnvironmentIds] = useState<string[] | null>(null)
   const [environmentLabelMap, setEnvironmentLabelMap] = useState<Record<string, string>>({})
+  const [selectedEnvironmentId, setSelectedEnvironmentId] = useState<string>('')
   const { isAuthenticated, isLoading, loginWithRedirect, logout, getIdTokenClaims, getAccessTokenSilently, user } = useAuth0()
 
   const decodeJwtPayload = (token: string) => {
@@ -227,9 +228,19 @@ function App() {
         <MultiEnvironmentOverview
           isAdmin={isAdmin}
           onManageUsers={() => setCurrentView('users')}
+          onOpenEnvironment={(environmentId) => {
+            setSelectedEnvironmentId(environmentId)
+            setCurrentView('dashboard')
+          }}
         />
       )}
-      {currentView === 'dashboard' && <Dashboard isAdmin={isAdmin} />}
+      {currentView === 'dashboard' && (
+        <Dashboard
+          isAdmin={isAdmin}
+          selectedEnvironmentId={selectedEnvironmentId}
+          onEnvironmentChange={setSelectedEnvironmentId}
+        />
+      )}
       {isAdmin && currentView === 'users' && <Users isAdmin={isAdmin} />}
 
       {isAuthenticated && (
