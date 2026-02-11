@@ -103,7 +103,25 @@ const getVisibleEntityIds = (metadata, environmentId) => {
   return Array.isArray(visibleEntityIds) ? visibleEntityIds : []
 }
 
-const isAdminFromClaims = (payload, rolesClaim) => {
+const getEmailFromPayload = (payload) => {
+  const emailValue = payload.email || payload['https://brouwer-ems/email'] || payload['email']
+  return typeof emailValue === 'string' ? emailValue.toLowerCase() : ''
+}
+
+const getUserInfoEmail = async (domain, token) => {
+  const response = await fetch(`https://${domain}/userinfo`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+
+  if (!response.ok) {
+    return ''
+  }
+
+  const data = await response.json()
+  return typeof data.email === 'string' ? data.email.toLowerCase() : ''
+}
+
+const isAdminFromClaims = (payload, rolesClaim, fallbackEmail = '') => {
   const rolesValue = payload[rolesClaim]
   const roles = Array.isArray(rolesValue)
     ? rolesValue
@@ -114,8 +132,7 @@ const isAdminFromClaims = (payload, rolesClaim) => {
     .split(',')
     .map((email) => email.trim().toLowerCase())
     .filter(Boolean)
-  const emailValue = payload.email || payload['https://brouwer-ems/email'] || payload['email']
-  const email = typeof emailValue === 'string' ? emailValue.toLowerCase() : ''
+  const email = getEmailFromPayload(payload) || fallbackEmail
   const isAllowedEmail = email.length > 0 && allowlist.includes(email)
   return roles.includes('admin') || isAllowedEmail
 }
@@ -131,7 +148,10 @@ const verifyAuth = async (event) => {
   const rolesClaim = process.env.AUTH0_ROLES_CLAIM || 'https://brouwer-ems/roles'
   const jwks = createRemoteJWKSet(new URL(`https://${domain}/.well-known/jwks.json`))
   const { payload } = await jwtVerify(token, jwks, { issuer: `https://${domain}/` })
-  const isAdmin = isAdminFromClaims(payload, rolesClaim)
+  const fallbackEmail = getEmailFromPayload(payload)
+    ? ''
+    : await getUserInfoEmail(domain, token)
+  const isAdmin = isAdminFromClaims(payload, rolesClaim, fallbackEmail)
   return { isAdmin }
 }
 
