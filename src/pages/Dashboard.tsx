@@ -6,11 +6,10 @@ import { Zap, TrendingUp, Clock, Home, Settings } from 'lucide-react'
 import { useAuth0 } from '@auth0/auth0-react'
 import { HaEntity } from '../types'
 
-interface Environment {
+interface EnvironmentConfig {
   id: string
   name: string
   url: string
-  token: string
 }
 
 interface DashboardProps {
@@ -18,9 +17,12 @@ interface DashboardProps {
 }
 
 export default function Dashboard({ isAdmin }: DashboardProps) {
-  const [selectedEnvironment, setSelectedEnvironment] = useState<string>('home')
+  const [selectedEnvironment, setSelectedEnvironment] = useState<string>('')
   const [timeRange, setTimeRange] = useState<'today' | 'week' | 'month'>('today')
   const [allowedEnvironmentIds, setAllowedEnvironmentIds] = useState<string[] | null>(null)
+  const [environments, setEnvironments] = useState<EnvironmentConfig[]>([])
+  const [envLoading, setEnvLoading] = useState(false)
+  const [envError, setEnvError] = useState<string | null>(null)
   const [haEntities, setHaEntities] = useState<HaEntity[]>([])
   const [haLoading, setHaLoading] = useState(false)
   const [haError, setHaError] = useState<string | null>(null)
@@ -29,13 +31,51 @@ export default function Dashboard({ isAdmin }: DashboardProps) {
   const [haRefreshKey, setHaRefreshKey] = useState(0)
   const { isAuthenticated, getIdTokenClaims, getAccessTokenSilently } = useAuth0()
 
-  // Mock environments - in real app, this would come from config
-  const environments: Environment[] = [
-    { id: 'home', name: 'Home', url: 'http://homeassistant.local:8123', token: 'your_token_here' },
-    { id: 'office', name: 'Office', url: 'http://office-ha.local:8123', token: 'your_token_here' },
-    { id: 'vacation', name: 'Brouwer TEST', url: 'https://olivierbrouwer.iofoxtrot.work', token: 'your_token_here' },
-    { id: 'dhvw', name: 'DHVW', url: 'http://dhvw-ha.local:8123', token: 'your_token_here' }
-  ]
+  const getAuthToken = async () => {
+    const audience = import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined
+    return getAccessTokenSilently({
+      authorizationParams: { audience },
+    })
+  }
+
+  useEffect(() => {
+    const loadEnvironments = async () => {
+      if (!isAuthenticated) {
+        setEnvironments([])
+        return
+      }
+
+      setEnvLoading(true)
+      setEnvError(null)
+
+      try {
+        const token = await getAuthToken()
+        const response = await fetch('/.netlify/functions/get-ha-environments', {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+
+        if (!response.ok) {
+          throw new Error('Unable to load environments')
+        }
+
+        const data = await response.json()
+        const loaded = Array.isArray(data?.environments) ? data.environments : []
+        const next = loaded.map((env) => ({
+          id: String(env.id),
+          name: String(env.name || env.id),
+          url: String(env.url || ''),
+        }))
+        setEnvironments(next)
+      } catch (error) {
+        setEnvError(error instanceof Error ? error.message : 'Unable to load environments')
+        setEnvironments([])
+      } finally {
+        setEnvLoading(false)
+      }
+    }
+
+    void loadEnvironments()
+  }, [getAccessTokenSilently, isAuthenticated])
 
   useEffect(() => {
     const getAuthToken = async () => {
@@ -97,7 +137,12 @@ export default function Dashboard({ isAdmin }: DashboardProps) {
     : []
 
   useEffect(() => {
-    if (visibleEnvironments.length > 0 && !visibleEnvironments.find((env) => env.id === selectedEnvironment)) {
+    if (visibleEnvironments.length === 0) {
+      setSelectedEnvironment('')
+      return
+    }
+
+    if (!visibleEnvironments.find((env) => env.id === selectedEnvironment)) {
       setSelectedEnvironment(visibleEnvironments[0].id)
     }
   }, [selectedEnvironment, visibleEnvironments])
@@ -109,11 +154,16 @@ export default function Dashboard({ isAdmin }: DashboardProps) {
         return
       }
 
+      if (!selectedEnvironment) {
+        setHaEntities([])
+        return
+      }
+
       setHaLoading(true)
       setHaError(null)
 
       try {
-        const token = await getAccessTokenSilently()
+        const token = await getAuthToken()
         const response = await fetch(`/.netlify/functions/ha-entities?environmentId=${selectedEnvironment}`, {
           headers: { Authorization: `Bearer ${token}` },
         })
@@ -159,7 +209,7 @@ export default function Dashboard({ isAdmin }: DashboardProps) {
   const runHaAction = async (entityId: string, action: string) => {
     try {
       setHaActionId(entityId)
-      const token = await getAccessTokenSilently()
+      const token = await getAuthToken()
       const response = await fetch('/.netlify/functions/ha-service', {
         method: 'POST',
         headers: {
@@ -233,8 +283,14 @@ export default function Dashboard({ isAdmin }: DashboardProps) {
               <select
                 value={selectedEnvironment}
                 onChange={(e) => setSelectedEnvironment(e.target.value)}
+                disabled={visibleEnvironments.length === 0}
                 className="bg-light-2 bg-opacity-20 text-light-2 border border-light-2 border-opacity-30 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-brand-2"
               >
+                {visibleEnvironments.length === 0 && (
+                  <option value="" className="bg-dark-1 text-light-2">
+                    No environments
+                  </option>
+                )}
                 {visibleEnvironments.map((env) => (
                   <option key={env.id} value={env.id} className="bg-dark-1 text-light-2">
                     {env.name}
@@ -272,6 +328,8 @@ export default function Dashboard({ isAdmin }: DashboardProps) {
               ) : (
                 <span className="opacity-80">All environments available.</span>
               )}
+              {envLoading && <div className="mt-2 text-xs opacity-70">Loading environments...</div>}
+              {envError && <div className="mt-2 text-xs text-red-300">{envError}</div>}
             </div>
           </div>
         </div>

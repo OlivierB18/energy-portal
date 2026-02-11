@@ -8,45 +8,6 @@ const getEnv = (key) => {
   return value
 }
 
-const HA_ENVIRONMENTS = {
-  vacation: {
-    urlEnv: 'HA_BROUWER_TEST_URL',
-    tokenEnv: 'HA_BROUWER_TEST_TOKEN',
-  },
-}
-
-const ALLOWED_ACTIONS = {
-  switch: ['turn_on', 'turn_off', 'toggle'],
-  light: ['turn_on', 'turn_off', 'toggle'],
-  input_boolean: ['turn_on', 'turn_off', 'toggle'],
-  button: ['press'],
-  script: ['turn_on'],
-  scene: ['turn_on'],
-}
-
-const getHaConfig = (metadata, environmentId) => {
-  const haEnvironments = metadata.ha_environments || {}
-  const envConfig = haEnvironments[environmentId]
-
-  if (envConfig) {
-    const baseUrl = envConfig.base_url || envConfig.url
-    const token = envConfig.token
-    if (baseUrl && token) {
-      return { baseUrl, token }
-    }
-  }
-
-  const fallback = HA_ENVIRONMENTS[environmentId]
-  if (!fallback) {
-    throw new Error('Unknown environment')
-  }
-
-  return {
-    baseUrl: getEnv(fallback.urlEnv),
-    token: getEnv(fallback.tokenEnv),
-  }
-}
-
 const getManagementToken = async (domain) => {
   const response = await fetch(`https://${domain}/oauth/token`, {
     method: 'POST',
@@ -81,11 +42,21 @@ const getClientMetadata = async (domain, token) => {
   return client.client_metadata || {}
 }
 
-const getVisibleEntityIds = (metadata, environmentId) => {
-  const haConfig = metadata.ha_config || {}
-  const envConfig = haConfig[environmentId] || {}
-  const visibleEntityIds = envConfig.visible_entity_ids
-  return Array.isArray(visibleEntityIds) ? visibleEntityIds : []
+const updateClientMetadata = async (domain, token, metadata) => {
+  const clientId = getEnv('AUTH0_APP_CLIENT_ID')
+  const response = await fetch(`https://${domain}/api/v2/clients/${encodeURIComponent(clientId)}`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ client_metadata: metadata }),
+  })
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => null)
+    throw new Error(error?.message || 'Unable to update app metadata')
+  }
 }
 
 const isAdminFromClaims = (payload, rolesClaim) => {
@@ -105,7 +76,7 @@ const isAdminFromClaims = (payload, rolesClaim) => {
   return roles.includes('admin') || isAllowedEmail
 }
 
-const verifyAuth = async (event) => {
+const verifyAdmin = async (event) => {
   const authHeader = event.headers.authorization || event.headers.Authorization
   if (!authHeader?.startsWith('Bearer ')) {
     throw new Error('Missing token')
@@ -116,8 +87,25 @@ const verifyAuth = async (event) => {
   const rolesClaim = process.env.AUTH0_ROLES_CLAIM || 'https://brouwer-ems/roles'
   const jwks = createRemoteJWKSet(new URL(`https://${domain}/.well-known/jwks.json`))
   const { payload } = await jwtVerify(token, jwks, { issuer: `https://${domain}/` })
-  const isAdmin = isAdminFromClaims(payload, rolesClaim)
-  return { isAdmin }
+
+  if (!isAdminFromClaims(payload, rolesClaim)) {
+    throw new Error('Admin only')
+  }
+}
+
+const normalizeEnvironments = (environments) => {
+  if (!Array.isArray(environments)) {
+    return []
+  }
+
+  return environments
+    .map((env) => ({
+      id: String(env.id || '').trim(),
+      name: String(env.name || '').trim(),
+      url: String(env.url || '').trim(),
+      token: String(env.token || '').trim(),
+    }))
+    .filter((env) => env.id && env.name && env.url && env.token)
 }
 
 export const handler = async (event) => {
@@ -126,57 +114,43 @@ export const handler = async (event) => {
       return { statusCode: 405, body: JSON.stringify({ error: 'Method not allowed' }) }
     }
 
-    const { isAdmin } = await verifyAuth(event)
+    await verifyAdmin(event)
+
     const body = JSON.parse(event.body || '{}')
-    const environmentId = body.environmentId?.trim()
-    const entityId = body.entityId?.trim()
-    const action = body.action?.trim()
+    const environments = normalizeEnvironments(body.environments)
 
-    if (!environmentId || !entityId || !action) {
-      return { statusCode: 400, body: JSON.stringify({ error: 'Missing parameters' }) }
-    }
-
-    const domain = String(entityId).split('.')[0]
-    const allowedActions = ALLOWED_ACTIONS[domain] || []
-
-    if (!allowedActions.includes(action)) {
-      return { statusCode: 400, body: JSON.stringify({ error: 'Action not allowed' }) }
+    if (environments.length === 0) {
+      return { statusCode: 400, body: JSON.stringify({ error: 'No environments provided' }) }
     }
 
     const domain = getEnv('AUTH0_DOMAIN')
     const managementToken = await getManagementToken(domain)
     const metadata = await getClientMetadata(domain, managementToken)
 
-    if (!isAdmin) {
-      const visibleEntityIds = getVisibleEntityIds(metadata, environmentId)
-      if (!visibleEntityIds.includes(entityId)) {
-        return { statusCode: 403, body: JSON.stringify({ error: 'Entity not permitted' }) }
+    const nextMap = environments.reduce((acc, env) => {
+      acc[env.id] = {
+        name: env.name,
+        base_url: env.url,
+        token: env.token,
       }
-    }
+      return acc
+    }, {})
 
-    const { baseUrl, token } = getHaConfig(metadata, environmentId)
-
-    const response = await fetch(`${baseUrl}/api/services/${domain}/${action}`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ entity_id: entityId }),
+    await updateClientMetadata(domain, managementToken, {
+      ...metadata,
+      ha_environments: nextMap,
     })
-
-    if (!response.ok) {
-      return { statusCode: 502, body: JSON.stringify({ error: 'Home Assistant action failed' }) }
-    }
 
     return {
       statusCode: 200,
       body: JSON.stringify({ success: true }),
     }
   } catch (error) {
+    const message = error instanceof Error ? error.message : 'Server error'
+    const statusCode = message === 'Admin only' ? 403 : 500
     return {
-      statusCode: 500,
-      body: JSON.stringify({ error: error instanceof Error ? error.message : 'Server error' }),
+      statusCode,
+      body: JSON.stringify({ error: message }),
     }
   }
 }

@@ -15,17 +15,6 @@ const HA_ENVIRONMENTS = {
   },
 }
 
-const getHaConfig = (environmentId) => {
-  const config = HA_ENVIRONMENTS[environmentId]
-  if (!config) {
-    throw new Error('Unknown environment')
-  }
-  return {
-    baseUrl: getEnv(config.urlEnv),
-    token: getEnv(config.tokenEnv),
-  }
-}
-
 const getManagementToken = async (domain) => {
   const response = await fetch(`https://${domain}/oauth/token`, {
     method: 'POST',
@@ -60,13 +49,34 @@ const getClientMetadata = async (domain, token) => {
   return client.client_metadata || {}
 }
 
-const getVisibleEntityIds = async (domain, environmentId) => {
-  const managementToken = await getManagementToken(domain)
-  const metadata = await getClientMetadata(domain, managementToken)
+const getVisibleEntityIds = (metadata, environmentId) => {
   const haConfig = metadata.ha_config || {}
   const envConfig = haConfig[environmentId] || {}
   const visibleEntityIds = envConfig.visible_entity_ids
   return Array.isArray(visibleEntityIds) ? visibleEntityIds : []
+}
+
+const getHaConfig = (metadata, environmentId) => {
+  const haEnvironments = metadata.ha_environments || {}
+  const envConfig = haEnvironments[environmentId]
+
+  if (envConfig) {
+    const baseUrl = envConfig.base_url || envConfig.url
+    const token = envConfig.token
+    if (baseUrl && token) {
+      return { baseUrl, token }
+    }
+  }
+
+  const fallback = HA_ENVIRONMENTS[environmentId]
+  if (!fallback) {
+    throw new Error('Unknown environment')
+  }
+
+  return {
+    baseUrl: getEnv(fallback.urlEnv),
+    token: getEnv(fallback.tokenEnv),
+  }
 }
 
 const isAdminFromClaims = (payload, rolesClaim) => {
@@ -114,9 +124,11 @@ export const handler = async (event) => {
     }
 
     const { isAdmin } = await verifyAuth(event)
-    const { baseUrl, token } = getHaConfig(environmentId)
     const domain = getEnv('AUTH0_DOMAIN')
-    const visibleEntityIds = isAdmin ? null : await getVisibleEntityIds(domain, environmentId)
+    const managementToken = await getManagementToken(domain)
+    const metadata = await getClientMetadata(domain, managementToken)
+    const { baseUrl, token } = getHaConfig(metadata, environmentId)
+    const visibleEntityIds = isAdmin ? null : getVisibleEntityIds(metadata, environmentId)
 
     if (!isAdmin && visibleEntityIds.length === 0) {
       return { statusCode: 200, body: JSON.stringify({ entities: [] }) }

@@ -37,13 +37,20 @@ export default function HomeAssistantConfig({
     })
   }, [entities, filter])
 
+  const getAuthToken = async () => {
+    const audience = import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined
+    return getAccessTokenSilently({
+      authorizationParams: { audience },
+    })
+  }
+
   useEffect(() => {
     const loadConfig = async () => {
       setIsLoading(true)
       setError(null)
 
       try {
-        const token = await getAccessTokenSilently()
+        const token = await getAuthToken()
         const [entitiesResponse, configResponse] = await Promise.all([
           fetch(`/.netlify/functions/ha-entities?environmentId=${environmentId}`, {
             headers: { Authorization: `Bearer ${token}` },
@@ -91,7 +98,7 @@ export default function HomeAssistantConfig({
     setError(null)
 
     try {
-      const token = await getAccessTokenSilently()
+      const token = await getAuthToken()
       const response = await fetch('/.netlify/functions/save-environment-config', {
         method: 'POST',
         headers: {

@@ -12,41 +12,59 @@ interface MultiEnvironmentOverviewProps {
 export default function MultiEnvironmentOverview({ isAdmin, onManageUsers }: MultiEnvironmentOverviewProps) {
   const [showConfig, setShowConfig] = useState(false)
   const [allowedEnvironmentIds, setAllowedEnvironmentIds] = useState<string[] | null>(null)
+  const [envLoading, setEnvLoading] = useState(false)
+  const [envError, setEnvError] = useState<string | null>(null)
   const { isAuthenticated, getIdTokenClaims, getAccessTokenSilently } = useAuth0()
-  const [environments, setEnvironments] = useState<Environment[]>([
-    {
-      id: 'home',
-      name: 'Home',
-      url: 'http://homeassistant.local:8123',
-      status: 'online',
-      currentPower: 2.45,
-      dailyUsage: 12.8,
-      lastUpdate: '2 minutes ago'
-    },
-    {
-      id: 'office',
-      name: 'Office',
-      url: 'http://office-ha.local:8123',
-      status: 'online',
-      currentPower: 1.8,
-      dailyUsage: 8.5,
-      lastUpdate: '1 minute ago'
-    },
-    {
-      id: 'vacation',
-      name: 'Brouwer TEST',
-      url: 'https://olivierbrouwer.iofoxtrot.work',
-      status: 'offline',
-      lastUpdate: '3 hours ago'
-    },
-    {
-      id: 'dhvw',
-      name: 'DHVW',
-      url: 'http://dhvw-ha.local:8123',
-      status: 'offline',
-      lastUpdate: 'just now'
+  const [environments, setEnvironments] = useState<Environment[]>([])
+
+  const getAuthToken = async () => {
+    const audience = import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined
+    return getAccessTokenSilently({
+      authorizationParams: { audience },
+    })
+  }
+
+  useEffect(() => {
+    const loadEnvironments = async () => {
+      if (!isAuthenticated) {
+        setEnvironments([])
+        return
+      }
+
+      setEnvLoading(true)
+      setEnvError(null)
+
+      try {
+        const token = await getAuthToken()
+        const response = await fetch('/.netlify/functions/get-ha-environments', {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+
+        if (!response.ok) {
+          throw new Error('Unable to load environments')
+        }
+
+        const data = await response.json()
+        const loaded = Array.isArray(data?.environments) ? data.environments : []
+        const nextEnvironments: Environment[] = loaded.map((env) => ({
+          id: String(env.id),
+          name: String(env.name || env.id),
+          url: String(env.url || ''),
+          token: typeof env.token === 'string' ? env.token : undefined,
+          status: 'offline',
+          lastUpdate: 'just now',
+        }))
+        setEnvironments(nextEnvironments)
+      } catch (error) {
+        setEnvError(error instanceof Error ? error.message : 'Unable to load environments')
+        setEnvironments([])
+      } finally {
+        setEnvLoading(false)
+      }
     }
-  ])
+
+    void loadEnvironments()
+  }, [getAccessTokenSilently, isAuthenticated])
 
   useEffect(() => {
     const getAuthToken = async () => {
@@ -102,6 +120,44 @@ export default function MultiEnvironmentOverview({ isAdmin, onManageUsers }: Mul
   const visibleEnvironments = allowedEnvironmentIds
     ? environments.filter((env) => allowedEnvironmentIds.includes(env.id))
     : environments
+
+  const handleSaveEnvironments = async (nextEnvironments: Environment[]) => {
+    setEnvError(null)
+
+    try {
+      const token = await getAuthToken()
+      const response = await fetch('/.netlify/functions/save-ha-environments', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          environments: nextEnvironments.map((env) => ({
+            id: env.id,
+            name: env.name,
+            url: env.url,
+            token: env.token,
+          })),
+        }),
+      })
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => null)
+        throw new Error(data?.error || 'Unable to save environments')
+      }
+
+      const updated = nextEnvironments.map((env) => ({
+        ...env,
+        status: env.status || 'offline',
+        lastUpdate: env.lastUpdate || 'just now',
+      }))
+      setEnvironments(updated)
+      setShowConfig(false)
+    } catch (error) {
+      setEnvError(error instanceof Error ? error.message : 'Unable to save environments')
+    }
+  }
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -169,6 +225,11 @@ export default function MultiEnvironmentOverview({ isAdmin, onManageUsers }: Mul
         </div>
 
         {/* Environment Grid */}
+        {envLoading && <p className="text-light-1 mb-6">Loading environments...</p>}
+        {envError && <p className="text-red-300 mb-6">{envError}</p>}
+        {!envLoading && !envError && visibleEnvironments.length === 0 && (
+          <p className="text-light-1 mb-6">No environments configured yet.</p>
+        )}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
           {visibleEnvironments.map((env) => (
             <div
@@ -253,10 +314,7 @@ export default function MultiEnvironmentOverview({ isAdmin, onManageUsers }: Mul
         {showConfig && (
           <EnvironmentConfig
             environments={environments}
-            onSave={(newEnvironments) => {
-              setEnvironments(newEnvironments)
-              setShowConfig(false)
-            }}
+            onSave={handleSaveEnvironments}
             onClose={() => setShowConfig(false)}
           />
         )}

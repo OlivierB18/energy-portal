@@ -10,14 +10,8 @@ function App() {
   const [currentView, setCurrentView] = useState<'overview' | 'dashboard' | 'users'>('overview')
   const [isAdmin, setIsAdmin] = useState(false)
   const [assignedEnvironmentIds, setAssignedEnvironmentIds] = useState<string[] | null>(null)
+  const [environmentLabelMap, setEnvironmentLabelMap] = useState<Record<string, string>>({})
   const { isAuthenticated, isLoading, loginWithRedirect, logout, getIdTokenClaims, getAccessTokenSilently, user } = useAuth0()
-
-  const environmentLabelMap: Record<string, string> = {
-    home: 'Home',
-    office: 'Office',
-    vacation: 'Brouwer TEST',
-    dhvw: 'DHVW',
-  }
 
   const decodeJwtPayload = (token: string) => {
     try {
@@ -157,6 +151,45 @@ function App() {
 
     void loadAssignments()
   }, [getAccessTokenSilently, getIdTokenClaims, isAuthenticated, isAdmin])
+
+  useEffect(() => {
+    const loadEnvironmentLabels = async () => {
+      if (!isAuthenticated) {
+        setEnvironmentLabelMap({})
+        return
+      }
+
+      try {
+        const audience = import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined
+        const token = await getAccessTokenSilently({
+          authorizationParams: { audience },
+        })
+        const response = await fetch('/.netlify/functions/get-ha-environments', {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+
+        if (!response.ok) {
+          throw new Error('Unable to load environments')
+        }
+
+        const data = await response.json()
+        const loaded = Array.isArray(data?.environments) ? data.environments : []
+        const nextMap = loaded.reduce((acc, env) => {
+          const id = String(env.id)
+          const label = String(env.name || env.id)
+          if (id) {
+            acc[id] = label
+          }
+          return acc
+        }, {} as Record<string, string>)
+        setEnvironmentLabelMap(nextMap)
+      } catch {
+        setEnvironmentLabelMap({})
+      }
+    }
+
+    void loadEnvironmentLabels()
+  }, [getAccessTokenSilently, isAuthenticated])
 
   if (isLoading) {
     return (
