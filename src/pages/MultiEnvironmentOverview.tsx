@@ -10,6 +10,13 @@ interface MultiEnvironmentOverviewProps {
   onOpenEnvironment: (environmentId: string) => void
 }
 
+interface HaEnvironmentPayload {
+  id: string
+  name?: string
+  url?: string
+  token?: string
+}
+
 export default function MultiEnvironmentOverview({
   isAdmin,
   onManageUsers,
@@ -50,8 +57,10 @@ export default function MultiEnvironmentOverview({
         }
 
         const data = await response.json()
-        const loaded = Array.isArray(data?.environments) ? data.environments : []
-        const nextEnvironments: Environment[] = loaded.map((env) => ({
+        const loaded: HaEnvironmentPayload[] = Array.isArray(data?.environments)
+          ? data.environments
+          : []
+        const nextEnvironments: Environment[] = loaded.map((env: HaEnvironmentPayload) => ({
           id: String(env.id),
           name: String(env.name || env.id),
           url: String(env.url || ''),

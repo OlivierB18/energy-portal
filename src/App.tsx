@@ -6,12 +6,27 @@ import Users from './pages/Users'
 import './App.css'
 
 // Automatic deployment test - v1.1
+interface HaEnvironmentPayload {
+  id: string
+  name?: string
+}
+
 function App() {
   const [currentView, setCurrentView] = useState<'overview' | 'dashboard' | 'users'>('overview')
   const [isAdmin, setIsAdmin] = useState(false)
   const [assignedEnvironmentIds, setAssignedEnvironmentIds] = useState<string[] | null>(null)
   const [environmentLabelMap, setEnvironmentLabelMap] = useState<Record<string, string>>({})
   const [selectedEnvironmentId, setSelectedEnvironmentId] = useState<string>('')
+    const mapEnvironmentsById = (environments: HaEnvironmentPayload[]) =>
+      environments.reduce((acc: Record<string, string>, env: HaEnvironmentPayload) => {
+        const id = String(env.id)
+        const label = String(env.name || env.id)
+        if (id) {
+          acc[id] = label
+        }
+        return acc
+      }, {})
+
   const { isAuthenticated, isLoading, loginWithRedirect, logout, getIdTokenClaims, getAccessTokenSilently, user } = useAuth0()
 
   const decodeJwtPayload = (token: string) => {
@@ -174,16 +189,10 @@ function App() {
         }
 
         const data = await response.json()
-        const loaded = Array.isArray(data?.environments) ? data.environments : []
-        const nextMap = loaded.reduce((acc, env) => {
-          const id = String(env.id)
-          const label = String(env.name || env.id)
-          if (id) {
-            acc[id] = label
-          }
-          return acc
-        }, {} as Record<string, string>)
-        setEnvironmentLabelMap(nextMap)
+        const loaded: HaEnvironmentPayload[] = Array.isArray(data?.environments)
+          ? data.environments
+          : []
+        setEnvironmentLabelMap(mapEnvironmentsById(loaded))
       } catch {
         setEnvironmentLabelMap({})
       }

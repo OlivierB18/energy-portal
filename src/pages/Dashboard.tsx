@@ -12,6 +12,12 @@ interface EnvironmentConfig {
   url: string
 }
 
+interface HaEnvironmentPayload {
+  id: string
+  name?: string
+  url?: string
+}
+
 interface DashboardProps {
   isAdmin: boolean
   selectedEnvironmentId?: string
@@ -65,8 +71,10 @@ export default function Dashboard({
         }
 
         const data = await response.json()
-        const loaded = Array.isArray(data?.environments) ? data.environments : []
-        const next = loaded.map((env) => ({
+        const loaded: HaEnvironmentPayload[] = Array.isArray(data?.environments)
+          ? data.environments
+          : []
+        const next = loaded.map((env: HaEnvironmentPayload) => ({
           id: String(env.id),
           name: String(env.name || env.id),
           url: String(env.url || ''),
