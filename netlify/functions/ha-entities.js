@@ -247,7 +247,7 @@ const verifyAuth = async (event) => {
 }
 
 export const handler = async (event) => {
-  console.log('ha-entities handler started - SIMPLIFIED MODE');
+  console.log('ha-entities handler started - REAL DATA MODE');
   try {
     if (event.httpMethod !== 'GET') {
       return { statusCode: 405, body: JSON.stringify({ error: 'Method not allowed' }) }
@@ -264,91 +264,58 @@ export const handler = async (event) => {
       return { statusCode: 401, body: JSON.stringify({ error: 'Missing authorization' }) }
     }
 
-    // Try to get real Home Assistant data, fallback to mock data
-    let entities = []
-    let usedMockData = false
+    // SIMPLIFIED: Go directly to env vars, skip Auth0 metadata fetch
+    console.log('Using environment variables directly for:', environmentId);
+    const { baseUrl, token } = getHaConfig({}, environmentId)
     
-    try {
-      // SIMPLIFIED: Go directly to env vars, skip Auth0 metadata fetch
-      console.log('Using environment variables directly for:', environmentId);
-      const { baseUrl, token } = getHaConfig({}, environmentId)
-      
-      console.log('Fetching from Home Assistant:', baseUrl);
-      const response = await fetch(`${baseUrl}/api/states`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        timeout: 5000, // 5 second timeout
-      })
-      
-      if (response.ok) {
-        const data = await response.json()
-        console.log('Received entities from HA:', Array.isArray(data) ? data.length : 0);
-        
-        entities = Array.isArray(data)
-          ? data.map((entity) => ({
-            entity_id: entity.entity_id,
-            state: entity.state,
-            domain: String(entity.entity_id || '').split('.')[0] || 'unknown',
-            friendly_name: entity.attributes?.friendly_name || entity.entity_id,
-          }))
-          : []
-      } else {
-        throw new Error('HA response not ok')
+    console.log('Fetching from Home Assistant:', baseUrl);
+    const response = await fetch(`${baseUrl}/api/states`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+    })
+    
+    if (!response.ok) {
+      const body = await response.text();
+      console.error('Failed to fetch Home Assistant state:', response.status, body);
+      return { 
+        statusCode: 502, 
+        body: JSON.stringify({ 
+          error: 'Unable to fetch Home Assistant state', 
+          status: response.status, 
+          details: body 
+        }) 
       }
-    } catch (haError) {
-      console.log('Home Assistant not available, using mock data:', haError.message);
-      usedMockData = true
-      
-      // MOCK DATA - Always show these sensors when HA is not available
-      entities = [
-        {
-          entity_id: 'sensor.living_room_temperature',
-          state: '21.5',
-          domain: 'sensor',
-          friendly_name: 'Living Room Temperature'
-        },
-        {
-          entity_id: 'sensor.energy_consumption',
-          state: '2.45',
-          domain: 'sensor',
-          friendly_name: 'Current Energy Usage'
-        },
-        {
-          entity_id: 'light.living_room',
-          state: 'on',
-          domain: 'light',
-          friendly_name: 'Living Room Light'
-        },
-        {
-          entity_id: 'switch.coffee_maker',
-          state: 'off',
-          domain: 'switch',
-          friendly_name: 'Coffee Maker'
-        },
-        {
-          entity_id: 'sensor.humidity',
-          state: '45',
-          domain: 'sensor',
-          friendly_name: 'Humidity'
-        },
-        {
-          entity_id: 'binary_sensor.front_door',
-          state: 'off',
-          domain: 'binary_sensor',
-          friendly_name: 'Front Door'
-        }
-      ]
     }
+    
+    const data = await response.json()
+    console.log('Received all entities from HA:', Array.isArray(data) ? data.length : 0);
+    
+    // Filter to only show useful entities (sensors, switches, lights, etc.)
+    // Exclude update, script, scene, input_* entities
+    const allowedDomains = ['sensor', 'switch', 'light', 'binary_sensor', 'climate', 'water_heater', 'thermostat']
+    
+    const entities = Array.isArray(data)
+      ? data
+        .filter(entity => {
+          const domain = String(entity.entity_id || '').split('.')[0]
+          // Only show allowed domains, and exclude internal/system entities
+          return allowedDomains.includes(domain) && !entity.entity_id.startsWith('update.')
+        })
+        .map((entity) => ({
+          entity_id: entity.entity_id,
+          state: entity.state,
+          domain: String(entity.entity_id || '').split('.')[0] || 'unknown',
+          friendly_name: entity.attributes?.friendly_name || entity.entity_id,
+        }))
+      : []
+
+    console.log('Filtered to useful entities:', entities.length);
 
     return {
       statusCode: 200,
-      body: JSON.stringify({ 
-        entities,
-        _mock: usedMockData,
-        _message: usedMockData ? 'Using mock data - configure HA_BROUWER_TEST_URL and HA_BROUWER_TEST_TOKEN for real data' : 'Real Home Assistant data'
-      }),
+      body: JSON.stringify({ entities }),
     }
   } catch (error) {
     console.error('ha-entities handler error:', error);
@@ -359,7 +326,7 @@ export const handler = async (event) => {
       body: JSON.stringify({
         error: message,
         stack,
-        details: 'Simplified handler - check env vars: HA_BROUWER_TEST_URL, HA_BROUWER_TEST_TOKEN'
+        details: 'Check env vars: HA_BROUWER_TEST_URL, HA_BROUWER_TEST_TOKEN'
       }),
     };
   }
