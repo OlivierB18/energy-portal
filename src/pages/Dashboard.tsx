@@ -173,8 +173,6 @@ export default function Dashboard({
   }, [selectedEnvironment, selectedEnvironmentId])
 
   useEffect(() => {
-    let isInitialLoad = true
-    
     const loadHaEntities = async (silent = false) => {
       if (!isAuthenticated) {
         if (!silent) {
@@ -191,7 +189,6 @@ export default function Dashboard({
         return
       }
       
-      // Only show loading state on initial load, not during background refreshes
       if (!silent) {
         setHaLoading(true)
         setHaError(null)
@@ -200,33 +197,42 @@ export default function Dashboard({
       
       try {
         const token = await getAuthToken()
+        // eslint-disable-next-line no-console
+        console.log(`[HA] ${silent ? '🔄 SILENT' : '📥 INITIAL'} refresh starting...`)
+        
         const response = await fetch(`/.netlify/functions/ha-entities?environmentId=${selectedEnvironment}`, {
           headers: { Authorization: `Bearer ${token}` },
         })
+        
+        // eslint-disable-next-line no-console
+        console.log(`[HA] Response status: ${response.status}`)
+        
         if (!response.ok) {
           const data = await response.json().catch(() => null)
+          // eslint-disable-next-line no-console
+          console.error(`[HA] Error: ${data?.error || 'Unknown error'}`)
           if (!silent) {
             setHaConnectionStatus('error')
             setHaError(data?.error || 'Unable to load Home Assistant data')
           }
-          return // Exit silently on error for background refresh
+          return
         }
-        const data = await response.json()
-        const entities = Array.isArray(data?.entities) ? data.entities : [];
         
-        // Always update the entities
+        const data = await response.json()
+        const entities = Array.isArray(data?.entities) ? data.entities : []
+        // eslint-disable-next-line no-console
+        console.log(`[HA] ✅ Loaded ${entities.length} entities`)
+        
         setHaEntities(entities)
         setLastKnownHaEntities(entities)
         
-        // Only show status updates on initial load
         if (!silent) {
           setHaConnectionStatus('connected')
           setHaError(null)
         }
       } catch (error) {
         // eslint-disable-next-line no-console
-        console.log('HA FETCH ERROR', error);
-        // On silent refresh, don't touch the UI - just keep showing old data
+        console.error('[HA] Fetch error:', error);
         if (!silent) {
           setHaError(error instanceof Error ? error.message : 'Unable to load Home Assistant data')
           setHaConnectionStatus('error')
@@ -238,13 +244,15 @@ export default function Dashboard({
       }
     }
     
-    // Initial load with visible loading state
+    // Initial load 
+    // eslint-disable-next-line no-console
+    console.log('[HA] Starting initial load...')
     void loadHaEntities(false)
     
-    // Auto-refresh every 10 seconds silently in background
+    // Auto-refresh every 10 seconds
     const interval = setInterval(() => {
-      void loadHaEntities(true) // Silent refresh - don't touch UI on error
-    }, 10000) // 10 seconds
+      void loadHaEntities(true)
+    }, 10000)
     
     return () => clearInterval(interval)
   }, [getAccessTokenSilently, isAuthenticated, selectedEnvironment, haRefreshKey])
