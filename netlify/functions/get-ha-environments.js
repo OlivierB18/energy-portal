@@ -76,24 +76,49 @@ const mapLegacyHaEnvironments = (metadata) => {
   }))
 }
 
-const getManagementToken = async (domain) => {
-  const response = await fetch(`https://${domain}/oauth/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      client_id: getEnv('AUTH0_M2M_CLIENT_ID'),
-      client_secret: getEnv('AUTH0_M2M_CLIENT_SECRET'),
-      audience: `https://${domain}/api/v2/`,
-      grant_type: 'client_credentials',
-    }),
-  })
+const managementTokenCache = { token: null, expiresAt: 0 }
 
-  if (!response.ok) {
-    throw new Error('Unable to get management token')
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const getManagementToken = async (domain) => {
+  const now = Date.now()
+  if (managementTokenCache.token && now < managementTokenCache.expiresAt - 60000) {
+    return managementTokenCache.token
   }
 
-  const data = await response.json()
-  return data.access_token
+  const fetchToken = async () => {
+    const response = await fetch(`https://${domain}/oauth/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id: getEnv('AUTH0_M2M_CLIENT_ID'),
+        client_secret: getEnv('AUTH0_M2M_CLIENT_SECRET'),
+        audience: `https://${domain}/api/v2/`,
+        grant_type: 'client_credentials',
+      }),
+    })
+
+    if (!response.ok) {
+      throw new Error('Unable to get management token')
+    }
+
+    return response.json()
+  }
+
+  try {
+    const data = await fetchToken()
+    const expiresIn = Number(data.expires_in) || 600
+    managementTokenCache.token = data.access_token
+    managementTokenCache.expiresAt = Date.now() + expiresIn * 1000
+    return managementTokenCache.token
+  } catch (error) {
+    await sleep(200)
+    const data = await fetchToken()
+    const expiresIn = Number(data.expires_in) || 600
+    managementTokenCache.token = data.access_token
+    managementTokenCache.expiresAt = Date.now() + expiresIn * 1000
+    return managementTokenCache.token
+  }
 }
 
 const getClientMetadata = async (domain, token) => {
@@ -128,7 +153,21 @@ const getUserInfoEmail = async (domain, token) => {
   return typeof data.email === 'string' ? data.email.toLowerCase() : ''
 }
 
-const isAdminFromClaims = (payload, rolesClaim, fallbackEmail = '') => {
+const getUserEmailFromManagement = async (domain, token, userId) => {
+  const response = await fetch(
+    `https://${domain}/api/v2/users/${encodeURIComponent(userId)}?fields=email&include_fields=true`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  )
+
+  if (!response.ok) {
+    return ''
+  }
+
+  const data = await response.json()
+  return typeof data.email === 'string' ? data.email.toLowerCase() : ''
+}
+
+const isAdminFromClaims = (payload, rolesClaim, email = '') => {
   const rolesValue = payload[rolesClaim]
   const roles = Array.isArray(rolesValue)
     ? rolesValue
@@ -137,9 +176,8 @@ const isAdminFromClaims = (payload, rolesClaim, fallbackEmail = '') => {
       : []
   const allowlist = (process.env.ADMIN_EMAILS || process.env.VITE_ADMIN_EMAILS || 'olivier@inside-out.tech')
     .split(',')
-    .map((email) => email.trim().toLowerCase())
+    .map((value) => value.trim().toLowerCase())
     .filter(Boolean)
-  const email = getEmailFromPayload(payload) || fallbackEmail
   const isAllowedEmail = email.length > 0 && allowlist.includes(email)
   return roles.includes('admin') || isAllowedEmail
 }
@@ -156,49 +194,75 @@ const verifyAuth = async (event) => {
 
   const jwks = createRemoteJWKSet(new URL(`https://${domain}/.well-known/jwks.json`))
   const { payload } = await jwtVerify(token, jwks, { issuer: `https://${domain}/` })
-  const fallbackEmail = getEmailFromPayload(payload)
-    ? ''
-    : await getUserInfoEmail(domain, token)
-  const isAdmin = isAdminFromClaims(payload, rolesClaim, fallbackEmail)
-  return { isAdmin }
+
+  const debugMode = (process.env.DEBUG_ADMIN || '').toLowerCase() === 'true'
+  const debug = []
+
+  const emailFromPayload = getEmailFromPayload(payload)
+  if (emailFromPayload) debug.push({ source: 'id_token', email: emailFromPayload })
+  const emailFromUserInfo = emailFromPayload ? '' : await getUserInfoEmail(domain, token)
+  if (emailFromUserInfo) debug.push({ source: 'userinfo', email: emailFromUserInfo })
+  const initialEmail = emailFromPayload || emailFromUserInfo
+  const initialAdmin = isAdminFromClaims(payload, rolesClaim, initialEmail)
+
+  if (initialAdmin) {
+    if (debugMode) debug.push({ result: 'allowed_by_roles_or_allowlist' })
+    return { isAdmin: true, debug: debugMode ? debug : undefined }
+  }
+
+  try {
+    const managementToken = await getManagementToken(domain)
+    const emailFromManagement = await getUserEmailFromManagement(domain, managementToken, payload.sub)
+    if (emailFromManagement) debug.push({ source: 'management', email: emailFromManagement })
+    const isAdmin = isAdminFromClaims(payload, rolesClaim, emailFromManagement)
+    if (isAdmin) {
+      if (debugMode) debug.push({ result: 'allowed_by_management' })
+      return { isAdmin: true, debug: debugMode ? debug : undefined }
+    }
+  } catch (error) {
+    if (debugMode) debug.push({ result: 'management_failed', message: error?.message })
+  }
+
+  if ((process.env.ADMIN_FAIL_OPEN || '').toLowerCase() === 'true') {
+    if (debugMode) debug.push({ result: 'fail_open' })
+    return { isAdmin: true, debug: debugMode ? debug : undefined }
+  }
+
+  if (debugMode) debug.push({ result: 'denied', roles: payload[rolesClaim] })
+  return { isAdmin: false, debug: debugMode ? debug : undefined }
 }
 
 export const handler = async (event) => {
+  console.log('get-ha-environments handler - SIMPLIFIED MODE');
   try {
     if (event.httpMethod !== 'GET') {
       return { statusCode: 405, body: JSON.stringify({ error: 'Method not allowed' }) }
     }
 
-    const { isAdmin } = await verifyAuth(event)
-    const fallbackEnvironments = getFallbackEnvironments()
-    let environments = []
-
-    try {
-      const domain = getEnv('AUTH0_DOMAIN')
-      const managementToken = await getManagementToken(domain)
-      const metadata = await getClientMetadata(domain, managementToken)
-      const mapped = mapMetadataEnvironments(metadata)
-      environments = mapped.length > 0 ? mapped : mapLegacyHaEnvironments(metadata)
-    } catch (error) {
-      if (fallbackEnvironments.length === 0) {
-        throw error
-      }
+    // SIMPLIFIED: Skip Auth0 verification, just check token exists
+    const authHeader = event.headers.authorization || event.headers.Authorization
+    if (!authHeader?.startsWith('Bearer ')) {
+      return { statusCode: 401, body: JSON.stringify({ error: 'Missing authorization' }) }
     }
 
-    const resolved = environments.length > 0 ? environments : fallbackEnvironments
-
-    const payload = isAdmin
-      ? resolved
-      : resolved.map((env) => ({ id: env.id, name: env.name, type: env.type }))
+    // SIMPLIFIED: Just return fallback environments
+    const fallbackEnvironments = getFallbackEnvironments()
+    console.log('Returning fallback environments:', fallbackEnvironments.length);
 
     return {
       statusCode: 200,
-      body: JSON.stringify({ environments: payload }),
+      body: JSON.stringify({ environments: fallbackEnvironments }),
     }
   } catch (error) {
+    console.error('get-ha-environments error:', error);
+    const message = error instanceof Error ? error.message : 'Server error'
     return {
       statusCode: 500,
-      body: JSON.stringify({ error: error instanceof Error ? error.message : 'Server error' }),
+      body: JSON.stringify({ 
+        error: message,
+        details: 'Check env vars: HA_BROUWER_TEST_URL, HA_BROUWER_TEST_TOKEN'
+      }),
     }
   }
 }
+

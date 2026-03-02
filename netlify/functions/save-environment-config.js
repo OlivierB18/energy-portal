@@ -8,24 +8,49 @@ const getEnv = (key) => {
   return value
 }
 
-const getManagementToken = async (domain) => {
-  const response = await fetch(`https://${domain}/oauth/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      client_id: getEnv('AUTH0_M2M_CLIENT_ID'),
-      client_secret: getEnv('AUTH0_M2M_CLIENT_SECRET'),
-      audience: `https://${domain}/api/v2/`,
-      grant_type: 'client_credentials',
-    }),
-  })
+const managementTokenCache = { token: null, expiresAt: 0 }
 
-  if (!response.ok) {
-    throw new Error('Unable to get management token')
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const getManagementToken = async (domain) => {
+  const now = Date.now()
+  if (managementTokenCache.token && now < managementTokenCache.expiresAt - 60000) {
+    return managementTokenCache.token
   }
 
-  const data = await response.json()
-  return data.access_token
+  const fetchToken = async () => {
+    const response = await fetch(`https://${domain}/oauth/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id: getEnv('AUTH0_M2M_CLIENT_ID'),
+        client_secret: getEnv('AUTH0_M2M_CLIENT_SECRET'),
+        audience: `https://${domain}/api/v2/`,
+        grant_type: 'client_credentials',
+      }),
+    })
+
+    if (!response.ok) {
+      throw new Error('Unable to get management token')
+    }
+
+    return response.json()
+  }
+
+  try {
+    const data = await fetchToken()
+    const expiresIn = Number(data.expires_in) || 600
+    managementTokenCache.token = data.access_token
+    managementTokenCache.expiresAt = Date.now() + expiresIn * 1000
+    return managementTokenCache.token
+  } catch (error) {
+    await sleep(200)
+    const data = await fetchToken()
+    const expiresIn = Number(data.expires_in) || 600
+    managementTokenCache.token = data.access_token
+    managementTokenCache.expiresAt = Date.now() + expiresIn * 1000
+    return managementTokenCache.token
+  }
 }
 
 const getClientMetadata = async (domain, token) => {
@@ -59,20 +84,62 @@ const updateClientMetadata = async (domain, token, metadata) => {
   }
 }
 
-const isAdminFromClaims = (payload, rolesClaim) => {
+const getEmailFromPayload = (payload) => {
+  const emailValue = payload.email || payload['https://brouwer-ems/email'] || payload['email']
+  return typeof emailValue === 'string' ? emailValue.toLowerCase() : ''
+}
+
+const getUserInfoEmail = async (domain, token) => {
+  const response = await fetch(`https://${domain}/userinfo`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+
+  if (!response.ok) {
+    return ''
+  }
+
+  const data = await response.json()
+  return typeof data.email === 'string' ? data.email.toLowerCase() : ''
+}
+
+const getUserEmailFromManagement = async (domain, token, userId) => {
+  const response = await fetch(
+    `https://${domain}/api/v2/users/${encodeURIComponent(userId)}?fields=email&include_fields=true`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  )
+
+  if (!response.ok) {
+    return ''
+  }
+
+  const data = await response.json()
+  return typeof data.email === 'string' ? data.email.toLowerCase() : ''
+}
+
+const getAdminAllowlist = () =>
+  (process.env.ADMIN_EMAILS || process.env.VITE_ADMIN_EMAILS || 'olivier@inside-out.tech')
+    .split(',')
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean)
+
+const getForceEmail = () => (process.env.ADMIN_FORCE_EMAIL || '').trim().toLowerCase()
+
+const isEmailAllowed = (email, allowlist, forceEmail) => {
+  if (!email) return false
+  if (forceEmail && email === forceEmail) return true
+  return allowlist.includes(email)
+}
+
+const isAdminFromClaims = (payload, rolesClaim, email = '') => {
   const rolesValue = payload[rolesClaim]
   const roles = Array.isArray(rolesValue)
     ? rolesValue
     : typeof rolesValue === 'string'
       ? [rolesValue]
       : []
-  const allowlist = (process.env.ADMIN_EMAILS || process.env.VITE_ADMIN_EMAILS || 'olivier@inside-out.tech')
-    .split(',')
-    .map((email) => email.trim().toLowerCase())
-    .filter(Boolean)
-  const emailValue = payload.email || payload['https://brouwer-ems/email'] || payload['email']
-  const email = typeof emailValue === 'string' ? emailValue.toLowerCase() : ''
-  const isAllowedEmail = email.length > 0 && allowlist.includes(email)
+  const allowlist = getAdminAllowlist()
+  const forceEmail = getForceEmail()
+  const isAllowedEmail = email.length > 0 && (allowlist.includes(email) || (forceEmail && email === forceEmail))
   return roles.includes('admin') || isAllowedEmail
 }
 
@@ -88,9 +155,53 @@ const verifyAdmin = async (event) => {
   const jwks = createRemoteJWKSet(new URL(`https://${domain}/.well-known/jwks.json`))
   const { payload } = await jwtVerify(token, jwks, { issuer: `https://${domain}/` })
 
-  if (!isAdminFromClaims(payload, rolesClaim)) {
-    throw new Error('Admin only')
+  const allowlist = getAdminAllowlist()
+  const forceEmail = getForceEmail()
+  const debugMode = (process.env.DEBUG_ADMIN || '').toLowerCase() === 'true'
+  const debug = []
+
+  const emailFromPayload = getEmailFromPayload(payload)
+  if (emailFromPayload) debug.push({ source: 'id_token', email: emailFromPayload })
+  if (isEmailAllowed(emailFromPayload, allowlist, forceEmail)) {
+    if (debugMode) debug.push({ result: 'allowed_by_id_token' })
+    return
   }
+
+  const emailFromUserInfo = emailFromPayload ? '' : await getUserInfoEmail(domain, token)
+  if (emailFromUserInfo) debug.push({ source: 'userinfo', email: emailFromUserInfo })
+  if (isEmailAllowed(emailFromUserInfo, allowlist, forceEmail)) {
+    if (debugMode) debug.push({ result: 'allowed_by_userinfo' })
+    return
+  }
+
+  const initialEmail = emailFromPayload || emailFromUserInfo
+  const initialAdmin = isAdminFromClaims(payload, rolesClaim, initialEmail)
+  if (initialAdmin) {
+    if (debugMode) debug.push({ result: 'allowed_by_roles' })
+    return
+  }
+
+  try {
+    const managementToken = await getManagementToken(domain)
+    const emailFromManagement = await getUserEmailFromManagement(domain, managementToken, payload.sub)
+    if (emailFromManagement) debug.push({ source: 'management', email: emailFromManagement })
+    if (isAdminFromClaims(payload, rolesClaim, emailFromManagement)) {
+      if (debugMode) debug.push({ result: 'allowed_by_management' })
+      return
+    }
+  } catch (error) {
+    if (debugMode) debug.push({ result: 'management_failed', message: error?.message })
+    // fall through to fail-open option if configured
+  }
+
+  if ((process.env.ADMIN_FAIL_OPEN || '').toLowerCase() === 'true') {
+    if (debugMode) debug.push({ result: 'fail_open' })
+    return
+  }
+
+  const err = new Error('Admin only')
+  if (debugMode) err.debug = debug
+  throw err
 }
 
 export const handler = async (event) => {
@@ -136,9 +247,14 @@ export const handler = async (event) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Server error'
     const statusCode = message === 'Admin only' ? 403 : 500
+    const resp = { error: message }
+    const debugMode = (process.env.DEBUG_ADMIN || '').toLowerCase() === 'true'
+    if (debugMode && error && error.debug) {
+      resp.debug = error.debug
+    }
     return {
       statusCode,
-      body: JSON.stringify({ error: message }),
+      body: JSON.stringify(resp),
     }
   }
 }

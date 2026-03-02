@@ -1,4 +1,4 @@
-import { Zap, Calendar, Activity } from 'lucide-react'
+import { Zap, Calendar, Activity, Loader2 } from 'lucide-react'
 
 interface EnergyCardProps {
   title: string
@@ -6,17 +6,25 @@ interface EnergyCardProps {
   unit: string
   cost: number | null
   icon: 'zap' | 'calendar' | 'activity'
+  status?: 'connecting' | 'connected' | 'error'
 }
 
-export default function EnergyCard({ title, value, unit, cost, icon }: EnergyCardProps) {
+export default function EnergyCard({ title, value, unit, cost, icon, status }: EnergyCardProps) {
   const getIcon = () => {
     switch (icon) {
       case 'zap':
         return <Zap className="w-8 h-8 text-brand-2" />
       case 'calendar':
         return <Calendar className="w-8 h-8 text-brand-3" />
-      case 'activity':
-        return <Activity className="w-8 h-8 text-brand-4" />
+      case 'activity': {
+        if (status === 'connecting') {
+          return <Loader2 className="w-8 h-8 text-yellow-400 animate-spin" />;
+        }
+        let color = 'text-brand-4';
+        if (status === 'connected') color = 'text-green-400';
+        else if (status === 'error') color = 'text-red-500';
+        return <Activity className={`w-8 h-8 ${color}`} />;
+      }
       default:
         return null
     }

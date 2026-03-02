@@ -80,24 +80,49 @@ const isAdminFromClaims = (payload, rolesClaim, fallbackEmail = '') => {
   return roles.includes('admin') || isAllowedEmail
 }
 
-const getManagementToken = async (domain) => {
-  const response = await fetch(`https://${domain}/oauth/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      client_id: getEnv('AUTH0_M2M_CLIENT_ID'),
-      client_secret: getEnv('AUTH0_M2M_CLIENT_SECRET'),
-      audience: `https://${domain}/api/v2/`,
-      grant_type: 'client_credentials',
-    }),
-  })
+const managementTokenCache = { token: null, expiresAt: 0 }
 
-  if (!response.ok) {
-    throw new Error('Unable to get management token')
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const getManagementToken = async (domain) => {
+  const now = Date.now()
+  if (managementTokenCache.token && now < managementTokenCache.expiresAt - 60000) {
+    return managementTokenCache.token
   }
 
-  const data = await response.json()
-  return data.access_token
+  const fetchToken = async () => {
+    const response = await fetch(`https://${domain}/oauth/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id: getEnv('AUTH0_M2M_CLIENT_ID'),
+        client_secret: getEnv('AUTH0_M2M_CLIENT_SECRET'),
+        audience: `https://${domain}/api/v2/`,
+        grant_type: 'client_credentials',
+      }),
+    })
+
+    if (!response.ok) {
+      throw new Error('Unable to get management token')
+    }
+
+    return response.json()
+  }
+
+  try {
+    const data = await fetchToken()
+    const expiresIn = Number(data.expires_in) || 600
+    managementTokenCache.token = data.access_token
+    managementTokenCache.expiresAt = Date.now() + expiresIn * 1000
+    return managementTokenCache.token
+  } catch (error) {
+    await sleep(200)
+    const data = await fetchToken()
+    const expiresIn = Number(data.expires_in) || 600
+    managementTokenCache.token = data.access_token
+    managementTokenCache.expiresAt = Date.now() + expiresIn * 1000
+    return managementTokenCache.token
+  }
 }
 
 const fetchUsers = async (domain, token) => {

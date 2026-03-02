@@ -39,11 +39,15 @@ export default function Dashboard({
   const [envLoading, setEnvLoading] = useState(false)
   const [envError, setEnvError] = useState<string | null>(null)
   const [haEntities, setHaEntities] = useState<HaEntity[]>([])
+  // Laatst bekende sensoren (blijven altijd staan bij error)
+  const [lastKnownHaEntities, setLastKnownHaEntities] = useState<HaEntity[]>([])
   const [haLoading, setHaLoading] = useState(false)
   const [haError, setHaError] = useState<string | null>(null)
   const [haActionId, setHaActionId] = useState<string | null>(null)
   const [showHaConfig, setShowHaConfig] = useState(false)
   const [haRefreshKey, setHaRefreshKey] = useState(0)
+  // Home Assistant connection status: 'connecting' | 'connected' | 'error'
+  const [haConnectionStatus, setHaConnectionStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   const { isAuthenticated, getIdTokenClaims, getAccessTokenSilently } = useAuth0()
 
   const getAuthToken = async () => {
@@ -172,39 +176,55 @@ export default function Dashboard({
     const loadHaEntities = async () => {
       if (!isAuthenticated) {
         setHaEntities([])
+        setHaConnectionStatus('error')
         return
       }
-
       if (!selectedEnvironment) {
         setHaEntities([])
+        setHaConnectionStatus('error')
         return
       }
-
       setHaLoading(true)
       setHaError(null)
-
+      setHaConnectionStatus('connecting')
       try {
         const token = await getAuthToken()
         const response = await fetch(`/.netlify/functions/ha-entities?environmentId=${selectedEnvironment}`, {
           headers: { Authorization: `Bearer ${token}` },
         })
-
         if (!response.ok) {
           const data = await response.json().catch(() => null)
+          setHaConnectionStatus('error')
           throw new Error(data?.error || 'Unable to load Home Assistant data')
         }
-
         const data = await response.json()
-        setHaEntities(Array.isArray(data?.entities) ? data.entities : [])
+        const entities = Array.isArray(data?.entities) ? data.entities : [];
+        setHaEntities(entities)
+        setLastKnownHaEntities(entities)
+        setHaConnectionStatus('connected')
+        setHaError(null) // Clear error on success
       } catch (error) {
+        // eslint-disable-next-line no-console
+        console.log('HA FETCH ERROR', error);
         setHaError(error instanceof Error ? error.message : 'Unable to load Home Assistant data')
-        setHaEntities([])
+        setHaConnectionStatus('error')
+        // Keep last known entities visible on error
       } finally {
         setHaLoading(false)
       }
     }
-
+    
+    // Initial load
     void loadHaEntities()
+    
+    // Auto-refresh every 10 seconds to keep connection alive
+    const interval = setInterval(() => {
+      // eslint-disable-next-line no-console
+      console.log('Auto-refreshing Home Assistant entities...');
+      void loadHaEntities()
+    }, 10000) // 10 seconds
+    
+    return () => clearInterval(interval)
   }, [getAccessTokenSilently, isAuthenticated, selectedEnvironment, haRefreshKey])
 
   const getControlActions = (domain: string) => {
@@ -328,10 +348,28 @@ export default function Dashboard({
           {/* Current Environment Info */}
           <div className="bg-light-2 bg-opacity-10 rounded-xl p-4 backdrop-blur-sm">
             <div className="flex items-center gap-2 text-light-2">
-              <div className="w-3 h-3 bg-green-400 rounded-full animate-pulse"></div>
+              {/* Status indicator: green=connected, red=error, yellow=connecting */}
+              <div
+                className={`w-3 h-3 rounded-full ${
+                  haConnectionStatus === 'connected'
+                    ? 'bg-green-400 animate-pulse'
+                    : haConnectionStatus === 'connecting'
+                    ? 'bg-yellow-400 animate-pulse'
+                    : 'bg-red-500 animate-pulse'
+                }`}
+                title={
+                  haConnectionStatus === 'connected'
+                    ? 'Connected to Home Assistant'
+                    : haConnectionStatus === 'connecting'
+                    ? 'Connecting to Home Assistant...'
+                    : 'Not connected to Home Assistant'
+                }
+              ></div>
               <span className="font-medium">
                 Currently monitoring: {environments.find(e => e.id === selectedEnvironment)?.name}
               </span>
+              {/* DEBUG: Toon actuele connectie-status */}
+              <span className="ml-4 text-xs text-yellow-300 bg-dark-2 px-2 py-1 rounded" style={{fontFamily:'monospace'}}>status: {haConnectionStatus}</span>
             </div>
             <div className="mt-3 text-light-1 text-sm">
               {allowedEnvironmentIds ? (
@@ -399,10 +437,17 @@ export default function Dashboard({
           />
           <EnergyCard
             title="Status"
-            value="Active"
+            value={
+              haConnectionStatus === 'connected'
+                ? 'Active'
+                : haConnectionStatus === 'connecting'
+                ? 'Connecting...'
+                : 'Error'
+            }
             unit=""
             cost={null}
             icon="activity"
+            status={haConnectionStatus}
           />
         </div>
 
@@ -467,44 +512,47 @@ export default function Dashboard({
 
           {haLoading && <p className="text-light-1">Loading Home Assistant data...</p>}
           {haError && <p className="text-red-300">{haError}</p>}
-          {!haLoading && !haError && haEntities.length === 0 && (
-            <p className="text-light-1">No sensors selected for this environment.</p>
-          )}
-
-          {!haLoading && haEntities.length > 0 && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {haEntities.map((entity) => {
-                const actions = getControlActions(entity.domain)
-                return (
-                  <div key={entity.entity_id} className="glass-card rounded-2xl p-5">
-                    <div className="flex items-start justify-between mb-3">
-                      <div>
-                        <p className="text-light-1 text-xs uppercase">{entity.domain}</p>
-                        <p className="text-light-2 font-medium">
-                          {entity.friendly_name || entity.entity_id}
-                        </p>
-                        <p className="text-light-1 text-xs">{entity.entity_id}</p>
+          {/* Toon altijd de laatst bekende sensoren als er een error is */}
+          {!haLoading && (haEntities.length > 0 || lastKnownHaEntities.length > 0) && (
+            <>
+              <div className="mb-4 text-xs text-light-1 opacity-70 flex items-center gap-2">
+                <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse"></div>
+                Auto-refreshing every 10 seconds
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {(haEntities.length > 0 ? haEntities : lastKnownHaEntities).map((entity) => {
+                  const actions = getControlActions(entity.domain)
+                  return (
+                    <div key={entity.entity_id} className="glass-card rounded-2xl p-5">
+                      <div className="flex items-start justify-between mb-3">
+                        <div>
+                          <p className="text-light-1 text-xs uppercase">{entity.domain}</p>
+                          <p className="text-light-2 font-medium">
+                            {entity.friendly_name || entity.entity_id}
+                          </p>
+                          <p className="text-light-1 text-xs">{entity.entity_id}</p>
+                        </div>
+                        <div className="text-light-2 text-sm">{entity.state}</div>
                       </div>
-                      <div className="text-light-2 text-sm">{entity.state}</div>
+                      {actions.length > 0 && (
+                        <div className="flex flex-wrap gap-2">
+                          {actions.map((action) => (
+                            <button
+                              key={`${entity.entity_id}-${action.action}`}
+                              onClick={() => runHaAction(entity.entity_id, action.action)}
+                              disabled={haActionId === entity.entity_id}
+                              className="px-3 py-2 rounded-lg bg-dark-2 bg-opacity-70 text-light-1 hover:bg-opacity-90 transition-all disabled:opacity-60"
+                            >
+                              {action.label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
-                    {actions.length > 0 && (
-                      <div className="flex flex-wrap gap-2">
-                        {actions.map((action) => (
-                          <button
-                            key={`${entity.entity_id}-${action.action}`}
-                            onClick={() => runHaAction(entity.entity_id, action.action)}
-                            disabled={haActionId === entity.entity_id}
-                            className="px-3 py-2 rounded-lg bg-dark-2 bg-opacity-70 text-light-1 hover:bg-opacity-90 transition-all disabled:opacity-60"
-                          >
-                            {action.label}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )
-              })}
-            </div>
+                  )
+                })}
+              </div>
+            </>
           )}
         </div>
 
