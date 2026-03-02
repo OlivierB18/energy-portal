@@ -173,7 +173,9 @@ export default function Dashboard({
   }, [selectedEnvironment, selectedEnvironmentId])
 
   useEffect(() => {
-    const loadHaEntities = async () => {
+    let isInitialLoad = true
+    
+    const loadHaEntities = async (silent = false) => {
       if (!isAuthenticated) {
         setHaEntities([])
         setHaConnectionStatus('error')
@@ -184,9 +186,14 @@ export default function Dashboard({
         setHaConnectionStatus('error')
         return
       }
-      setHaLoading(true)
-      setHaError(null)
-      setHaConnectionStatus('connecting')
+      
+      // Only show loading state on initial load, not during background refreshes
+      if (!silent) {
+        setHaLoading(true)
+        setHaError(null)
+        setHaConnectionStatus('connecting')
+      }
+      
       try {
         const token = await getAuthToken()
         const response = await fetch(`/.netlify/functions/ha-entities?environmentId=${selectedEnvironment}`, {
@@ -210,18 +217,18 @@ export default function Dashboard({
         setHaConnectionStatus('error')
         // Keep last known entities visible on error
       } finally {
-        setHaLoading(false)
+        if (!silent) {
+          setHaLoading(false)
+        }
       }
     }
     
-    // Initial load
-    void loadHaEntities()
+    // Initial load with visible loading state
+    void loadHaEntities(false)
     
-    // Auto-refresh every 10 seconds to keep connection alive
+    // Auto-refresh every 10 seconds silently in background
     const interval = setInterval(() => {
-      // eslint-disable-next-line no-console
-      console.log('Auto-refreshing Home Assistant entities...');
-      void loadHaEntities()
+      void loadHaEntities(true) // Silent refresh
     }, 10000) // 10 seconds
     
     return () => clearInterval(interval)
@@ -512,14 +519,9 @@ export default function Dashboard({
 
           {haLoading && <p className="text-light-1">Loading Home Assistant data...</p>}
           {haError && <p className="text-red-300">{haError}</p>}
-          {/* Toon altijd de laatst bekende sensoren als er een error is */}
+          {/* Toon altijd de laatst bekende sensoren */}
           {!haLoading && (haEntities.length > 0 || lastKnownHaEntities.length > 0) && (
-            <>
-              <div className="mb-4 text-xs text-light-1 opacity-70 flex items-center gap-2">
-                <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse"></div>
-                Auto-refreshing every 10 seconds
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {(haEntities.length > 0 ? haEntities : lastKnownHaEntities).map((entity) => {
                   const actions = getControlActions(entity.domain)
                   return (
