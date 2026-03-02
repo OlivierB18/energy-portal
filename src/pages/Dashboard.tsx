@@ -177,13 +177,17 @@ export default function Dashboard({
     
     const loadHaEntities = async (silent = false) => {
       if (!isAuthenticated) {
-        setHaEntities([])
-        setHaConnectionStatus('error')
+        if (!silent) {
+          setHaEntities([])
+          setHaConnectionStatus('error')
+        }
         return
       }
       if (!selectedEnvironment) {
-        setHaEntities([])
-        setHaConnectionStatus('error')
+        if (!silent) {
+          setHaEntities([])
+          setHaConnectionStatus('error')
+        }
         return
       }
       
@@ -201,21 +205,32 @@ export default function Dashboard({
         })
         if (!response.ok) {
           const data = await response.json().catch(() => null)
-          setHaConnectionStatus('error')
-          throw new Error(data?.error || 'Unable to load Home Assistant data')
+          if (!silent) {
+            setHaConnectionStatus('error')
+            setHaError(data?.error || 'Unable to load Home Assistant data')
+          }
+          return // Exit silently on error for background refresh
         }
         const data = await response.json()
         const entities = Array.isArray(data?.entities) ? data.entities : [];
+        
+        // Always update the entities
         setHaEntities(entities)
         setLastKnownHaEntities(entities)
-        setHaConnectionStatus('connected')
-        setHaError(null) // Clear error on success
+        
+        // Only show status updates on initial load
+        if (!silent) {
+          setHaConnectionStatus('connected')
+          setHaError(null)
+        }
       } catch (error) {
         // eslint-disable-next-line no-console
         console.log('HA FETCH ERROR', error);
-        setHaError(error instanceof Error ? error.message : 'Unable to load Home Assistant data')
-        setHaConnectionStatus('error')
-        // Keep last known entities visible on error
+        // On silent refresh, don't touch the UI - just keep showing old data
+        if (!silent) {
+          setHaError(error instanceof Error ? error.message : 'Unable to load Home Assistant data')
+          setHaConnectionStatus('error')
+        }
       } finally {
         if (!silent) {
           setHaLoading(false)
@@ -228,7 +243,7 @@ export default function Dashboard({
     
     // Auto-refresh every 10 seconds silently in background
     const interval = setInterval(() => {
-      void loadHaEntities(true) // Silent refresh
+      void loadHaEntities(true) // Silent refresh - don't touch UI on error
     }, 10000) // 10 seconds
     
     return () => clearInterval(interval)
