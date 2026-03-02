@@ -292,16 +292,15 @@ export const handler = async (event) => {
     const data = await response.json()
     console.log('Received all entities from HA:', Array.isArray(data) ? data.length : 0);
     
-    // Filter to only show useful entities (sensors, switches, lights, etc.)
-    // Exclude update, script, scene, input_* entities
-    const allowedDomains = ['sensor', 'switch', 'light', 'binary_sensor', 'climate', 'water_heater', 'thermostat']
+    // Filter to show ALMOST everything EXCEPT update entities and internal stuff
+    const blockedDomains = ['update', 'script', 'automation', 'group', 'number', 'input_number', 'input_select', 'input_datetime']
     
     const entities = Array.isArray(data)
       ? data
         .filter(entity => {
           const domain = String(entity.entity_id || '').split('.')[0]
-          // Only show allowed domains, and exclude internal/system entities
-          return allowedDomains.includes(domain) && !entity.entity_id.startsWith('update.')
+          // Block unwanted domains, allow everything else
+          return !blockedDomains.includes(domain)
         })
         .map((entity) => ({
           entity_id: entity.entity_id,
