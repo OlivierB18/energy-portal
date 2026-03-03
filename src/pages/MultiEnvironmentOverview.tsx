@@ -53,6 +53,8 @@ export default function MultiEnvironmentOverview({
     })
   }
 
+  const environmentIdsSignature = environments.map((env) => env.id).join('|')
+
   useEffect(() => {
     const loadEnvironments = async () => {
       if (!isAuthenticated) {
@@ -87,8 +89,8 @@ export default function MultiEnvironmentOverview({
             siteId: env.config?.siteId || '',
             notes: env.config?.notes || '',
           },
-          status: 'offline',
-          lastUpdate: 'just now',
+          status: 'connecting',
+          lastUpdate: '-',
         }))
         setEnvironments(nextEnvironments)
       } catch (error) {
@@ -150,6 +152,108 @@ export default function MultiEnvironmentOverview({
 
     void loadAssignments()
   }, [getAccessTokenSilently, getIdTokenClaims, isAuthenticated, isAdmin])
+
+  useEffect(() => {
+    const parseValue = (value?: string): number => {
+      const parsed = parseFloat(value || '')
+      return Number.isNaN(parsed) ? 0 : parsed
+    }
+
+    const findSensorByKeywords = (entities: Array<{ entity_id: string; state: string; domain: string }>, keywords: string[]) => {
+      return entities.find((entity) =>
+        entity.domain === 'sensor' &&
+        keywords.some((keyword) => entity.entity_id.toLowerCase().includes(keyword.toLowerCase())),
+      )
+    }
+
+    const deriveLiveData = (entities: Array<{ entity_id: string; state: string; domain: string }>) => {
+      const powerEntity = findSensorByKeywords(entities, ['power', 'watt', 'current_power', 'active_power'])
+      const dailyEntity = findSensorByKeywords(entities, ['energy_today', 'daily_energy', 'today', 'day_energy'])
+
+      let currentPower = parseValue(powerEntity?.state)
+      if (currentPower > 100) {
+        currentPower = currentPower / 1000
+      }
+
+      return {
+        currentPower: Number(currentPower.toFixed(2)),
+        dailyUsage: Number(parseValue(dailyEntity?.state).toFixed(2)),
+      }
+    }
+
+    const environmentIds = environmentIdsSignature ? environmentIdsSignature.split('|') : []
+
+    const refreshEnvironmentStatuses = async () => {
+      if (!isAuthenticated || environmentIds.length === 0) {
+        return
+      }
+
+      try {
+        const token = await getAuthToken()
+
+        const refreshResults = await Promise.all(
+          environmentIds.map(async (environmentId) => {
+            try {
+              const response = await fetch(`/.netlify/functions/ha-entities?environmentId=${environmentId}`, {
+                headers: { Authorization: `Bearer ${token}` },
+              })
+
+              if (!response.ok) {
+                return {
+                  environmentId,
+                  status: 'offline' as const,
+                }
+              }
+
+              const data = await response.json()
+              const entities = Array.isArray(data?.entities) ? data.entities : []
+              const liveData = deriveLiveData(entities)
+
+              return {
+                environmentId,
+                status: 'online' as const,
+                currentPower: liveData.currentPower,
+                dailyUsage: liveData.dailyUsage,
+                lastUpdate: new Date().toLocaleTimeString(),
+              }
+            } catch {
+              return {
+                environmentId,
+                status: 'offline' as const,
+              }
+            }
+          }),
+        )
+
+        const refreshById = new Map(refreshResults.map((result) => [result.environmentId, result]))
+        setEnvironments((prev) =>
+          prev.map((env) => {
+            const refreshed = refreshById.get(env.id)
+            if (!refreshed) {
+              return env
+            }
+
+            return {
+              ...env,
+              status: refreshed.status,
+              currentPower: refreshed.currentPower ?? env.currentPower,
+              dailyUsage: refreshed.dailyUsage ?? env.dailyUsage,
+              lastUpdate: refreshed.lastUpdate ?? env.lastUpdate,
+            }
+          }),
+        )
+      } catch {
+        setEnvironments((prev) => prev.map((env) => ({ ...env, status: 'offline' as const })))
+      }
+    }
+
+    void refreshEnvironmentStatuses()
+    const interval = setInterval(() => {
+      void refreshEnvironmentStatuses()
+    }, 10000)
+
+    return () => clearInterval(interval)
+  }, [environmentIdsSignature, getAccessTokenSilently, isAuthenticated])
 
   const loadEnvironmentUsers = async (environmentId: string) => {
     if (!isAdmin) {
