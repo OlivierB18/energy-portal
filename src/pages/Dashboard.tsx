@@ -655,58 +655,87 @@ export default function Dashboard({
 
           {/* Current Environment Info */}
           <div className="bg-light-2 bg-opacity-10 rounded-xl p-4 backdrop-blur-sm">
-            <div className="flex items-center gap-2 text-light-2">
-              {/* Status indicator: green=connected, red=error, yellow=connecting */}
-              <div
-                className={`w-3 h-3 rounded-full ${
-                  haConnectionStatus === 'connected'
-                    ? 'bg-green-400 animate-pulse'
-                    : haConnectionStatus === 'connecting'
-                    ? 'bg-yellow-400 animate-pulse'
-                    : 'bg-red-500 animate-pulse'
-                }`}
-                title={
-                  haConnectionStatus === 'connected'
-                    ? 'Connected to Home Assistant'
-                    : haConnectionStatus === 'connecting'
-                    ? 'Connecting to Home Assistant...'
-                    : 'Not connected to Home Assistant'
-                }
-              ></div>
-              <span className="font-medium">
-                Currently monitoring: {environments.find(e => e.id === selectedEnvironment)?.name}
-              </span>
-              {/* DEBUG: Toon actuele connectie-status */}
-              <span className="ml-4 text-xs text-yellow-300 bg-dark-2 px-2 py-1 rounded" style={{fontFamily:'monospace'}}>status: {haConnectionStatus}</span>
-            </div>
-            <div className="mt-3 text-light-1 text-sm">
-              {allowedEnvironmentIds ? (
-                assignedEnvironmentLabels.length > 0 ? (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="opacity-80">Your environments:</span>
-                    {assignedEnvironmentLabels.map((label) => (
-                      <span
-                        key={label}
-                        className="px-2 py-1 rounded-full bg-light-2 bg-opacity-20 text-light-2 text-xs"
-                      >
-                        {label}
-                      </span>
-                    ))}
-                  </div>
-                ) : (
-                  <span className="opacity-80">No environments assigned.</span>
-                )
-              ) : (
-                <span className="opacity-80">All environments available.</span>
-              )}
-              {envLoading && <div className="mt-2 text-xs opacity-70">Loading environments...</div>}
-              {envError && <div className="mt-2 text-xs text-red-300">{envError}</div>}
-            </div>
+            {visibleEnvironments.length > 0 ? (
+              <>
+                <div className="flex items-center gap-2 text-light-2">
+                  {/* Status indicator: green=connected, red=error, yellow=connecting */}
+                  <div
+                    className={`w-3 h-3 rounded-full ${
+                      haConnectionStatus === 'connected'
+                        ? 'bg-green-400 animate-pulse'
+                        : haConnectionStatus === 'connecting'
+                        ? 'bg-yellow-400 animate-pulse'
+                        : 'bg-red-500 animate-pulse'
+                    }`}
+                    title={
+                      haConnectionStatus === 'connected'
+                        ? 'Connected to Home Assistant'
+                        : haConnectionStatus === 'connecting'
+                        ? 'Connecting to Home Assistant...'
+                        : 'Not connected to Home Assistant'
+                    }
+                  ></div>
+                  <span className="font-medium">
+                    Currently monitoring: {environments.find(e => e.id === selectedEnvironment)?.name}
+                  </span>
+                  {/* DEBUG: Toon actuele connectie-status */}
+                  <span className="ml-4 text-xs text-yellow-300 bg-dark-2 px-2 py-1 rounded" style={{fontFamily:'monospace'}}>status: {haConnectionStatus}</span>
+                </div>
+                <div className="mt-3 text-light-1 text-sm">
+                  {allowedEnvironmentIds ? (
+                    assignedEnvironmentLabels.length > 0 ? (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="opacity-80">Your environments:</span>
+                        {assignedEnvironmentLabels.map((label) => (
+                          <span
+                            key={label}
+                            className="px-2 py-1 rounded-full bg-light-2 bg-opacity-20 text-light-2 text-xs"
+                          >
+                            {label}
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="opacity-80">No environments assigned.</span>
+                    )
+                  ) : (
+                    <span className="opacity-80">All environments available.</span>
+                  )}
+                  {envLoading && <div className="mt-2 text-xs opacity-70">Loading environments...</div>}
+                  {envError && <div className="mt-2 text-xs text-red-300">{envError}</div>}
+                </div>
+              </>
+            ) : (
+              <div className="text-light-2 text-center py-2">
+                <span className="font-medium">No environments assigned</span>
+              </div>
+            )}
           </div>
         </div>
 
-        {/* Main Current Power Display */}
-        <div className="glass-panel rounded-3xl shadow-2xl p-8 mb-8">
+        {/* No Environments Assigned Message */}
+        {visibleEnvironments.length === 0 && !envLoading && (
+          <div className="glass-panel rounded-3xl shadow-2xl p-12 text-center">
+            <div className="max-w-md mx-auto">
+              <div className="w-20 h-20 mx-auto mb-6 bg-dark-2 bg-opacity-20 rounded-full flex items-center justify-center">
+                <Home className="w-10 h-10 text-dark-2" />
+              </div>
+              <h2 className="text-3xl font-heavy text-dark-1 mb-4">No Environments Assigned</h2>
+              <p className="text-dark-2 text-lg mb-2">
+                You don't have access to any environments yet.
+              </p>
+              <p className="text-dark-2">
+                Please contact your sales representative to request access.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Main Content - Only show when there are environments */}
+        {visibleEnvironments.length > 0 && (
+          <>
+            {/* Main Current Power Display */}
+            <div className="glass-panel rounded-3xl shadow-2xl p-8 mb-8">
           <div className="flex items-center justify-between mb-6">
             <div>
               <p className="text-dark-2 text-sm font-medium uppercase">Current Power Usage</p>
@@ -854,6 +883,8 @@ export default function Dashboard({
         <div className="mt-8 text-center text-light-1 text-sm">
           <p>Last updated: {new Date().toLocaleTimeString()}</p>
         </div>
+          </>
+        )}
 
         {showHaConfig && (
           <HomeAssistantConfig
