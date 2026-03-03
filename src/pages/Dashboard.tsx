@@ -3,7 +3,7 @@ import EnergyCard from '../components/EnergyCard'
 import EnergyChart from '../components/EnergyChart'
 import HomeAssistantConfig from '../components/HomeAssistantConfig'
 import EnergyPriceModal from '../components/EnergyPriceModal'
-import { Zap, TrendingUp, Clock, Home, Settings, DollarSign } from 'lucide-react'
+import { Zap, TrendingUp, Clock, Home, Settings, DollarSign, ChevronDown } from 'lucide-react'
 import { useAuth0 } from '@auth0/auth0-react'
 import { HaEntity, EnergyPricingConfig } from '../types'
 
@@ -55,6 +55,7 @@ export default function Dashboard({
   const [haRefreshKey, setHaRefreshKey] = useState(0)
   const [powerSamples, setPowerSamples] = useState<PowerSample[]>([])
   const [showPriceModal, setShowPriceModal] = useState(false)
+  const [showSettingsDropdown, setShowSettingsDropdown] = useState(false)
   const [pricingConfig, setPricingConfig] = useState<EnergyPricingConfig | null>(null)
   // Home Assistant connection status: 'connecting' | 'connected' | 'error'
   const [haConnectionStatus, setHaConnectionStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
@@ -196,6 +197,19 @@ export default function Dashboard({
       setPricingConfig(null)
     }
   }, [selectedEnvironment])
+
+  // Close settings dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as HTMLElement
+      if (showSettingsDropdown && !target.closest('.settings-dropdown-container')) {
+        setShowSettingsDropdown(false)
+      }
+    }
+
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [showSettingsDropdown])
 
   useEffect(() => {
     const loadHaEntities = async (silent = false) => {
@@ -590,15 +604,52 @@ export default function Dashboard({
                   </option>
                 ))}
               </select>
-              <button
-                onClick={() => setShowPriceModal(true)}
-                disabled={!selectedEnvironment}
-                className="flex items-center gap-2 px-3 py-2 bg-light-2 bg-opacity-20 text-light-2 border border-light-2 border-opacity-30 rounded-lg hover:bg-opacity-30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                title="Configure energy pricing"
-              >
-                <DollarSign className="w-5 h-5" />
-                <span className="text-sm font-medium">Energy Price</span>
-              </button>
+              <div className="relative settings-dropdown-container">
+                <button
+                  onClick={() => setShowSettingsDropdown(!showSettingsDropdown)}
+                  disabled={!selectedEnvironment}
+                  className="flex items-center gap-2 px-3 py-2 bg-light-2 bg-opacity-20 text-light-2 border border-light-2 border-opacity-30 rounded-lg hover:bg-opacity-30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  title="Environment Settings"
+                >
+                  <Settings className="w-5 h-5" />
+                  <span className="text-sm font-medium">Settings</span>
+                  <ChevronDown className="w-4 h-4" />
+                </button>
+                {showSettingsDropdown && selectedEnvironment && (
+                  <div className="absolute right-0 mt-2 w-56 bg-dark-1 border border-light-2 border-opacity-30 rounded-lg shadow-xl z-50">
+                    <div className="py-1">
+                      <button
+                        onClick={() => {
+                          setShowPriceModal(true)
+                          setShowSettingsDropdown(false)
+                        }}
+                        className="w-full flex items-center gap-3 px-4 py-3 text-light-2 hover:bg-light-2 hover:bg-opacity-10 transition-all text-left"
+                      >
+                        <DollarSign className="w-5 h-5" />
+                        <div>
+                          <div className="font-medium">Energy Price</div>
+                          <div className="text-xs text-light-1">Configure pricing & rates</div>
+                        </div>
+                      </button>
+                      {isAdmin && (
+                        <button
+                          onClick={() => {
+                            setShowHaConfig(true)
+                            setShowSettingsDropdown(false)
+                          }}
+                          className="w-full flex items-center gap-3 px-4 py-3 text-light-2 hover:bg-light-2 hover:bg-opacity-10 transition-all text-left border-t border-light-2 border-opacity-10"
+                        >
+                          <Settings className="w-5 h-5" />
+                          <div>
+                            <div className="font-medium">Configure Sensors</div>
+                            <div className="text-xs text-light-1">Setup Home Assistant</div>
+                          </div>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
@@ -757,14 +808,6 @@ export default function Dashboard({
         <div className="glass-panel rounded-3xl shadow-2xl p-8 mt-8">
           <div className="flex items-center justify-between mb-6">
             <h2 className="text-2xl font-heavy text-dark-1">Home Assistant</h2>
-            {isAdmin && (
-              <button
-                onClick={() => setShowHaConfig(true)}
-                className="glass-button px-4 py-2 rounded-lg font-medium"
-              >
-                Configure sensors
-              </button>
-            )}
           </div>
 
           {haLoading && <p className="text-light-1">Loading Home Assistant data...</p>}
