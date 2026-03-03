@@ -2,9 +2,10 @@ import { useEffect, useState, useMemo } from 'react'
 import EnergyCard from '../components/EnergyCard'
 import EnergyChart from '../components/EnergyChart'
 import HomeAssistantConfig from '../components/HomeAssistantConfig'
-import { Zap, TrendingUp, Clock, Home, Settings } from 'lucide-react'
+import EnergyPriceModal from '../components/EnergyPriceModal'
+import { Zap, TrendingUp, Clock, Home, Settings, DollarSign } from 'lucide-react'
 import { useAuth0 } from '@auth0/auth0-react'
-import { HaEntity } from '../types'
+import { HaEntity, EnergyPricingConfig } from '../types'
 
 interface EnvironmentConfig {
   id: string
@@ -53,6 +54,8 @@ export default function Dashboard({
   const [showHaConfig, setShowHaConfig] = useState(false)
   const [haRefreshKey, setHaRefreshKey] = useState(0)
   const [powerSamples, setPowerSamples] = useState<PowerSample[]>([])
+  const [showPriceModal, setShowPriceModal] = useState(false)
+  const [pricingConfig, setPricingConfig] = useState<EnergyPricingConfig | null>(null)
   // Home Assistant connection status: 'connecting' | 'connected' | 'error'
   const [haConnectionStatus, setHaConnectionStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   const { isAuthenticated, getIdTokenClaims, getAccessTokenSilently } = useAuth0()
@@ -178,6 +181,21 @@ export default function Dashboard({
       setSelectedEnvironment(selectedEnvironmentId)
     }
   }, [selectedEnvironment, selectedEnvironmentId])
+
+  useEffect(() => {
+    try {
+      const key = `energy_pricing_${selectedEnvironment}`
+      const saved = localStorage.getItem(key)
+      if (saved) {
+        const config: EnergyPricingConfig = JSON.parse(saved)
+        setPricingConfig(config)
+      } else {
+        setPricingConfig(null)
+      }
+    } catch {
+      setPricingConfig(null)
+    }
+  }, [selectedEnvironment])
 
   useEffect(() => {
     const loadHaEntities = async (silent = false) => {
@@ -447,10 +465,11 @@ export default function Dashboard({
       console.log('[Energy] Tracking locally - Daily:', dailyUsage.toFixed(3), 'kWh, Monthly:', monthlyUsage.toFixed(3), 'kWh')
     }
 
-    // Calculate estimated costs (€0.30 per kWh as example rate)
-    const pricePerKwh = 0.30
-    const costToday = dailyUsage * pricePerKwh
-    const costMonth = monthlyUsage * pricePerKwh
+    // Calculate energy costs using pricing config
+    const consumerRate = (pricingConfig?.consumerPrice || 0.30) + (pricingConfig?.consumerMargin || 0)
+    // Note: producerRate could be used for showing producer/feed-in rates in the future
+    const costToday = dailyUsage * consumerRate
+    const costMonth = monthlyUsage * consumerRate
 
     return {
       currentPower: parseFloat(currentPower.toFixed(2)),
@@ -460,7 +479,7 @@ export default function Dashboard({
       costMonth: parseFloat(costMonth.toFixed(2)),
       trend: mockData.trend, // TODO: Calculate from history
     }
-  }, [haEntities, lastKnownHaEntities])
+  }, [haEntities, lastKnownHaEntities, pricingConfig])
 
   const liveChartStorageKey = `energy_live_power_samples_${selectedEnvironment || 'default'}`
 
@@ -571,6 +590,15 @@ export default function Dashboard({
                   </option>
                 ))}
               </select>
+              <button
+                onClick={() => setShowPriceModal(true)}
+                disabled={!selectedEnvironment}
+                className="flex items-center gap-2 px-3 py-2 bg-light-2 bg-opacity-20 text-light-2 border border-light-2 border-opacity-30 rounded-lg hover:bg-opacity-30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Configure energy pricing"
+              >
+                <DollarSign className="w-5 h-5" />
+                <span className="text-sm font-medium">Energy Price</span>
+              </button>
             </div>
           </div>
 
@@ -793,6 +821,15 @@ export default function Dashboard({
               setHaError(null)
               setHaRefreshKey((prev) => prev + 1)
             }}
+          />
+        )}
+
+        {showPriceModal && (
+          <EnergyPriceModal
+            environmentId={selectedEnvironment}
+            onClose={() => setShowPriceModal(false)}
+            onSave={(config) => setPricingConfig(config)}
+            getAuthToken={getAccessTokenSilently}
           />
         )}
       </div>

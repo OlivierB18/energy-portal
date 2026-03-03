@@ -24,3 +24,15 @@ export interface HaEntity {
   domain: string
   friendly_name?: string
 }
+
+export type EnergyPricingType = 'fixed' | 'dynamic'
+
+export interface EnergyPricingConfig {
+  type: EnergyPricingType
+  consumerPrice?: number
+  producerPrice?: number
+  consumerBasePrice?: number
+  producerBasePrice?: number
+  consumerMargin?: number
+  producerMargin?: number
+}
