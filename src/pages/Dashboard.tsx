@@ -176,14 +176,12 @@ export default function Dashboard({
     const loadHaEntities = async (silent = false) => {
       if (!isAuthenticated) {
         if (!silent) {
-          setHaEntities([])
           setHaConnectionStatus('error')
         }
         return
       }
       if (!selectedEnvironment) {
         if (!silent) {
-          setHaEntities([])
           setHaConnectionStatus('error')
         }
         return
@@ -215,6 +213,7 @@ export default function Dashboard({
             setHaConnectionStatus('error')
             setHaError(data?.error || 'Unable to load Home Assistant data')
           }
+          // NEVER clear entities on error - keep showing last known data
           return
         }
         
@@ -223,6 +222,7 @@ export default function Dashboard({
         // eslint-disable-next-line no-console
         console.log(`[HA] ✅ Loaded ${entities.length} entities`)
         
+        // Update entities AND keep them as last known
         setHaEntities(entities)
         setLastKnownHaEntities(entities)
         
@@ -237,6 +237,7 @@ export default function Dashboard({
           setHaError(error instanceof Error ? error.message : 'Unable to load Home Assistant data')
           setHaConnectionStatus('error')
         }
+        // NEVER clear entities on error - keep showing last known data
       } finally {
         if (!silent) {
           setHaLoading(false)
@@ -249,7 +250,7 @@ export default function Dashboard({
     console.log('[HA] Starting initial load...')
     void loadHaEntities(false)
     
-    // Auto-refresh every 10 seconds
+    // Auto-refresh every 10 seconds - ALWAYS silent, NEVER affects UI on error
     const interval = setInterval(() => {
       void loadHaEntities(true)
     }, 10000)
