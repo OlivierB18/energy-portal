@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useMemo } from 'react'
 import EnergyCard from '../components/EnergyCard'
 import EnergyChart from '../components/EnergyChart'
 import HomeAssistantConfig from '../components/HomeAssistantConfig'
@@ -328,6 +328,65 @@ export default function Dashboard({
     trend: 8.5,
   }
 
+  // Extract real-time energy data from Home Assistant entities
+  const realTimeData = useMemo(() => {
+    const entities = haEntities.length > 0 ? haEntities : lastKnownHaEntities
+    
+    // Helper function to parse numeric values from entity state
+    const parseValue = (state: string): number => {
+      const num = parseFloat(state)
+      return isNaN(num) ? 0 : num
+    }
+
+    // Helper function to find entity by keywords in entity_id
+    const findEntity = (keywords: string[]): HaEntity | undefined => {
+      return entities.find(entity => 
+        entity.domain === 'sensor' && 
+        keywords.some(keyword => entity.entity_id.toLowerCase().includes(keyword.toLowerCase()))
+      )
+    }
+
+    // Find power sensor (current usage in W or kW)
+    const powerEntity = findEntity(['power', 'watt', 'current_power', 'active_power'])
+    let currentPower = powerEntity ? parseValue(powerEntity.state) : mockData.currentPower
+    
+    // eslint-disable-next-line no-console
+    console.log('[Energy] Power entity:', powerEntity?.entity_id, '=', powerEntity?.state)
+    
+    // Convert W to kW if needed (if value is > 100, assume it's in Watts)
+    if (currentPower > 100) {
+      currentPower = currentPower / 1000
+    }
+
+    // Find daily energy sensor (in kWh)
+    const dailyEntity = findEntity(['energy_today', 'daily_energy', 'today', 'day_energy'])
+    const dailyUsage = dailyEntity ? parseValue(dailyEntity.state) : mockData.dailyUsage
+    
+    // eslint-disable-next-line no-console
+    console.log('[Energy] Daily entity:', dailyEntity?.entity_id, '=', dailyEntity?.state)
+
+    // Find monthly energy sensor (in kWh)
+    const monthlyEntity = findEntity(['energy_month', 'monthly_energy', 'month_energy'])
+    const monthlyUsage = monthlyEntity ? parseValue(monthlyEntity.state) : mockData.monthlyUsage
+    
+    // eslint-disable-next-line no-console
+    console.log('[Energy] Monthly entity:', monthlyEntity?.entity_id, '=', monthlyEntity?.state)
+
+    // Calculate estimated costs (€0.30 per kWh as example rate)
+    const pricePerKwh = 0.30
+    const costToday = dailyUsage * pricePerKwh
+    const costMonth = monthlyUsage * pricePerKwh
+
+    return {
+      currentPower: parseFloat(currentPower.toFixed(2)),
+      dailyUsage: parseFloat(dailyUsage.toFixed(1)),
+      monthlyUsage: parseFloat(monthlyUsage.toFixed(1)),
+      costToday: parseFloat(costToday.toFixed(2)),
+      costMonth: parseFloat(costMonth.toFixed(2)),
+      trend: mockData.trend, // TODO: Calculate from history
+    }
+  }, [haEntities, lastKnownHaEntities])
+
   const chartData = [
     { time: '00:00', power: 0.5 },
     { time: '04:00', power: 0.2 },
@@ -438,7 +497,7 @@ export default function Dashboard({
               <p className="text-dark-2 text-sm font-medium uppercase">Current Power Usage</p>
               <div className="flex items-baseline gap-2">
                 <span className="text-6xl font-heavy text-transparent bg-clip-text bg-gradient-to-r from-brand-2 to-brand-3">
-                  {mockData.currentPower}
+                  {realTimeData.currentPower}
                 </span>
                 <span className="text-2xl text-dark-2">kW</span>
               </div>
@@ -449,7 +508,7 @@ export default function Dashboard({
           </div>
           <p className="text-brand-2 font-medium flex items-center gap-2">
             <TrendingUp className="w-4 h-4" />
-            {mockData.trend}% higher than yesterday
+            {realTimeData.trend}% higher than yesterday
           </p>
         </div>
 
@@ -457,16 +516,16 @@ export default function Dashboard({
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
           <EnergyCard
             title="Today's Usage"
-            value={mockData.dailyUsage}
+            value={realTimeData.dailyUsage}
             unit="kWh"
-            cost={mockData.costToday}
+            cost={realTimeData.costToday}
             icon="zap"
           />
           <EnergyCard
             title="This Month"
-            value={mockData.monthlyUsage}
+            value={realTimeData.monthlyUsage}
             unit="kWh"
-            cost={mockData.costMonth}
+            cost={realTimeData.costMonth}
             icon="calendar"
           />
           <EnergyCard
