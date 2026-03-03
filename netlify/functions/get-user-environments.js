@@ -9,7 +9,7 @@ const getEnv = (key) => {
 }
 
 export const handler = async (event) => {
-  console.log('get-user-environments handler - SIMPLIFIED MODE');
+  console.log('get-user-environments handler');
   try {
     if (event.httpMethod !== 'GET') {
       return { statusCode: 405, body: JSON.stringify({ error: 'Method not allowed' }) }
@@ -20,11 +20,28 @@ export const handler = async (event) => {
       return { statusCode: 401, body: JSON.stringify({ error: 'Missing token' }) }
     }
 
-    // SIMPLIFIED: Return all available environment IDs (user can see everything)
-    console.log('Returning all environments for user');
+    const token = authHeader.replace('Bearer ', '')
+    const domain = getEnv('AUTH0_DOMAIN')
+
+    // Verify JWT and extract user ID
+    const jwks = createRemoteJWKSet(new URL(`https://${domain}/.well-known/jwks.json`))
+    const { payload } = await jwtVerify(token, jwks, {
+      issuer: `https://${domain}/`,
+    })
+
+    const userId = payload.sub
+    if (!userId) {
+      return { statusCode: 401, body: JSON.stringify({ error: 'Invalid token' }) }
+    }
+
+    // Get management token and fetch user's assigned environments
+    const managementToken = await getManagementToken(domain)
+    const environmentIds = await fetchUserEnvironmentIds(domain, managementToken, userId)
+
+    console.log('Returning environments for user:', userId, environmentIds);
     return {
       statusCode: 200,
-      body: JSON.stringify({ environmentIds: ['vacation'] }),
+      body: JSON.stringify({ environmentIds }),
     }
   } catch (error) {
     console.error('get-user-environments error:', error);
