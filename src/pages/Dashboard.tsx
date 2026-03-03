@@ -43,6 +43,7 @@ export default function Dashboard({
   const [lastKnownHaEntities, setLastKnownHaEntities] = useState<HaEntity[]>([])
   const [haLoading, setHaLoading] = useState(false)
   const [haError, setHaError] = useState<string | null>(null)
+  const [isInitialLoading, setIsInitialLoading] = useState(true)
   const [haActionId, setHaActionId] = useState<string | null>(null)
   const [showHaConfig, setShowHaConfig] = useState(false)
   const [haRefreshKey, setHaRefreshKey] = useState(0)
@@ -229,6 +230,7 @@ export default function Dashboard({
         if (!silent) {
           setHaConnectionStatus('connected')
           setHaError(null)
+          setIsInitialLoading(false) // Only set false on successful initial load
         }
       } catch (error) {
         // eslint-disable-next-line no-console
@@ -236,6 +238,7 @@ export default function Dashboard({
         if (!silent) {
           setHaError(error instanceof Error ? error.message : 'Unable to load Home Assistant data')
           setHaConnectionStatus('error')
+          setIsInitialLoading(false) // Set false on error too so we show last known data
         }
         // NEVER clear entities on error - keep showing last known data
       } finally {
@@ -544,7 +547,7 @@ export default function Dashboard({
           {haLoading && <p className="text-light-1">Loading Home Assistant data...</p>}
           {haError && <p className="text-red-300">{haError}</p>}
           {/* Toon altijd de laatst bekende sensoren */}
-          {!haLoading && (haEntities.length > 0 || lastKnownHaEntities.length > 0) && (
+          {!isInitialLoading && (haEntities.length > 0 || lastKnownHaEntities.length > 0) && (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {(haEntities.length > 0 ? haEntities : lastKnownHaEntities).map((entity) => {
                   const actions = getControlActions(entity.domain)
@@ -578,8 +581,7 @@ export default function Dashboard({
                   )
                 })}
               </div>
-            </>
-          )}
+            )}
         </div>
 
         {/* Footer Info */}
