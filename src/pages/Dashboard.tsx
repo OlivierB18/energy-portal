@@ -346,6 +346,66 @@ export default function Dashboard({
       )
     }
 
+    // Helper function to track energy usage locally when no sensor available
+    const trackEnergyLocally = (currentPower: number): { daily: number; monthly: number } => {
+      const now = new Date()
+      const today = now.toDateString()
+      const thisMonth = `${now.getFullYear()}-${now.getMonth() + 1}`
+      
+      // Get stored tracking data
+      const storedDaily = localStorage.getItem('energy_daily')
+      const storedMonthly = localStorage.getItem('energy_monthly')
+      const storedDate = localStorage.getItem('energy_date')
+      const storedMonth = localStorage.getItem('energy_month')
+      const lastUpdate = localStorage.getItem('energy_last_update')
+      
+      let dailyTotal = 0
+      let monthlyTotal = 0
+      
+      // Reset daily if new day
+      if (storedDate !== today) {
+        localStorage.setItem('energy_date', today)
+        localStorage.setItem('energy_daily', '0')
+        dailyTotal = 0
+      } else {
+        dailyTotal = storedDaily ? parseFloat(storedDaily) : 0
+      }
+      
+      // Reset monthly if new month
+      if (storedMonth !== thisMonth) {
+        localStorage.setItem('energy_month', thisMonth)
+        localStorage.setItem('energy_monthly', '0')
+        monthlyTotal = 0
+      } else {
+        monthlyTotal = storedMonthly ? parseFloat(storedMonthly) : 0
+      }
+      
+      // Calculate energy used since last update (Power in kW × time in hours = kWh)
+      if (lastUpdate && currentPower > 0) {
+        const lastTime = new Date(lastUpdate).getTime()
+        const nowTime = now.getTime()
+        const hoursElapsed = (nowTime - lastTime) / (1000 * 60 * 60)
+        
+        // Only add if less than 1 hour elapsed (prevents big jumps on page reload)
+        if (hoursElapsed < 1) {
+          const energyUsed = currentPower * hoursElapsed
+          dailyTotal += energyUsed
+          monthlyTotal += energyUsed
+          
+          localStorage.setItem('energy_daily', dailyTotal.toString())
+          localStorage.setItem('energy_monthly', monthlyTotal.toString())
+        }
+      }
+      
+      // Update last timestamp
+      localStorage.setItem('energy_last_update', now.toISOString())
+      
+      return {
+        daily: dailyTotal,
+        monthly: monthlyTotal,
+      }
+    }
+
     // Find power sensor (current usage in W or kW)
     const powerEntity = findEntity(['power', 'watt', 'current_power', 'active_power'])
     let currentPower = powerEntity ? parseValue(powerEntity.state) : mockData.currentPower
@@ -360,17 +420,26 @@ export default function Dashboard({
 
     // Find daily energy sensor (in kWh)
     const dailyEntity = findEntity(['energy_today', 'daily_energy', 'today', 'day_energy'])
-    const dailyUsage = dailyEntity ? parseValue(dailyEntity.state) : mockData.dailyUsage
-    
-    // eslint-disable-next-line no-console
-    console.log('[Energy] Daily entity:', dailyEntity?.entity_id, '=', dailyEntity?.state)
-
-    // Find monthly energy sensor (in kWh)
     const monthlyEntity = findEntity(['energy_month', 'monthly_energy', 'month_energy'])
-    const monthlyUsage = monthlyEntity ? parseValue(monthlyEntity.state) : mockData.monthlyUsage
     
-    // eslint-disable-next-line no-console
-    console.log('[Energy] Monthly entity:', monthlyEntity?.entity_id, '=', monthlyEntity?.state)
+    // Use sensor data if available, otherwise track locally
+    let dailyUsage: number
+    let monthlyUsage: number
+    
+    if (dailyEntity || monthlyEntity) {
+      // Use sensor data
+      dailyUsage = dailyEntity ? parseValue(dailyEntity.state) : 0
+      monthlyUsage = monthlyEntity ? parseValue(monthlyEntity.state) : 0
+      // eslint-disable-next-line no-console
+      console.log('[Energy] Using sensor data - Daily:', dailyUsage, 'Monthly:', monthlyUsage)
+    } else {
+      // Track locally from power readings
+      const tracked = trackEnergyLocally(currentPower)
+      dailyUsage = tracked.daily
+      monthlyUsage = tracked.monthly
+      // eslint-disable-next-line no-console
+      console.log('[Energy] Tracking locally - Daily:', dailyUsage.toFixed(3), 'kWh, Monthly:', monthlyUsage.toFixed(3), 'kWh')
+    }
 
     // Calculate estimated costs (€0.30 per kWh as example rate)
     const pricePerKwh = 0.30
