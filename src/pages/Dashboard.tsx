@@ -41,6 +41,7 @@ export default function Dashboard({
   const [selectedEnvironment, setSelectedEnvironment] = useState<string>(selectedEnvironmentId ?? '')
   const [timeRange, setTimeRange] = useState<'today' | 'week' | 'month'>('today')
   const [allowedEnvironmentIds, setAllowedEnvironmentIds] = useState<string[] | null>(null)
+  const [isCheckingPermissions, setIsCheckingPermissions] = useState(true)
   const [environments, setEnvironments] = useState<EnvironmentConfig[]>([])
   const [envLoading, setEnvLoading] = useState(false)
   const [envError, setEnvError] = useState<string | null>(null)
@@ -118,13 +119,17 @@ export default function Dashboard({
     }
 
     const loadAssignments = async () => {
+      setIsCheckingPermissions(true)
+      
       if (!isAuthenticated) {
         setAllowedEnvironmentIds(null)
+        setIsCheckingPermissions(false)
         return
       }
 
       if (isAdmin) {
         setAllowedEnvironmentIds(null)
+        setIsCheckingPermissions(false)
         return
       }
 
@@ -135,6 +140,7 @@ export default function Dashboard({
 
         if (envs && envs.length > 0) {
           setAllowedEnvironmentIds(envs)
+          setIsCheckingPermissions(false)
           return
         }
 
@@ -152,6 +158,8 @@ export default function Dashboard({
         setAllowedEnvironmentIds(ids)
       } catch {
         setAllowedEnvironmentIds([])
+      } finally {
+        setIsCheckingPermissions(false)
       }
     }
 
@@ -565,6 +573,18 @@ export default function Dashboard({
 
     return points
   }, [powerSamples, realTimeData.currentPower, timeRange])
+
+  // Show loading screen while checking permissions
+  if (isCheckingPermissions) {
+    return (
+      <div className="app-shell min-h-screen p-4 md:p-8 flex items-center justify-center">
+        <div className="text-center">
+          <div className="inline-block w-16 h-16 border-4 border-brand-2 border-t-transparent rounded-full animate-spin mb-4"></div>
+          <p className="text-dark-2 text-lg">Loading your environments...</p>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="app-shell min-h-screen p-4 md:p-8">
