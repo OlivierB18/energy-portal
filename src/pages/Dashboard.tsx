@@ -27,6 +27,11 @@ interface DashboardProps {
   onEnvironmentChange?: (environmentId: string) => void
 }
 
+interface PowerSample {
+  timestamp: number
+  power: number
+}
+
 export default function Dashboard({
   isAdmin,
   selectedEnvironmentId,
@@ -47,6 +52,7 @@ export default function Dashboard({
   const [haActionId, setHaActionId] = useState<string | null>(null)
   const [showHaConfig, setShowHaConfig] = useState(false)
   const [haRefreshKey, setHaRefreshKey] = useState(0)
+  const [powerSamples, setPowerSamples] = useState<PowerSample[]>([])
   // Home Assistant connection status: 'connecting' | 'connected' | 'error'
   const [haConnectionStatus, setHaConnectionStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   const { isAuthenticated, getIdTokenClaims, getAccessTokenSilently } = useAuth0()
@@ -456,15 +462,76 @@ export default function Dashboard({
     }
   }, [haEntities, lastKnownHaEntities])
 
-  const chartData = [
-    { time: '00:00', power: 0.5 },
-    { time: '04:00', power: 0.2 },
-    { time: '08:00', power: 1.2 },
-    { time: '12:00', power: 2.8 },
-    { time: '16:00', power: 3.2 },
-    { time: '20:00', power: 2.1 },
-    { time: '23:59', power: 0.8 },
-  ]
+  const liveChartStorageKey = `energy_live_power_samples_${selectedEnvironment || 'default'}`
+
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(liveChartStorageKey)
+      if (!stored) {
+        setPowerSamples([])
+        return
+      }
+
+      const parsed: PowerSample[] = JSON.parse(stored)
+      if (!Array.isArray(parsed)) {
+        return
+      }
+
+      const now = Date.now()
+      const maxAge = 30 * 24 * 60 * 60 * 1000
+      const cleaned = parsed.filter((sample) => typeof sample.timestamp === 'number' && typeof sample.power === 'number' && now - sample.timestamp <= maxAge)
+      setPowerSamples(cleaned)
+    } catch {
+      setPowerSamples([])
+    }
+  }, [liveChartStorageKey])
+
+  useEffect(() => {
+    if (haConnectionStatus !== 'connected') {
+      return
+    }
+
+    const now = Date.now()
+    setPowerSamples((prev) => {
+      const lastSample = prev[prev.length - 1]
+      if (lastSample && now - lastSample.timestamp < 8000) {
+        return prev
+      }
+
+      const next = [...prev, { timestamp: now, power: realTimeData.currentPower }]
+      const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000
+      const trimmed = next.filter((sample) => sample.timestamp >= thirtyDaysAgo)
+      localStorage.setItem(liveChartStorageKey, JSON.stringify(trimmed))
+      return trimmed
+    })
+  }, [haConnectionStatus, liveChartStorageKey, realTimeData.currentPower])
+
+  const chartData = useMemo(() => {
+    const now = Date.now()
+    let cutoff = now - 24 * 60 * 60 * 1000
+
+    if (timeRange === 'week') {
+      cutoff = now - 7 * 24 * 60 * 60 * 1000
+    }
+
+    if (timeRange === 'month') {
+      cutoff = now - 30 * 24 * 60 * 60 * 1000
+    }
+
+    const filtered = powerSamples.filter((sample) => sample.timestamp >= cutoff)
+    const limited = filtered.slice(-120)
+
+    const points = limited.map((sample) => ({
+      time: new Date(sample.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      power: sample.power,
+    }))
+
+    if (points.length === 0) {
+      return [{ time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), power: realTimeData.currentPower }]
+    }
+
+    return points
+  }, [powerSamples, realTimeData.currentPower, timeRange])
 
   return (
     <div className="app-shell min-h-screen p-4 md:p-8">
