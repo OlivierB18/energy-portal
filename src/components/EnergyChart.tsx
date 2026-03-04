@@ -16,6 +16,7 @@ interface EnergyChartProps {
   timeRange: 'today' | 'week' | 'month'
   unit?: string
   seriesLabel?: string
+  rangeLabel?: string
 }
 
 export default function EnergyChart({
@@ -23,6 +24,7 @@ export default function EnergyChart({
   timeRange,
   unit = 'kW',
   seriesLabel = 'Power',
+  rangeLabel,
 }: EnergyChartProps) {
   const decimals = unit === 'm³' ? 3 : 2
 
@@ -71,7 +73,7 @@ export default function EnergyChart({
         </LineChart>
       </ResponsiveContainer>
       <p className="text-center text-light-1 text-sm mt-4">
-        {seriesLabel} for {timeRange === 'today' ? 'today' : timeRange === 'week' ? 'this week' : 'this month'}
+        {seriesLabel} for {timeRange === 'today' ? 'day' : timeRange === 'week' ? 'week' : 'month'}{rangeLabel ? ` (${rangeLabel})` : ''}
       </p>
     </div>
   )

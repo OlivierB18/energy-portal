@@ -43,8 +43,16 @@ export default function Dashboard({
   selectedEnvironmentId,
   onEnvironmentChange,
 }: DashboardProps) {
+  const formatDateForInput = (date: Date) => {
+    const year = date.getFullYear()
+    const month = String(date.getMonth() + 1).padStart(2, '0')
+    const day = String(date.getDate()).padStart(2, '0')
+    return `${year}-${month}-${day}`
+  }
+
   const [selectedEnvironment, setSelectedEnvironment] = useState<string>(selectedEnvironmentId ?? '')
   const [timeRange, setTimeRange] = useState<'today' | 'week' | 'month'>('today')
+  const [selectedChartDate, setSelectedChartDate] = useState<string>(formatDateForInput(new Date()))
   const [allowedEnvironmentIds, setAllowedEnvironmentIds] = useState<string[] | null>(null)
   const [isCheckingPermissions, setIsCheckingPermissions] = useState(true)
   const [environments, setEnvironments] = useState<EnvironmentConfig[]>([])
@@ -472,6 +480,76 @@ export default function Dashboard({
       }
     }
 
+    const trackEnergyFromMeter = (meterTotal: number): { daily: number; monthly: number } => {
+      const now = new Date()
+      const today = now.toDateString()
+      const thisMonth = `${now.getFullYear()}-${now.getMonth() + 1}`
+      const keys = {
+        dailyDate: `energy_meter_daily_date_${environmentKey}`,
+        dailyBase: `energy_meter_daily_base_${environmentKey}`,
+        monthValue: `energy_meter_month_${environmentKey}`,
+        monthBase: `energy_meter_month_base_${environmentKey}`,
+      }
+
+      const storedDailyDate = localStorage.getItem(keys.dailyDate)
+      const storedDailyBase = parseFloat(localStorage.getItem(keys.dailyBase) || '0')
+      const storedMonthValue = localStorage.getItem(keys.monthValue)
+      const storedMonthBase = parseFloat(localStorage.getItem(keys.monthBase) || '0')
+
+      let dailyBase = storedDailyBase
+      let monthBase = storedMonthBase
+
+      if (storedDailyDate !== today || !Number.isFinite(storedDailyBase)) {
+        dailyBase = meterTotal
+        localStorage.setItem(keys.dailyDate, today)
+        localStorage.setItem(keys.dailyBase, meterTotal.toString())
+      }
+
+      if (storedMonthValue !== thisMonth || !Number.isFinite(storedMonthBase)) {
+        monthBase = meterTotal
+        localStorage.setItem(keys.monthValue, thisMonth)
+        localStorage.setItem(keys.monthBase, meterTotal.toString())
+      }
+
+      return {
+        daily: Math.max(0, meterTotal - dailyBase),
+        monthly: Math.max(0, meterTotal - monthBase),
+      }
+    }
+
+    const calculateUsageFromPowerSamples = (startMs: number, endMs: number) => {
+      if (powerSamples.length < 2) {
+        return 0
+      }
+
+      const sorted = [...powerSamples]
+        .filter((sample) => Number.isFinite(sample.timestamp) && Number.isFinite(sample.power))
+        .sort((a, b) => a.timestamp - b.timestamp)
+
+      let kwh = 0
+      for (let index = 1; index < sorted.length; index += 1) {
+        const previous = sorted[index - 1]
+        const current = sorted[index]
+
+        if (current.timestamp <= startMs || previous.timestamp >= endMs) {
+          continue
+        }
+
+        const segmentStart = Math.max(previous.timestamp, startMs)
+        const segmentEnd = Math.min(current.timestamp, endMs)
+
+        if (segmentEnd <= segmentStart) {
+          continue
+        }
+
+        const hours = (segmentEnd - segmentStart) / (1000 * 60 * 60)
+        const averagePowerKw = (previous.power + current.power) / 2
+        kwh += averagePowerKw * hours
+      }
+
+      return kwh
+    }
+
     // Helper function to derive gas daily/monthly from cumulative meter when dedicated sensors are missing
     const trackGasFromMeter = (gasMeterTotal: number): { daily: number; monthly: number } => {
       const now = new Date()
@@ -522,12 +600,29 @@ export default function Dashboard({
       currentPower = currentPower / 1000
     }
 
-    // Find daily energy sensor (in kWh)
-    const dailyEntity = findEntity(['energy_today', 'daily_energy', 'today', 'day_energy'])
-    const monthlyEntity = findEntity(['energy_month', 'monthly_energy', 'month_energy'])
+    // Find daily/monthly/total electricity sensors (in kWh)
+    const dailyEntity = findEntity(
+      ['energy_today', 'daily_energy', 'today_energy', 'day_energy', 'daily', 'today'],
+      ['gas', 'price', 'cost', 'tariff'],
+    )
+    const monthlyEntity = findEntity(
+      ['energy_month', 'monthly_energy', 'month_energy', 'monthly', 'this_month', 'month'],
+      ['gas', 'price', 'cost', 'tariff'],
+    )
+    const totalEnergyEntity = findEntity(
+      ['energy_total', 'total_energy', 'total_consumption', 'kwh_total', 'consumption_total'],
+      ['gas', 'price', 'cost', 'tariff'],
+    )
 
     // eslint-disable-next-line no-console
-    console.log('[Energy] Detected sensors - Daily:', dailyEntity?.entity_id, 'Monthly:', monthlyEntity?.entity_id)
+    console.log(
+      '[Energy] Detected sensors - Daily:',
+      dailyEntity?.entity_id,
+      'Monthly:',
+      monthlyEntity?.entity_id,
+      'Total:',
+      totalEnergyEntity?.entity_id,
+    )
 
     const gasDailyEntity = findEntity([
       'gas_today',
@@ -559,22 +654,57 @@ export default function Dashboard({
     // Use sensor data if available, otherwise track locally
     let dailyUsage: number
     let monthlyUsage: number
+
+    const nowTime = Date.now()
+    const nowDate = new Date(nowTime)
+    const startOfToday = new Date(
+      nowDate.getFullYear(),
+      nowDate.getMonth(),
+      nowDate.getDate(),
+      0,
+      0,
+      0,
+      0,
+    ).getTime()
+    const startOfMonth = new Date(nowDate.getFullYear(), nowDate.getMonth(), 1, 0, 0, 0, 0).getTime()
+
+    const sampledDailyUsage = calculateUsageFromPowerSamples(startOfToday, nowTime)
+    const sampledMonthlyUsage = calculateUsageFromPowerSamples(startOfMonth, nowTime)
     
-    if (dailyEntity) {
+    if (dailyEntity && monthlyEntity) {
       // Use sensor data
       dailyUsage = parseValue(dailyEntity.state)
-      
-      if (monthlyEntity) {
-        // Use monthly sensor if available
-        monthlyUsage = parseValue(monthlyEntity.state)
-      } else {
-        // Accumulate daily values when no monthly sensor exists
-        const tracked = trackEnergyLocally(0)
-        monthlyUsage = tracked.monthly + dailyUsage
-      }
-      
+      monthlyUsage = parseValue(monthlyEntity.state)
+
       // eslint-disable-next-line no-console
-      console.log('[Energy] Using sensor data - Daily:', dailyUsage, 'kWh, Monthly:', monthlyUsage, 'kWh (monthly sensor:', monthlyEntity ? 'exists' : 'accumulated', ')')
+      console.log('[Energy] Using daily+monthly sensors - Daily:', dailyUsage, 'kWh, Monthly:', monthlyUsage, 'kWh')
+    } else if (totalEnergyEntity) {
+      const trackedFromMeter = trackEnergyFromMeter(parseValue(totalEnergyEntity.state))
+      dailyUsage = dailyEntity ? parseValue(dailyEntity.state) : trackedFromMeter.daily
+      monthlyUsage = monthlyEntity
+        ? parseValue(monthlyEntity.state)
+        : trackedFromMeter.monthly
+
+      // eslint-disable-next-line no-console
+      console.log('[Energy] Using total meter fallback - Daily:', dailyUsage, 'kWh, Monthly:', monthlyUsage, 'kWh')
+    } else if (dailyEntity) {
+      dailyUsage = parseValue(dailyEntity.state)
+
+      if (sampledMonthlyUsage > 0) {
+        monthlyUsage = sampledMonthlyUsage
+      } else {
+        const tracked = trackEnergyLocally(currentPower)
+        monthlyUsage = Math.max(tracked.monthly, dailyUsage)
+      }
+
+      // eslint-disable-next-line no-console
+      console.log('[Energy] Using daily sensor + sample/local monthly fallback - Daily:', dailyUsage, 'kWh, Monthly:', monthlyUsage, 'kWh')
+    } else if (sampledDailyUsage > 0 || sampledMonthlyUsage > 0) {
+      dailyUsage = sampledDailyUsage
+      monthlyUsage = sampledMonthlyUsage
+
+      // eslint-disable-next-line no-console
+      console.log('[Energy] Using sampled history fallback - Daily:', dailyUsage, 'kWh, Monthly:', monthlyUsage, 'kWh')
     } else {
       // Track locally from power readings
       const tracked = trackEnergyLocally(currentPower)
@@ -630,7 +760,7 @@ export default function Dashboard({
       costToday: parseFloat(totalCostToday.toFixed(2)),
       costMonth: parseFloat(totalCostMonth.toFixed(2)),
     }
-  }, [haEntities, lastKnownHaEntities, pricingConfig, selectedEnvironment, gasRatePerM3])
+  }, [haEntities, lastKnownHaEntities, pricingConfig, selectedEnvironment, gasRatePerM3, powerSamples])
 
   const livePowerStorageKey = `energy_live_power_samples_${selectedEnvironment || 'default'}`
   const liveGasStorageKey = `energy_live_gas_samples_${selectedEnvironment || 'default'}`
@@ -655,9 +785,9 @@ export default function Dashboard({
         return
       }
 
-      const now = Date.now()
-      const maxAge = 30 * 24 * 60 * 60 * 1000
-      const cleaned = parsed.filter((sample) => typeof sample.timestamp === 'number' && typeof sample.power === 'number' && now - sample.timestamp <= maxAge)
+      const cleaned = parsed.filter(
+        (sample) => typeof sample.timestamp === 'number' && typeof sample.power === 'number',
+      )
       setPowerSamples(cleaned)
     } catch {
       setPowerSamples([])
@@ -677,9 +807,9 @@ export default function Dashboard({
         return
       }
 
-      const now = Date.now()
-      const maxAge = 30 * 24 * 60 * 60 * 1000
-      const cleaned = parsed.filter((sample) => typeof sample.timestamp === 'number' && typeof sample.gas === 'number' && now - sample.timestamp <= maxAge)
+      const cleaned = parsed.filter(
+        (sample) => typeof sample.timestamp === 'number' && typeof sample.gas === 'number',
+      )
       setGasSamples(cleaned)
     } catch {
       setGasSamples([])
@@ -701,10 +831,8 @@ export default function Dashboard({
         }
 
         const next = [...prev, { timestamp: now, power: latestPowerRef.current }]
-        const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000
-        const trimmed = next.filter((sample) => sample.timestamp >= thirtyDaysAgo)
-        localStorage.setItem(livePowerStorageKey, JSON.stringify(trimmed))
-        return trimmed
+        localStorage.setItem(livePowerStorageKey, JSON.stringify(next))
+        return next
       })
 
       setGasSamples((prev) => {
@@ -714,10 +842,8 @@ export default function Dashboard({
         }
 
         const next = [...prev, { timestamp: now, gas: latestGasRef.current }]
-        const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000
-        const trimmed = next.filter((sample) => sample.timestamp >= thirtyDaysAgo)
-        localStorage.setItem(liveGasStorageKey, JSON.stringify(trimmed))
-        return trimmed
+        localStorage.setItem(liveGasStorageKey, JSON.stringify(next))
+        return next
       })
     }
 
@@ -726,59 +852,72 @@ export default function Dashboard({
     return () => window.clearInterval(interval)
   }, [liveGasStorageKey, livePowerStorageKey, selectedEnvironment, visibleEnvironments.length])
 
-  const chartData = useMemo(() => {
-    const now = Date.now()
-    let cutoff = now - 24 * 60 * 60 * 1000
+  const selectedRange = useMemo(() => {
+    const [year, month, day] = selectedChartDate.split('-').map(Number)
+    const isValidDate = Number.isFinite(year) && Number.isFinite(month) && Number.isFinite(day)
+    const anchorDate = isValidDate
+      ? new Date(year, month - 1, day)
+      : new Date()
+
+    const rangeStart = new Date(anchorDate)
+    const rangeEnd = new Date(anchorDate)
+    rangeEnd.setHours(23, 59, 59, 999)
 
     if (timeRange === 'week') {
-      cutoff = now - 7 * 24 * 60 * 60 * 1000
+      rangeStart.setDate(rangeStart.getDate() - 6)
+      rangeStart.setHours(0, 0, 0, 0)
+    } else if (timeRange === 'month') {
+      rangeStart.setDate(1)
+      rangeStart.setHours(0, 0, 0, 0)
+    } else {
+      rangeStart.setHours(0, 0, 0, 0)
     }
 
-    if (timeRange === 'month') {
-      cutoff = now - 30 * 24 * 60 * 60 * 1000
+    return {
+      startMs: rangeStart.getTime(),
+      endMs: rangeEnd.getTime(),
+      label: rangeEnd.toLocaleDateString(),
+    }
+  }, [selectedChartDate, timeRange])
+
+  const mapSamplesToChartPoints = (
+    samples: Array<{ timestamp: number; value: number }>,
+    fallbackValue: number,
+  ) => {
+    const filtered = samples.filter(
+      (sample) => sample.timestamp >= selectedRange.startMs && sample.timestamp <= selectedRange.endMs,
+    )
+
+    if (filtered.length === 0) {
+      return [{
+        time: new Date(selectedRange.endMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        power: fallbackValue,
+      }]
     }
 
-    const filtered = powerSamples.filter((sample) => sample.timestamp >= cutoff)
-    const limited = filtered.slice(-120)
+    const maxPoints = timeRange === 'today' ? 1440 : 2000
+    const step = Math.max(1, Math.ceil(filtered.length / maxPoints))
+    const reduced = filtered.filter((_, index) => index % step === 0 || index === filtered.length - 1)
 
-    const points = limited.map((sample) => ({
+    return reduced.map((sample) => ({
       time: new Date(sample.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      power: sample.power,
+      power: sample.value,
     }))
+  }
 
-    if (points.length === 0) {
-      return [{ time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), power: latestPowerRef.current }]
-    }
-
-    return points
-  }, [powerSamples, timeRange])
+  const chartData = useMemo(() => {
+    return mapSamplesToChartPoints(
+      powerSamples.map((sample) => ({ timestamp: sample.timestamp, value: sample.power })),
+      latestPowerRef.current,
+    )
+  }, [powerSamples, selectedRange.endMs, selectedRange.startMs, timeRange])
 
   const gasChartData = useMemo(() => {
-    const now = Date.now()
-    let cutoff = now - 24 * 60 * 60 * 1000
-
-    if (timeRange === 'week') {
-      cutoff = now - 7 * 24 * 60 * 60 * 1000
-    }
-
-    if (timeRange === 'month') {
-      cutoff = now - 30 * 24 * 60 * 60 * 1000
-    }
-
-    const filtered = gasSamples.filter((sample) => sample.timestamp >= cutoff)
-    const limited = filtered.slice(-120)
-
-    const points = limited.map((sample) => ({
-      time: new Date(sample.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      power: sample.gas,
-    }))
-
-    if (points.length === 0) {
-      return [{ time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), power: latestGasRef.current }]
-    }
-
-    return points
-  }, [gasSamples, timeRange])
+    return mapSamplesToChartPoints(
+      gasSamples.map((sample) => ({ timestamp: sample.timestamp, value: sample.gas })),
+      latestGasRef.current,
+    )
+  }, [gasSamples, selectedRange.endMs, selectedRange.startMs, timeRange])
 
   // Show loading screen while checking permissions
   if (isCheckingPermissions) {
@@ -1050,37 +1189,48 @@ export default function Dashboard({
 
         {/* Time Range Selector */}
         <div className="glass-panel rounded-xl shadow-lg p-4 mb-8">
-          <div className="flex gap-4">
-            <button
-              onClick={() => setTimeRange('today')}
-              className={`flex-1 py-3 px-4 rounded-lg font-medium transition-all ${
-                timeRange === 'today'
-                  ? 'glass-button'
-                  : 'bg-dark-2 bg-opacity-70 text-light-1 hover:bg-opacity-90'
-              }`}
-            >
-              Today
-            </button>
-            <button
-              onClick={() => setTimeRange('week')}
-              className={`flex-1 py-3 px-4 rounded-lg font-medium transition-all ${
-                timeRange === 'week'
-                  ? 'glass-button'
-                  : 'bg-dark-2 bg-opacity-70 text-light-1 hover:bg-opacity-90'
-              }`}
-            >
-              This Week
-            </button>
-            <button
-              onClick={() => setTimeRange('month')}
-              className={`flex-1 py-3 px-4 rounded-lg font-medium transition-all ${
-                timeRange === 'month'
-                  ? 'glass-button'
-                  : 'bg-dark-2 bg-opacity-70 text-light-1 hover:bg-opacity-90'
-              }`}
-            >
-              This Month
-            </button>
+          <div className="flex flex-col md:flex-row md:items-center gap-4">
+            <div className="flex gap-4 flex-1">
+              <button
+                onClick={() => setTimeRange('today')}
+                className={`flex-1 py-3 px-4 rounded-lg font-medium transition-all ${
+                  timeRange === 'today'
+                    ? 'glass-button'
+                    : 'bg-dark-2 bg-opacity-70 text-light-1 hover:bg-opacity-90'
+                }`}
+              >
+                Day
+              </button>
+              <button
+                onClick={() => setTimeRange('week')}
+                className={`flex-1 py-3 px-4 rounded-lg font-medium transition-all ${
+                  timeRange === 'week'
+                    ? 'glass-button'
+                    : 'bg-dark-2 bg-opacity-70 text-light-1 hover:bg-opacity-90'
+                }`}
+              >
+                Week
+              </button>
+              <button
+                onClick={() => setTimeRange('month')}
+                className={`flex-1 py-3 px-4 rounded-lg font-medium transition-all ${
+                  timeRange === 'month'
+                    ? 'glass-button'
+                    : 'bg-dark-2 bg-opacity-70 text-light-1 hover:bg-opacity-90'
+                }`}
+              >
+                Month
+              </button>
+            </div>
+            <div className="md:w-56">
+              <label className="block text-xs text-light-1 mb-1">Selected date</label>
+              <input
+                type="date"
+                value={selectedChartDate}
+                onChange={(event) => setSelectedChartDate(event.target.value)}
+                className="w-full bg-dark-2 bg-opacity-70 text-light-2 border border-light-2 border-opacity-20 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-2"
+              />
+            </div>
           </div>
         </div>
 
@@ -1095,6 +1245,7 @@ export default function Dashboard({
             timeRange={timeRange}
             unit="kW"
             seriesLabel="Electricity consumption"
+            rangeLabel={selectedRange.label}
           />
         </div>
 
@@ -1109,6 +1260,7 @@ export default function Dashboard({
             timeRange={timeRange}
             unit="m³"
             seriesLabel="Gas consumption"
+            rangeLabel={selectedRange.label}
           />
         </div>
 
