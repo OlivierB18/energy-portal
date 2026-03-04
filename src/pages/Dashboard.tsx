@@ -876,6 +876,13 @@ export default function Dashboard({
         console.log('[HA History] Available entities:', haEntities.map((e) => e.entity_id).join(', '))
         console.log('[HA History] Found power entity:', powerEntity?.entity_id)
         console.log('[HA History] Found gas entity:', gasEntity?.entity_id)
+        
+        // Debug: log which entities match gas pattern
+        const gasMatches = haEntities.filter((e) => {
+          const id = e.entity_id.toLowerCase()
+          return id.includes('gas')
+        }).map((e) => e.entity_id)
+        console.log('[HA History] Debug - Entities containing "gas":', gasMatches)
 
         if (!powerEntity && !gasEntity) {
           console.error('[HA History] No power or gas entities found from', haEntities.length, 'entities')
