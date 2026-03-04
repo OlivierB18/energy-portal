@@ -822,15 +822,25 @@ export default function Dashboard({
       try {
         console.log('[HA History] Starting fetch for environment:', selectedEnvironment)
 
-        // Find power and gas entities - look for exact matches from HA
+        // Find power and gas entities - prioritize specific meter entities
         const powerEntity = haEntities.find(
           (e) => {
             const id = e.entity_id.toLowerCase()
-            // Match multiple patterns
-            return id.includes('electricity_meter_power_consumption') ||
-                   id.includes('current_power') ||
-                   id.includes('power') ||
-                   id.includes('watt')
+            // Prioritize electricity meter, exclude binary sensors
+            return !id.startsWith('binary_sensor') && (
+              id.includes('electricity_meter_power_consumption') ||
+              id.includes('electricity_meter') && id.includes('power') ||
+              id.includes('meter') && id.includes('power') && id.includes('consumption')
+            )
+          }
+        ) || haEntities.find(
+          (e) => {
+            const id = e.entity_id.toLowerCase()
+            // Fallback to any power/watt sensor that's not binary
+            return !id.startsWith('binary_sensor') && id.startsWith('sensor.') && (
+              id.includes('current_power') ||
+              (id.includes('power') && (id.includes('consumption') || id.includes('watt')))
+            )
           }
         )
         
@@ -838,9 +848,10 @@ export default function Dashboard({
           (e) => {
             const id = e.entity_id.toLowerCase()
             return id.includes('gas_meter_gas_consumption') ||
+                   (id.includes('gas_meter') && id.includes('consumption')) ||
                    id.includes('gas_consumption') ||
                    id.includes('gas_total') ||
-                   id.includes('gas_m3')
+                   (id.includes('gas') && id.includes('m3'))
           }
         )
 
