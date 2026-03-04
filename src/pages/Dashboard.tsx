@@ -57,7 +57,7 @@ export default function Dashboard({
   const [isCheckingPermissions, setIsCheckingPermissions] = useState(true)
   const [environments, setEnvironments] = useState<EnvironmentConfig[]>([])
   const [envLoading, setEnvLoading] = useState(false)
-  const [envError, setEnvError] = useState<string | null>(null)
+  const [_envError, setEnvError] = useState<string | null>(null)
   const [haEntities, setHaEntities] = useState<HaEntity[]>([])
   // Laatst bekende sensoren (blijven altijd staan bij error)
   const [lastKnownHaEntities, setLastKnownHaEntities] = useState<HaEntity[]>([])
@@ -73,7 +73,7 @@ export default function Dashboard({
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false)
   const [pricingConfig, setPricingConfig] = useState<EnergyPricingConfig | null>(null)
   // Home Assistant connection status: 'connecting' | 'connected' | 'error'
-  const [haConnectionStatus, setHaConnectionStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
+  const [_haConnectionStatus, setHaConnectionStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   const { isAuthenticated, getIdTokenClaims, getAccessTokenSilently } = useAuth0()
 
   const getAuthToken = async () => {
@@ -183,10 +183,6 @@ export default function Dashboard({
   const visibleEnvironments = allowedEnvironmentIds
     ? environments.filter((env) => allowedEnvironmentIds.includes(env.id))
     : environments
-
-  const assignedEnvironmentLabels = allowedEnvironmentIds
-    ? visibleEnvironments.map((env) => env.name)
-    : []
 
   useEffect(() => {
     if (visibleEnvironments.length === 0) {
@@ -1038,63 +1034,6 @@ export default function Dashboard({
               </div>
             </div>
           </div>
-
-          {/* Current Environment Info */}
-          <div className="bg-light-2 bg-opacity-10 rounded-xl p-4 backdrop-blur-sm">
-            {visibleEnvironments.length > 0 ? (
-              <>
-                <div className="flex items-center gap-2 text-light-2">
-                  {/* Status indicator: green=connected, red=error, yellow=connecting */}
-                  <div
-                    className={`w-3 h-3 rounded-full ${
-                      haConnectionStatus === 'connected'
-                        ? 'bg-green-400 animate-pulse'
-                        : haConnectionStatus === 'connecting'
-                        ? 'bg-yellow-400 animate-pulse'
-                        : 'bg-red-500 animate-pulse'
-                    }`}
-                    title={
-                      haConnectionStatus === 'connected'
-                        ? 'Connected to Home Assistant'
-                        : haConnectionStatus === 'connecting'
-                        ? 'Connecting to Home Assistant...'
-                        : 'Not connected to Home Assistant'
-                    }
-                  ></div>
-                  <span className="font-medium">
-                    Currently monitoring: {environments.find(e => e.id === selectedEnvironment)?.name}
-                  </span>
-                </div>
-                <div className="mt-3 text-light-1 text-sm">
-                  {allowedEnvironmentIds ? (
-                    assignedEnvironmentLabels.length > 0 ? (
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="opacity-80">Your environments:</span>
-                        {assignedEnvironmentLabels.map((label) => (
-                          <span
-                            key={label}
-                            className="px-2 py-1 rounded-full bg-light-2 bg-opacity-20 text-light-2 text-xs"
-                          >
-                            {label}
-                          </span>
-                        ))}
-                      </div>
-                    ) : (
-                      <span className="opacity-80">No environments assigned.</span>
-                    )
-                  ) : (
-                    <span className="opacity-80">All environments available.</span>
-                  )}
-                  {envLoading && <div className="mt-2 text-xs opacity-70">Loading environments...</div>}
-                  {envError && <div className="mt-2 text-xs text-red-300">{envError}</div>}
-                </div>
-              </>
-            ) : (
-              <div className="text-light-2 text-center py-2">
-                <span className="font-medium">No environments assigned</span>
-              </div>
-            )}
-          </div>
         </div>
 
         {/* No Environments Assigned Message */}
@@ -1151,20 +1090,6 @@ export default function Dashboard({
             unit="kWh"
             cost={realTimeData.electricityCostMonth}
             icon="calendar"
-          />
-          <EnergyCard
-            title="Status"
-            value={
-              haConnectionStatus === 'connected'
-                ? 'Active'
-                : haConnectionStatus === 'connecting'
-                ? 'Connecting...'
-                : 'Error'
-            }
-            unit=""
-            cost={null}
-            icon="activity"
-            status={haConnectionStatus}
           />
         </div>
 
