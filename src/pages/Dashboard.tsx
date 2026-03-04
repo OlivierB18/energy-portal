@@ -1168,47 +1168,6 @@ export default function Dashboard({
           />
         </div>
 
-        {/* Cost Breakdown */}
-        <div className="glass-panel rounded-2xl shadow-lg p-6 mb-8">
-          <h3 className="text-xl font-heavy text-dark-1 mb-4">Cost Breakdown</h3>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="glass-card rounded-xl p-4">
-              <p className="text-light-1 text-sm font-medium mb-3">Today</p>
-              <div className="space-y-2 text-sm">
-                <div className="flex justify-between text-light-2">
-                  <span>Electricity cost</span>
-                  <span>€{realTimeData.electricityCostToday.toFixed(2)}</span>
-                </div>
-                <div className="flex justify-between text-light-2">
-                  <span>Gas cost</span>
-                  <span>€{realTimeData.gasCostToday.toFixed(2)}</span>
-                </div>
-                <div className="flex justify-between text-light-2 font-heavy border-t border-dark-2 border-opacity-20 pt-2">
-                  <span>Total</span>
-                  <span>€{realTimeData.costToday.toFixed(2)}</span>
-                </div>
-              </div>
-            </div>
-            <div className="glass-card rounded-xl p-4">
-              <p className="text-light-1 text-sm font-medium mb-3">This Month</p>
-              <div className="space-y-2 text-sm">
-                <div className="flex justify-between text-light-2">
-                  <span>Electricity cost</span>
-                  <span>€{realTimeData.electricityCostMonth.toFixed(2)}</span>
-                </div>
-                <div className="flex justify-between text-light-2">
-                  <span>Gas cost</span>
-                  <span>€{realTimeData.gasCostMonth.toFixed(2)}</span>
-                </div>
-                <div className="flex justify-between text-light-2 font-heavy border-t border-dark-2 border-opacity-20 pt-2">
-                  <span>Total</span>
-                  <span>€{realTimeData.costMonth.toFixed(2)}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
         {/* Time Range Selector */}
         <div className="glass-panel rounded-xl shadow-lg p-4 mb-8">
           <div className="flex flex-col md:flex-row md:items-center gap-4">
