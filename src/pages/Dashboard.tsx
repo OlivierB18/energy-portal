@@ -1,9 +1,9 @@
-import { useEffect, useState, useMemo } from 'react'
+import { useEffect, useState, useMemo, useRef } from 'react'
 import EnergyCard from '../components/EnergyCard'
 import EnergyChart from '../components/EnergyChart'
 import HomeAssistantConfig from '../components/HomeAssistantConfig'
 import EnergyPriceModal from '../components/EnergyPriceModal'
-import { Zap, TrendingUp, Clock, Home, Settings, DollarSign, ChevronDown } from 'lucide-react'
+import { Zap, Clock, Home, Settings, DollarSign, ChevronDown, Flame } from 'lucide-react'
 import { useAuth0 } from '@auth0/auth0-react'
 import { HaEntity, EnergyPricingConfig } from '../types'
 
@@ -33,6 +33,11 @@ interface PowerSample {
   power: number
 }
 
+interface GasSample {
+  timestamp: number
+  gas: number
+}
+
 export default function Dashboard({
   isAdmin,
   selectedEnvironmentId,
@@ -55,6 +60,7 @@ export default function Dashboard({
   const [showHaConfig, setShowHaConfig] = useState(false)
   const [haRefreshKey, setHaRefreshKey] = useState(0)
   const [powerSamples, setPowerSamples] = useState<PowerSample[]>([])
+  const [gasSamples, setGasSamples] = useState<GasSample[]>([])
   const [showPriceModal, setShowPriceModal] = useState(false)
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false)
   const [pricingConfig, setPricingConfig] = useState<EnergyPricingConfig | null>(null)
@@ -365,13 +371,16 @@ export default function Dashboard({
   }
 
   // Mock data for demonstration - in real app, this would fetch from selected environment
+  const configuredGasPrice = Number(import.meta.env.VITE_DEFAULT_GAS_PRICE_EUR_PER_M3)
+  const gasRatePerM3 = Number.isFinite(configuredGasPrice) && configuredGasPrice > 0 ? configuredGasPrice : 1.35
+
   const mockData = {
     currentPower: 2.45,
     dailyUsage: 12.8,
     monthlyUsage: 285.3,
-    costToday: 3.84,
-    costMonth: 85.59,
-    trend: 8.5,
+    gasDailyUsage: 0,
+    gasMonthlyUsage: 0,
+    gasChartValue: 0,
   }
 
   // Extract real-time energy data from Home Assistant entities
@@ -384,11 +393,14 @@ export default function Dashboard({
       return isNaN(num) ? 0 : num
     }
 
+    const environmentKey = selectedEnvironment || 'default'
+
     // Helper function to find entity by keywords in entity_id
-    const findEntity = (keywords: string[]): HaEntity | undefined => {
+    const findEntity = (keywords: string[], excludedKeywords: string[] = []): HaEntity | undefined => {
       return entities.find(entity => 
-        entity.domain === 'sensor' && 
-        keywords.some(keyword => entity.entity_id.toLowerCase().includes(keyword.toLowerCase()))
+        entity.domain === 'sensor' &&
+        keywords.some(keyword => entity.entity_id.toLowerCase().includes(keyword.toLowerCase())) &&
+        !excludedKeywords.some(keyword => entity.entity_id.toLowerCase().includes(keyword.toLowerCase()))
       )
     }
 
@@ -399,19 +411,27 @@ export default function Dashboard({
       const thisMonth = `${now.getFullYear()}-${now.getMonth() + 1}`
       
       // Get stored tracking data
-      const storedDaily = localStorage.getItem('energy_daily')
-      const storedMonthly = localStorage.getItem('energy_monthly')
-      const storedDate = localStorage.getItem('energy_date')
-      const storedMonth = localStorage.getItem('energy_month')
-      const lastUpdate = localStorage.getItem('energy_last_update')
+      const keys = {
+        daily: `energy_daily_${environmentKey}`,
+        monthly: `energy_monthly_${environmentKey}`,
+        date: `energy_date_${environmentKey}`,
+        month: `energy_month_${environmentKey}`,
+        lastUpdate: `energy_last_update_${environmentKey}`,
+      }
+
+      const storedDaily = localStorage.getItem(keys.daily)
+      const storedMonthly = localStorage.getItem(keys.monthly)
+      const storedDate = localStorage.getItem(keys.date)
+      const storedMonth = localStorage.getItem(keys.month)
+      const lastUpdate = localStorage.getItem(keys.lastUpdate)
       
       let dailyTotal = 0
       let monthlyTotal = 0
       
       // Reset daily if new day
       if (storedDate !== today) {
-        localStorage.setItem('energy_date', today)
-        localStorage.setItem('energy_daily', '0')
+        localStorage.setItem(keys.date, today)
+        localStorage.setItem(keys.daily, '0')
         dailyTotal = 0
       } else {
         dailyTotal = storedDaily ? parseFloat(storedDaily) : 0
@@ -419,8 +439,8 @@ export default function Dashboard({
       
       // Reset monthly if new month
       if (storedMonth !== thisMonth) {
-        localStorage.setItem('energy_month', thisMonth)
-        localStorage.setItem('energy_monthly', '0')
+        localStorage.setItem(keys.month, thisMonth)
+        localStorage.setItem(keys.monthly, '0')
         monthlyTotal = 0
       } else {
         monthlyTotal = storedMonthly ? parseFloat(storedMonthly) : 0
@@ -438,17 +458,55 @@ export default function Dashboard({
           dailyTotal += energyUsed
           monthlyTotal += energyUsed
           
-          localStorage.setItem('energy_daily', dailyTotal.toString())
-          localStorage.setItem('energy_monthly', monthlyTotal.toString())
+          localStorage.setItem(keys.daily, dailyTotal.toString())
+          localStorage.setItem(keys.monthly, monthlyTotal.toString())
         }
       }
       
       // Update last timestamp
-      localStorage.setItem('energy_last_update', now.toISOString())
+      localStorage.setItem(keys.lastUpdate, now.toISOString())
       
       return {
         daily: dailyTotal,
         monthly: monthlyTotal,
+      }
+    }
+
+    // Helper function to derive gas daily/monthly from cumulative meter when dedicated sensors are missing
+    const trackGasFromMeter = (gasMeterTotal: number): { daily: number; monthly: number } => {
+      const now = new Date()
+      const today = now.toDateString()
+      const thisMonth = `${now.getFullYear()}-${now.getMonth() + 1}`
+      const keys = {
+        dailyDate: `gas_daily_date_${environmentKey}`,
+        dailyBase: `gas_daily_base_${environmentKey}`,
+        monthValue: `gas_month_${environmentKey}`,
+        monthBase: `gas_month_base_${environmentKey}`,
+      }
+
+      const storedDailyDate = localStorage.getItem(keys.dailyDate)
+      const storedDailyBase = parseFloat(localStorage.getItem(keys.dailyBase) || '0')
+      const storedMonthValue = localStorage.getItem(keys.monthValue)
+      const storedMonthBase = parseFloat(localStorage.getItem(keys.monthBase) || '0')
+
+      let dailyBase = storedDailyBase
+      let monthBase = storedMonthBase
+
+      if (storedDailyDate !== today || !Number.isFinite(storedDailyBase)) {
+        dailyBase = gasMeterTotal
+        localStorage.setItem(keys.dailyDate, today)
+        localStorage.setItem(keys.dailyBase, gasMeterTotal.toString())
+      }
+
+      if (storedMonthValue !== thisMonth || !Number.isFinite(storedMonthBase)) {
+        monthBase = gasMeterTotal
+        localStorage.setItem(keys.monthValue, thisMonth)
+        localStorage.setItem(keys.monthBase, gasMeterTotal.toString())
+      }
+
+      return {
+        daily: Math.max(0, gasMeterTotal - dailyBase),
+        monthly: Math.max(0, gasMeterTotal - monthBase),
       }
     }
 
@@ -467,6 +525,33 @@ export default function Dashboard({
     // Find daily energy sensor (in kWh)
     const dailyEntity = findEntity(['energy_today', 'daily_energy', 'today', 'day_energy'])
     const monthlyEntity = findEntity(['energy_month', 'monthly_energy', 'month_energy'])
+
+    const gasDailyEntity = findEntity([
+      'gas_today',
+      'daily_gas',
+      'today_gas',
+      'gas_day',
+      'gas_verbruik_dag',
+      'gas_consumption_today',
+    ])
+    const gasMonthlyEntity = findEntity([
+      'gas_month',
+      'monthly_gas',
+      'month_gas',
+      'gas_verbruik_maand',
+      'gas_consumption_month',
+    ])
+    const gasFlowEntity = findEntity(
+      ['gas_flow', 'gas_rate', 'current_gas', 'gas_current', 'gas_usage', 'gas_consumption'],
+      ['today', 'day', 'month', 'total', 'cost', 'price', 'tariff'],
+    )
+    const gasMeterEntity = findEntity([
+      'gas_total',
+      'total_gas',
+      'gas_meter',
+      'gas_m3',
+      'gas_consumption_total',
+    ])
     
     // Use sensor data if available, otherwise track locally
     let dailyUsage: number
@@ -487,27 +572,60 @@ export default function Dashboard({
       console.log('[Energy] Tracking locally - Daily:', dailyUsage.toFixed(3), 'kWh, Monthly:', monthlyUsage.toFixed(3), 'kWh')
     }
 
+    let gasDailyUsage = 0
+    let gasMonthlyUsage = 0
+
+    if (gasDailyEntity || gasMonthlyEntity) {
+      gasDailyUsage = gasDailyEntity ? parseValue(gasDailyEntity.state) : 0
+      gasMonthlyUsage = gasMonthlyEntity ? parseValue(gasMonthlyEntity.state) : 0
+    } else if (gasMeterEntity) {
+      const trackedGas = trackGasFromMeter(parseValue(gasMeterEntity.state))
+      gasDailyUsage = trackedGas.daily
+      gasMonthlyUsage = trackedGas.monthly
+    }
+
+    const gasChartValue = gasFlowEntity
+      ? parseValue(gasFlowEntity.state)
+      : gasDailyUsage
+
     // Calculate energy costs using pricing config
     const consumerRate = (pricingConfig?.consumerPrice || 0.30) + (pricingConfig?.consumerMargin || 0)
-    // Note: producerRate could be used for showing producer/feed-in rates in the future
-    const costToday = dailyUsage * consumerRate
-    const costMonth = monthlyUsage * consumerRate
+    const electricityCostToday = dailyUsage * consumerRate
+    const electricityCostMonth = monthlyUsage * consumerRate
+    const gasCostToday = gasDailyUsage * gasRatePerM3
+    const gasCostMonth = gasMonthlyUsage * gasRatePerM3
+    const totalCostToday = electricityCostToday + gasCostToday
+    const totalCostMonth = electricityCostMonth + gasCostMonth
 
     return {
       currentPower: parseFloat(currentPower.toFixed(2)),
       dailyUsage: parseFloat(dailyUsage.toFixed(1)),
       monthlyUsage: parseFloat(monthlyUsage.toFixed(1)),
-      costToday: parseFloat(costToday.toFixed(2)),
-      costMonth: parseFloat(costMonth.toFixed(2)),
-      trend: mockData.trend, // TODO: Calculate from history
+      gasDailyUsage: parseFloat(gasDailyUsage.toFixed(2)),
+      gasMonthlyUsage: parseFloat(gasMonthlyUsage.toFixed(2)),
+      gasChartValue: parseFloat(gasChartValue.toFixed(3)),
+      electricityCostToday: parseFloat(electricityCostToday.toFixed(2)),
+      electricityCostMonth: parseFloat(electricityCostMonth.toFixed(2)),
+      gasCostToday: parseFloat(gasCostToday.toFixed(2)),
+      gasCostMonth: parseFloat(gasCostMonth.toFixed(2)),
+      costToday: parseFloat(totalCostToday.toFixed(2)),
+      costMonth: parseFloat(totalCostMonth.toFixed(2)),
     }
-  }, [haEntities, lastKnownHaEntities, pricingConfig])
+  }, [haEntities, lastKnownHaEntities, pricingConfig, selectedEnvironment, gasRatePerM3])
 
-  const liveChartStorageKey = `energy_live_power_samples_${selectedEnvironment || 'default'}`
+  const livePowerStorageKey = `energy_live_power_samples_${selectedEnvironment || 'default'}`
+  const liveGasStorageKey = `energy_live_gas_samples_${selectedEnvironment || 'default'}`
+  const latestPowerRef = useRef(realTimeData.currentPower)
+  const latestGasRef = useRef(realTimeData.gasChartValue)
+
+  useEffect(() => {
+    latestPowerRef.current = realTimeData.currentPower
+    latestGasRef.current = realTimeData.gasChartValue
+  }, [realTimeData.currentPower, realTimeData.gasChartValue])
 
   useEffect(() => {
     try {
-      const stored = localStorage.getItem(liveChartStorageKey)
+      const stored = localStorage.getItem(livePowerStorageKey)
       if (!stored) {
         setPowerSamples([])
         return
@@ -525,27 +643,69 @@ export default function Dashboard({
     } catch {
       setPowerSamples([])
     }
-  }, [liveChartStorageKey])
+  }, [livePowerStorageKey])
 
   useEffect(() => {
-    if (haConnectionStatus !== 'connected') {
+    try {
+      const stored = localStorage.getItem(liveGasStorageKey)
+      if (!stored) {
+        setGasSamples([])
+        return
+      }
+
+      const parsed: GasSample[] = JSON.parse(stored)
+      if (!Array.isArray(parsed)) {
+        return
+      }
+
+      const now = Date.now()
+      const maxAge = 30 * 24 * 60 * 60 * 1000
+      const cleaned = parsed.filter((sample) => typeof sample.timestamp === 'number' && typeof sample.gas === 'number' && now - sample.timestamp <= maxAge)
+      setGasSamples(cleaned)
+    } catch {
+      setGasSamples([])
+    }
+  }, [liveGasStorageKey])
+
+  useEffect(() => {
+    if (!selectedEnvironment || visibleEnvironments.length === 0) {
       return
     }
 
-    const now = Date.now()
-    setPowerSamples((prev) => {
-      const lastSample = prev[prev.length - 1]
-      if (lastSample && now - lastSample.timestamp < 8000) {
-        return prev
-      }
+    const captureSamples = () => {
+      const now = Date.now()
 
-      const next = [...prev, { timestamp: now, power: realTimeData.currentPower }]
-      const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000
-      const trimmed = next.filter((sample) => sample.timestamp >= thirtyDaysAgo)
-      localStorage.setItem(liveChartStorageKey, JSON.stringify(trimmed))
-      return trimmed
-    })
-  }, [haConnectionStatus, liveChartStorageKey, realTimeData.currentPower])
+      setPowerSamples((prev) => {
+        const lastSample = prev[prev.length - 1]
+        if (lastSample && now - lastSample.timestamp < 8000) {
+          return prev
+        }
+
+        const next = [...prev, { timestamp: now, power: latestPowerRef.current }]
+        const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000
+        const trimmed = next.filter((sample) => sample.timestamp >= thirtyDaysAgo)
+        localStorage.setItem(livePowerStorageKey, JSON.stringify(trimmed))
+        return trimmed
+      })
+
+      setGasSamples((prev) => {
+        const lastSample = prev[prev.length - 1]
+        if (lastSample && now - lastSample.timestamp < 8000) {
+          return prev
+        }
+
+        const next = [...prev, { timestamp: now, gas: latestGasRef.current }]
+        const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000
+        const trimmed = next.filter((sample) => sample.timestamp >= thirtyDaysAgo)
+        localStorage.setItem(liveGasStorageKey, JSON.stringify(trimmed))
+        return trimmed
+      })
+    }
+
+    captureSamples()
+    const interval = window.setInterval(captureSamples, 10000)
+    return () => window.clearInterval(interval)
+  }, [liveGasStorageKey, livePowerStorageKey, selectedEnvironment, visibleEnvironments.length])
 
   const chartData = useMemo(() => {
     const now = Date.now()
@@ -568,11 +728,38 @@ export default function Dashboard({
     }))
 
     if (points.length === 0) {
-      return [{ time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), power: realTimeData.currentPower }]
+      return [{ time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), power: latestPowerRef.current }]
     }
 
     return points
-  }, [powerSamples, realTimeData.currentPower, timeRange])
+  }, [powerSamples, timeRange])
+
+  const gasChartData = useMemo(() => {
+    const now = Date.now()
+    let cutoff = now - 24 * 60 * 60 * 1000
+
+    if (timeRange === 'week') {
+      cutoff = now - 7 * 24 * 60 * 60 * 1000
+    }
+
+    if (timeRange === 'month') {
+      cutoff = now - 30 * 24 * 60 * 60 * 1000
+    }
+
+    const filtered = gasSamples.filter((sample) => sample.timestamp >= cutoff)
+    const limited = filtered.slice(-120)
+
+    const points = limited.map((sample) => ({
+      time: new Date(sample.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      power: sample.gas,
+    }))
+
+    if (points.length === 0) {
+      return [{ time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), power: latestGasRef.current }]
+    }
+
+    return points
+  }, [gasSamples, timeRange])
 
   // Show loading screen while checking permissions
   if (isCheckingPermissions) {
@@ -596,9 +783,8 @@ export default function Dashboard({
               <Home className="w-8 h-8 text-brand-2" />
               <div>
                 <h1 className="text-4xl md:text-5xl font-heavy text-light-2 mb-2">
-                  Multi-Environment Energy Monitor
+                  Inside-Out Foxtrot
                 </h1>
-                <p className="text-light-1 text-lg">Monitor all your Home Assistant environments</p>
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -698,8 +884,6 @@ export default function Dashboard({
                   <span className="font-medium">
                     Currently monitoring: {environments.find(e => e.id === selectedEnvironment)?.name}
                   </span>
-                  {/* DEBUG: Toon actuele connectie-status */}
-                  <span className="ml-4 text-xs text-yellow-300 bg-dark-2 px-2 py-1 rounded" style={{fontFamily:'monospace'}}>status: {haConnectionStatus}</span>
                 </div>
                 <div className="mt-3 text-light-1 text-sm">
                   {allowedEnvironmentIds ? (
@@ -745,7 +929,7 @@ export default function Dashboard({
                 You don't have access to any environments yet.
               </p>
               <p className="text-dark-2">
-                Please contact your sales representative to request access.
+                Please contact your sales contact person to request access.
               </p>
             </div>
           </div>
@@ -770,26 +954,22 @@ export default function Dashboard({
               <Zap className="w-16 h-16 text-dark-1" />
             </div>
           </div>
-          <p className="text-brand-2 font-medium flex items-center gap-2">
-            <TrendingUp className="w-4 h-4" />
-            {realTimeData.trend}% higher than yesterday
-          </p>
         </div>
 
         {/* Energy Stats Grid */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
           <EnergyCard
-            title="Today's Usage"
+            title="Electricity Today"
             value={realTimeData.dailyUsage}
             unit="kWh"
-            cost={realTimeData.costToday}
+            cost={realTimeData.electricityCostToday}
             icon="zap"
           />
           <EnergyCard
-            title="This Month"
+            title="Electricity This Month"
             value={realTimeData.monthlyUsage}
             unit="kWh"
-            cost={realTimeData.costMonth}
+            cost={realTimeData.electricityCostMonth}
             icon="calendar"
           />
           <EnergyCard
@@ -806,6 +986,47 @@ export default function Dashboard({
             icon="activity"
             status={haConnectionStatus}
           />
+        </div>
+
+        {/* Cost Breakdown */}
+        <div className="glass-panel rounded-2xl shadow-lg p-6 mb-8">
+          <h3 className="text-xl font-heavy text-dark-1 mb-4">Cost Breakdown</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="glass-card rounded-xl p-4">
+              <p className="text-light-1 text-sm font-medium mb-3">Today</p>
+              <div className="space-y-2 text-sm">
+                <div className="flex justify-between text-light-2">
+                  <span>Electricity cost</span>
+                  <span>€{realTimeData.electricityCostToday.toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between text-light-2">
+                  <span>Gas cost</span>
+                  <span>€{realTimeData.gasCostToday.toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between text-light-2 font-heavy border-t border-dark-2 border-opacity-20 pt-2">
+                  <span>Total</span>
+                  <span>€{realTimeData.costToday.toFixed(2)}</span>
+                </div>
+              </div>
+            </div>
+            <div className="glass-card rounded-xl p-4">
+              <p className="text-light-1 text-sm font-medium mb-3">This Month</p>
+              <div className="space-y-2 text-sm">
+                <div className="flex justify-between text-light-2">
+                  <span>Electricity cost</span>
+                  <span>€{realTimeData.electricityCostMonth.toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between text-light-2">
+                  <span>Gas cost</span>
+                  <span>€{realTimeData.gasCostMonth.toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between text-light-2 font-heavy border-t border-dark-2 border-opacity-20 pt-2">
+                  <span>Total</span>
+                  <span>€{realTimeData.costMonth.toFixed(2)}</span>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
 
         {/* Time Range Selector */}
@@ -848,9 +1069,28 @@ export default function Dashboard({
         <div className="glass-panel rounded-3xl shadow-2xl p-8">
           <h2 className="text-2xl font-heavy text-dark-1 mb-6 flex items-center gap-2">
             <Clock className="w-6 h-6 text-brand-2" />
-            Energy Consumption Chart
+            Electricity Consumption Chart
           </h2>
-          <EnergyChart data={chartData} timeRange={timeRange} />
+          <EnergyChart
+            data={chartData}
+            timeRange={timeRange}
+            unit="kW"
+            seriesLabel="Electricity consumption"
+          />
+        </div>
+
+        {/* Gas Chart Section */}
+        <div className="glass-panel rounded-3xl shadow-2xl p-8 mt-8">
+          <h2 className="text-2xl font-heavy text-dark-1 mb-6 flex items-center gap-2">
+            <Flame className="w-6 h-6 text-brand-2" />
+            Gas Consumption Chart
+          </h2>
+          <EnergyChart
+            data={gasChartData}
+            timeRange={timeRange}
+            unit="m³"
+            seriesLabel="Gas consumption"
+          />
         </div>
 
         {/* Home Assistant Panel */}

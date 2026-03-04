@@ -14,9 +14,18 @@ interface EnergyChartProps {
     power: number
   }>
   timeRange: 'today' | 'week' | 'month'
+  unit?: string
+  seriesLabel?: string
 }
 
-export default function EnergyChart({ data, timeRange }: EnergyChartProps) {
+export default function EnergyChart({
+  data,
+  timeRange,
+  unit = 'kW',
+  seriesLabel = 'Power',
+}: EnergyChartProps) {
+  const decimals = unit === 'm³' ? 3 : 2
+
   return (
     <div className="w-full h-96">
       <ResponsiveContainer width="100%" height="100%">
@@ -35,7 +44,7 @@ export default function EnergyChart({ data, timeRange }: EnergyChartProps) {
           />
           <YAxis
             stroke="rgb(234, 233, 229)"
-            label={{ value: 'kW', angle: -90, position: 'insideLeft' }}
+            label={{ value: unit, angle: -90, position: 'insideLeft' }}
             style={{ fontSize: '0.875rem' }}
           />
           <Tooltip
@@ -45,7 +54,7 @@ export default function EnergyChart({ data, timeRange }: EnergyChartProps) {
               borderRadius: '0.5rem',
               boxShadow: '0 10px 25px rgba(0, 0, 0, 0.4)',
             }}
-            formatter={(value: number) => [`${value.toFixed(2)} kW`, 'Power']}
+            formatter={(value: number) => [`${value.toFixed(decimals)} ${unit}`, seriesLabel]}
             labelStyle={{ color: 'rgb(234, 233, 229)' }}
           />
           <Line
@@ -62,7 +71,7 @@ export default function EnergyChart({ data, timeRange }: EnergyChartProps) {
         </LineChart>
       </ResponsiveContainer>
       <p className="text-center text-light-1 text-sm mt-4">
-        Energy consumption for {timeRange === 'today' ? 'today' : timeRange === 'week' ? 'this week' : 'this month'}
+        {seriesLabel} for {timeRange === 'today' ? 'today' : timeRange === 'week' ? 'this week' : 'this month'}
       </p>
     </div>
   )
