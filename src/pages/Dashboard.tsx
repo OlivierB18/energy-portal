@@ -812,6 +812,99 @@ export default function Dashboard({
     }
   }, [liveGasStorageKey])
 
+  // Fetch historical data from Supabase
+  useEffect(() => {
+    if (!selectedEnvironment || !isAuthenticated) {
+      return
+    }
+
+    const fetchHistoricalData = async () => {
+      try {
+        // Fetch data from last 7 days for charts
+        const now = new Date()
+        const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+        
+        const token = await getAuthToken()
+        const response = await fetch(
+          `/.netlify/functions/get-device-data?environment_id=${selectedEnvironment}&start_time=${sevenDaysAgo.toISOString()}&end_time=${now.toISOString()}`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          },
+        )
+
+        if (!response.ok) {
+          console.error('[Device Data] Failed to fetch:', response.status)
+          return
+        }
+
+        const result = await response.json()
+        const data = result.data || []
+
+        // Convert Supabase data to PowerSamples format
+        const newPowerSamples: PowerSample[] = data
+          .filter((row: any) => row.current_power != null)
+          .map((row: any) => ({
+            timestamp: new Date(row.timestamp).getTime(),
+            power: row.current_power / 1000, // Convert W to kW
+          }))
+
+        // Convert Supabase data to GasSamples format
+        const newGasSamples: GasSample[] = data
+          .filter((row: any) => row.gas_total_m3 != null)
+          .map((row: any) => ({
+            timestamp: new Date(row.timestamp).getTime(),
+            gas: row.gas_total_m3,
+          }))
+
+        if (newPowerSamples.length > 0) {
+          setPowerSamples((prev) => {
+            // Merge with existing localStorage data, remove duplicates
+            const combined = [...prev, ...newPowerSamples]
+            const uniqueMap = new Map()
+            combined.forEach((sample) => {
+              // Round timestamp to nearest 10 seconds to deduplicate
+              const key = Math.floor(sample.timestamp / 10000) * 10000
+              if (!uniqueMap.has(key) || sample.timestamp > uniqueMap.get(key).timestamp) {
+                uniqueMap.set(key, sample)
+              }
+            })
+            const merged = Array.from(uniqueMap.values()).sort((a, b) => a.timestamp - b.timestamp)
+            
+            // Update localStorage with merged data
+            localStorage.setItem(livePowerStorageKey, JSON.stringify(merged))
+            return merged
+          })
+        }
+
+        if (newGasSamples.length > 0) {
+          setGasSamples((prev) => {
+            const combined = [...prev, ...newGasSamples]
+            const uniqueMap = new Map()
+            combined.forEach((sample) => {
+              const key = Math.floor(sample.timestamp / 10000) * 10000
+              if (!uniqueMap.has(key) || sample.timestamp > uniqueMap.get(key).timestamp) {
+                uniqueMap.set(key, sample)
+              }
+            })
+            const merged = Array.from(uniqueMap.values()).sort((a, b) => a.timestamp - b.timestamp)
+            
+            localStorage.setItem(liveGasStorageKey, JSON.stringify(merged))
+            return merged
+          })
+        }
+
+        // eslint-disable-next-line no-console
+        console.log(`[Device Data] Loaded ${newPowerSamples.length} power samples and ${newGasSamples.length} gas samples from Supabase`)
+      } catch (error) {
+        console.error('[Device Data] Error fetching historical data:', error)
+      }
+    }
+
+    void fetchHistoricalData()
+  }, [selectedEnvironment, isAuthenticated, livePowerStorageKey, liveGasStorageKey, getAuthToken])
+
   useEffect(() => {
     if (!selectedEnvironment || visibleEnvironments.length === 0) {
       return
