@@ -1249,7 +1249,7 @@ export default function Dashboard({
         </div>
 
         {/* Energy Stats Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
           <EnergyCard
             title="Electricity Today"
             value={realTimeData.dailyUsage}
@@ -1263,6 +1263,20 @@ export default function Dashboard({
             unit="kWh"
             cost={realTimeData.electricityCostMonth}
             icon="calendar"
+          />
+          <EnergyCard
+            title="Gas Today"
+            value={realTimeData.gasDailyUsage}
+            unit="m³"
+            cost={realTimeData.gasCostToday}
+            icon="flame"
+          />
+          <EnergyCard
+            title="Gas This Month"
+            value={realTimeData.gasMonthlyUsage}
+            unit="m³"
+            cost={realTimeData.gasCostMonth}
+            icon="flame"
           />
         </div>
 
@@ -1340,6 +1354,7 @@ export default function Dashboard({
             unit="m³"
             seriesLabel="Gas consumption"
             rangeLabel={selectedRange.label}
+            chartType="bar"
           />
         </div>
 

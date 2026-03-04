@@ -1,6 +1,8 @@
 import {
   LineChart,
   Line,
+  BarChart,
+  Bar,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -17,6 +19,7 @@ interface EnergyChartProps {
   unit?: string
   seriesLabel?: string
   rangeLabel?: string
+  chartType?: 'line' | 'bar'
 }
 
 export default function EnergyChart({
@@ -25,55 +28,91 @@ export default function EnergyChart({
   unit = 'kW',
   seriesLabel = 'Power',
   rangeLabel,
+  chartType = 'line',
 }: EnergyChartProps) {
   const decimals = unit === 'm³' ? 3 : 2
+
+  const commonAxisProps = {
+    stroke: "rgb(234, 233, 229)",
+    style: { fontSize: '0.875rem' },
+  }
+
+  const commonTooltipProps = {
+    contentStyle: {
+      backgroundColor: 'rgba(10, 10, 10, 0.95)',
+      border: '1px solid rgba(255, 255, 255, 0.08)',
+      borderRadius: '0.5rem',
+      boxShadow: '0 10px 25px rgba(0, 0, 0, 0.4)',
+    },
+    formatter: (value: number) => [`${value.toFixed(decimals)} ${unit}`, seriesLabel],
+    labelStyle: { color: 'rgb(234, 233, 229)' },
+  }
 
   return (
     <div className="w-full h-96">
       <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={data} margin={{ top: 5, right: 30, left: 0, bottom: 5 }}>
-          <defs>
-            <linearGradient id="colorPower" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor="rgb(2, 125, 94)" stopOpacity={0.8} />
-              <stop offset="95%" stopColor="rgb(2, 125, 94)" stopOpacity={0.1} />
-            </linearGradient>
-          </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255, 255, 255, 0.08)" />
-          <XAxis
-            dataKey="time"
-            stroke="rgb(234, 233, 229)"
-            style={{ fontSize: '0.875rem' }}
-            angle={-45}
-            textAnchor="end"
-            height={60}
-          />
-          <YAxis
-            stroke="rgb(234, 233, 229)"
-            label={{ value: unit, angle: -90, position: 'insideLeft' }}
-            style={{ fontSize: '0.875rem' }}
-          />
-          <Tooltip
-            contentStyle={{
-              backgroundColor: 'rgba(10, 10, 10, 0.95)',
-              border: '1px solid rgba(255, 255, 255, 0.08)',
-              borderRadius: '0.5rem',
-              boxShadow: '0 10px 25px rgba(0, 0, 0, 0.4)',
-            }}
-            formatter={(value: number) => [`${value.toFixed(decimals)} ${unit}`, seriesLabel]}
-            labelStyle={{ color: 'rgb(234, 233, 229)' }}
-          />
-          <Line
-            type="monotone"
-            dataKey="power"
-            stroke="rgb(2, 125, 94)"
-            strokeWidth={3}
-            dot={{ fill: 'rgb(2, 125, 94)', r: 5 }}
-            activeDot={{ r: 7 }}
-            fillOpacity={1}
-            fill="url(#colorPower)"
-            isAnimationActive={true}
-          />
-        </LineChart>
+        {chartType === 'bar' ? (
+          <BarChart data={data} margin={{ top: 5, right: 30, left: 0, bottom: 5 }}>
+            <defs>
+              <linearGradient id="colorGas" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor="rgb(234, 88, 12)" stopOpacity={0.8} />
+                <stop offset="95%" stopColor="rgb(234, 88, 12)" stopOpacity={0.3} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255, 255, 255, 0.08)" />
+            <XAxis
+              dataKey="time"
+              {...commonAxisProps}
+              angle={-45}
+              textAnchor="end"
+              height={60}
+            />
+            <YAxis
+              {...commonAxisProps}
+              label={{ value: unit, angle: -90, position: 'insideLeft' }}
+            />
+            <Tooltip {...commonTooltipProps} />
+            <Bar
+              dataKey="power"
+              fill="url(#colorGas)"
+              radius={[8, 8, 0, 0]}
+              isAnimationActive={false}
+            />
+          </BarChart>
+        ) : (
+          <LineChart data={data} margin={{ top: 5, right: 30, left: 0, bottom: 5 }}>
+            <defs>
+              <linearGradient id="colorPower" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor="rgb(2, 125, 94)" stopOpacity={0.8} />
+                <stop offset="95%" stopColor="rgb(2, 125, 94)" stopOpacity={0.1} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255, 255, 255, 0.08)" />
+            <XAxis
+              dataKey="time"
+              {...commonAxisProps}
+              angle={-45}
+              textAnchor="end"
+              height={60}
+            />
+            <YAxis
+              {...commonAxisProps}
+              label={{ value: unit, angle: -90, position: 'insideLeft' }}
+            />
+            <Tooltip {...commonTooltipProps} />
+            <Line
+              type="monotone"
+              dataKey="power"
+              stroke="rgb(2, 125, 94)"
+              strokeWidth={3}
+              dot={{ fill: 'rgb(2, 125, 94)', r: 5 }}
+              activeDot={{ r: 7 }}
+              fillOpacity={1}
+              fill="url(#colorPower)"
+              isAnimationActive={false}
+            />
+          </LineChart>
+        )}
       </ResponsiveContainer>
       <p className="text-center text-light-1 text-sm mt-4">
         {seriesLabel} for {timeRange === 'today' ? 'day' : timeRange === 'week' ? 'week' : 'month'}{rangeLabel ? ` (${rangeLabel})` : ''}
