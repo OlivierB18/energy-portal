@@ -179,13 +179,21 @@ export const handler = async (event) => {
     const entityIdsList = entityIds.split(',').map((id) => id.trim())
 
     // Fetch history from Home Assistant
+    // Format: /api/history/period/<start_time>?filter_entity_id=sensor.x&filter_entity_id=sensor.y&end_time=...
     const historyUrl = new URL(baseUrl)
-    historyUrl.pathname = '/api/history/period'
-    historyUrl.searchParams.append('entity_ids', entityIdsList.join(','))
-    historyUrl.searchParams.append('start_time', startTime)
-    historyUrl.searchParams.append('end_time', endTime)
+    historyUrl.pathname = `/api/history/period/${startTime}`
+    
+    // Add each entity ID as a separate filter_entity_id parameter
+    entityIdsList.forEach((entityId) => {
+      historyUrl.searchParams.append('filter_entity_id', entityId)
+    })
+    
+    if (endTime) {
+      historyUrl.searchParams.append('end_time', endTime)
+    }
 
     console.log('[HA History] Fetching from:', historyUrl.toString())
+    console.log('[HA History] Entity IDs:', entityIdsList)
 
     let historyResponse
     try {
