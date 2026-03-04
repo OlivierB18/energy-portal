@@ -129,6 +129,7 @@ export const handler = async (event) => {
   try {
     const authHeader = event.headers.authorization
     if (!authHeader?.startsWith('Bearer ')) {
+      console.error('[HA History] Missing authorization header')
       return {
         statusCode: 401,
         body: JSON.stringify({ error: 'Missing authorization header' }),
@@ -140,7 +141,8 @@ export const handler = async (event) => {
 
     try {
       payload = await verifyAuth0Token(token)
-    } catch {
+    } catch (err) {
+      console.error('[HA History] Token verification failed:', err)
       return {
         statusCode: 401,
         body: JSON.stringify({ error: 'Invalid token' }),
@@ -153,18 +155,34 @@ export const handler = async (event) => {
     const entityIds = event.queryStringParameters?.entityIds
 
     if (!startTime || !endTime || !entityIds) {
+      console.error('[HA History] Missing query parameters:', { startTime, endTime, entityIds })
       return {
         statusCode: 400,
         body: JSON.stringify({ error: 'Missing query parameters: startTime, endTime, entityIds' }),
       }
     }
 
-    // Get HA config from Auth0 metadata
-    const domain = getEnv('AUTH0_DOMAIN')
-    const mgmtToken = await getManagementToken(domain)
-    const metadata = await getClientMetadata(domain, mgmtToken)
+    console.log('[HA History] Request for environment:', environmentId, 'entities:', entityIds)
 
-    const haConfig = getHaConfig(metadata, environmentId)
+    // Get HA config from Auth0 metadata
+    let haConfig
+    try {
+      const domain = getEnv('AUTH0_DOMAIN')
+      const mgmtToken = await getManagementToken(domain)
+      const metadata = await getClientMetadata(domain, mgmtToken)
+      haConfig = getHaConfig(metadata, environmentId)
+      console.log('[HA History] Got HA config for URL:', haConfig.baseUrl?.split('/')[2])
+    } catch (err) {
+      console.error('[HA History] Failed to get HA config:', err.message || err)
+      return {
+        statusCode: 500,
+        body: JSON.stringify({
+          error: 'Failed to retrieve Home Assistant config',
+          details: err instanceof Error ? err.message : String(err),
+        }),
+      }
+    }
+
     const { baseUrl, token: haToken } = haConfig
 
     // Parse entity IDs
@@ -187,28 +205,38 @@ export const handler = async (event) => {
     })
 
     if (!historyResponse.ok) {
-      console.error('[HA History] HA request failed:', historyResponse.status)
+      const errorBody = await historyResponse.text()
+      console.error('[HA History] HA request failed:', historyResponse.status, errorBody)
       return {
         statusCode: historyResponse.status,
         body: JSON.stringify({
           error: `Home Assistant API error: ${historyResponse.status}`,
+          details: errorBody,
         }),
       }
     }
 
     const historyData = await historyResponse.json()
 
+    console.log('[HA History] Raw HA response:', historyData.length, 'entities', 
+      historyData.map((h) => ({ entity_id: h[0]?.entity_id, states: h.length })))
+
     // Convert HA history to our format: array of { entity_id, history: [...] }
-    const formatted = historyData.map((entityHistory) => ({
-      entity_id: entityHistory[0]?.entity_id || 'unknown',
-      history: (entityHistory || [])
+    const formatted = historyData.map((entityHistory) => {
+      const validStates = (entityHistory || [])
         .filter((state) => state.state && !Number.isNaN(parseFloat(state.state)))
-        .map((state) => ({
+      
+      console.log('[HA History] Entity', entityHistory[0]?.entity_id, 'has', validStates.length, 'valid states')
+      
+      return {
+        entity_id: entityHistory[0]?.entity_id || 'unknown',
+        history: validStates.map((state) => ({
           timestamp: new Date(state.last_changed).getTime(),
           value: parseFloat(state.state),
           state: state.state,
         })),
-    }))
+      }
+    })
 
     console.log('[HA History] Loaded', formatted.length, 'entity histories')
 
@@ -220,11 +248,12 @@ export const handler = async (event) => {
       }),
     }
   } catch (error) {
-    console.error('[HA History] Error:', error)
+    console.error('[HA History] Unexpected error:', error)
     return {
       statusCode: 500,
       body: JSON.stringify({
         error: error instanceof Error ? error.message : 'Server error',
+        stack: error instanceof Error ? error.stack : String(error),
       }),
     }
   }

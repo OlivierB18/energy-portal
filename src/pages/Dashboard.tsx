@@ -820,16 +820,33 @@ export default function Dashboard({
 
     const fetchHistoricalData = async () => {
       try {
-        // Find power and gas entities
+        // Find power and gas entities - more flexible matching
         const powerEntity = haEntities.find(
-          (e) => e.entity_id.toLowerCase().includes('power') || e.entity_id.toLowerCase().includes('watt'),
+          (e) => {
+            const id = e.entity_id.toLowerCase()
+            const friendly = (e.friendly_name || '').toLowerCase()
+            return id.includes('power') || id.includes('watt') || 
+                   id.includes('current_power') ||
+                   friendly.includes('power') || friendly.includes('watt')
+          }
         )
+        
         const gasEntity = haEntities.find(
-          (e) => e.entity_id.toLowerCase().includes('gas_total') || e.entity_id.toLowerCase().includes('gas_m3'),
+          (e) => {
+            const id = e.entity_id.toLowerCase()
+            const friendly = (e.friendly_name || '').toLowerCase()
+            return id.includes('gas') || id.includes('m3') || 
+                   id.includes('gas_total') ||
+                   friendly.includes('gas') || friendly.includes('m³')
+          }
         )
 
+        console.log('[HA History] Available entities:', haEntities.map((e) => e.entity_id).join(', '))
+        console.log('[HA History] Found power entity:', powerEntity?.entity_id)
+        console.log('[HA History] Found gas entity:', gasEntity?.entity_id)
+
         if (!powerEntity && !gasEntity) {
-          console.log('[HA History] No power or gas entities found')
+          console.error('[HA History] No power or gas entities found from', haEntities.length, 'entities')
           return
         }
 
@@ -842,6 +859,8 @@ export default function Dashboard({
         const now = new Date()
         const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
 
+        console.log('[HA History] Fetching from', sevenDaysAgo.toISOString(), 'to', now.toISOString())
+
         const token = await getAuthToken()
         const response = await fetch(
           `/.netlify/functions/ha-history?environmentId=${selectedEnvironment}&startTime=${sevenDaysAgo.toISOString()}&endTime=${now.toISOString()}&entityIds=${entityIds.join(',')}`,
@@ -853,14 +872,15 @@ export default function Dashboard({
         )
 
         if (!response.ok) {
-          console.error('[HA History] Failed to fetch:', response.status, await response.text())
+          const errorText = await response.text()
+          console.error('[HA History] Failed to fetch:', response.status, errorText)
           return
         }
 
         const result = await response.json()
         const historyData = result.entities || []
 
-        console.log('[HA History] Retrieved data for', historyData.length, 'entities')
+        console.log('[HA History] Retrieved data for', historyData.length, 'entities:', JSON.stringify(historyData.map((e: any) => ({ entity_id: e.entity_id, samples: e.history?.length || 0 }))))
 
         // Process power data
         const powerData = historyData.find((h: any) => h.entity_id === powerEntity?.entity_id)
