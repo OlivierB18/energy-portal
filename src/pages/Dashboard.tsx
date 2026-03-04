@@ -890,6 +890,9 @@ export default function Dashboard({
 
     if (filtered.length === 0) {
       return [{
+        time: new Date(selectedRange.startMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        power: 0,
+      }, {
         time: new Date(selectedRange.endMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         power: fallbackValue,
       }]
@@ -899,10 +902,29 @@ export default function Dashboard({
     const step = Math.max(1, Math.ceil(filtered.length / maxPoints))
     const reduced = filtered.filter((_, index) => index % step === 0 || index === filtered.length - 1)
 
-    return reduced.map((sample) => ({
+    // Find the last sample before the range to use as starting value
+    const beforeRange = samples
+      .filter((s) => s.timestamp < selectedRange.startMs)
+      .sort((a, b) => b.timestamp - a.timestamp)[0]
+    
+    const startValue = beforeRange?.value ?? 0
+
+    // Always include a point at the range start for daily/weekly views
+    const shouldAddStart = timeRange !== 'month' && filtered[0]?.timestamp > selectedRange.startMs
+
+    const chartPoints = reduced.map((sample) => ({
       time: new Date(sample.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       power: sample.value,
     }))
+
+    if (shouldAddStart) {
+      chartPoints.unshift({
+        time: new Date(selectedRange.startMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        power: startValue,
+      })
+    }
+
+    return chartPoints
   }
 
   const chartData = useMemo(() => {
