@@ -936,13 +936,26 @@ export default function Dashboard({
           console.log('[HA History] Loaded', newPowerSamples.length, 'power samples')
         }
 
-        // Process gas data
+        // Process gas data - convert cumulative meter to consumption per interval
         const gasData = historyData.find((h: any) => h.entity_id === gasEntity?.entity_id)
         if (gasData?.history && gasData.history.length > 0) {
-          const newGasSamples: GasSample[] = gasData.history.map((state: any) => ({
-            timestamp: state.timestamp,
-            gas: state.value,
-          }))
+          // Sort by timestamp to ensure chronological order
+          const sortedHistory = [...gasData.history].sort((a, b) => a.timestamp - b.timestamp)
+          
+          // Convert cumulative meter readings to consumption deltas
+          const newGasSamples: GasSample[] = sortedHistory.map((state: any, index: number) => {
+            let consumption = 0
+            if (index > 0) {
+              // Get the difference from previous reading
+              const prevValue = parseFloat(sortedHistory[index - 1].state || sortedHistory[index - 1].value)
+              const currValue = parseFloat(state.state || state.value)
+              consumption = Math.max(0, currValue - prevValue) // Ensure no negative values
+            }
+            return {
+              timestamp: state.timestamp,
+              gas: consumption,
+            }
+          })
 
           setGasSamples((prev) => {
             const combined = [...prev, ...newGasSamples]
@@ -958,7 +971,7 @@ export default function Dashboard({
             return merged
           })
 
-          console.log('[HA History] Loaded', newGasSamples.length, 'gas samples')
+          console.log('[HA History] Loaded', newGasSamples.length, 'gas samples (converted to consumption deltas)')
         }
 
         // Save fetch timestamp for incremental updates
