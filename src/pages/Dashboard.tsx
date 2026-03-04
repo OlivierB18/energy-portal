@@ -949,30 +949,28 @@ export default function Dashboard({
           // Sort by timestamp to ensure chronological order
           const sortedHistory = [...gasData.history].sort((a, b) => a.timestamp - b.timestamp)
           
-          console.log('[Gas Debug] First 5 raw states:', sortedHistory.slice(0, 5).map((s: any) => ({ 
-            timestamp: s.timestamp, 
-            state: s.state, 
-            value: s.value,
-            stateType: typeof s.state,
-            valueType: typeof s.value
-          })))
+          // First value is the baseline meter reading
+          const baselineValue = parseFloat(sortedHistory[0].value)
+          console.log('[Gas Debug] Baseline meter reading:', baselineValue, 'm³')
           
-          // Convert cumulative meter readings to consumption deltas
-          const newGasSamples: GasSample[] = sortedHistory.map((state: any, index: number) => {
-            let consumption = 0
-            if (index > 0) {
-              // Get the difference from previous reading
-              const prevValue = parseFloat(sortedHistory[index - 1].value)
-              const currValue = parseFloat(state.value)
-              consumption = Math.max(0, currValue - prevValue) // Ensure no negative values
-            }
+          // Convert cumulative meter readings to consumption since baseline
+          const newGasSamples: GasSample[] = sortedHistory.map((state: any) => {
+            const currentMeterReading = parseFloat(state.value)
+            const consumption = Math.max(0, currentMeterReading - baselineValue)
             return {
               timestamp: state.timestamp,
               gas: consumption,
             }
           })
 
-          console.log('[Gas Debug] First 5 consumption deltas:', newGasSamples.slice(0, 5))
+          console.log('[Gas Debug] First 5 consumption values:', newGasSamples.slice(0, 5).map((s) => ({ 
+            ts: s.timestamp, 
+            consumption: s.gas 
+          })))
+          console.log('[Gas Debug] Last 5 consumption values:', newGasSamples.slice(-5).map((s) => ({ 
+            ts: s.timestamp, 
+            consumption: s.gas 
+          })))
 
           setGasSamples((prev) => {
             const combined = [...prev, ...newGasSamples]
@@ -988,7 +986,7 @@ export default function Dashboard({
             return merged
           })
 
-          console.log('[HA History] Loaded', newGasSamples.length, 'gas samples (converted to consumption deltas)')
+          console.log('[HA History] Loaded', newGasSamples.length, 'gas samples (converted to consumption since baseline)')
         }
 
         // Save fetch timestamp for incremental updates
