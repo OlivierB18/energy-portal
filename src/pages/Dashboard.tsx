@@ -942,13 +942,21 @@ export default function Dashboard({
           // Sort by timestamp to ensure chronological order
           const sortedHistory = [...gasData.history].sort((a, b) => a.timestamp - b.timestamp)
           
+          console.log('[Gas Debug] First 5 raw states:', sortedHistory.slice(0, 5).map((s: any) => ({ 
+            timestamp: s.timestamp, 
+            state: s.state, 
+            value: s.value,
+            stateType: typeof s.state,
+            valueType: typeof s.value
+          })))
+          
           // Convert cumulative meter readings to consumption deltas
           const newGasSamples: GasSample[] = sortedHistory.map((state: any, index: number) => {
             let consumption = 0
             if (index > 0) {
               // Get the difference from previous reading
-              const prevValue = parseFloat(sortedHistory[index - 1].state || sortedHistory[index - 1].value)
-              const currValue = parseFloat(state.state || state.value)
+              const prevValue = parseFloat(sortedHistory[index - 1].value)
+              const currValue = parseFloat(state.value)
               consumption = Math.max(0, currValue - prevValue) // Ensure no negative values
             }
             return {
@@ -956,6 +964,8 @@ export default function Dashboard({
               gas: consumption,
             }
           })
+
+          console.log('[Gas Debug] First 5 consumption deltas:', newGasSamples.slice(0, 5))
 
           setGasSamples((prev) => {
             const combined = [...prev, ...newGasSamples]
