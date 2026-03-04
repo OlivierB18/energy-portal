@@ -526,6 +526,9 @@ export default function Dashboard({
     const dailyEntity = findEntity(['energy_today', 'daily_energy', 'today', 'day_energy'])
     const monthlyEntity = findEntity(['energy_month', 'monthly_energy', 'month_energy'])
 
+    // eslint-disable-next-line no-console
+    console.log('[Energy] Detected sensors - Daily:', dailyEntity?.entity_id, 'Monthly:', monthlyEntity?.entity_id)
+
     const gasDailyEntity = findEntity([
       'gas_today',
       'daily_gas',
@@ -557,12 +560,21 @@ export default function Dashboard({
     let dailyUsage: number
     let monthlyUsage: number
     
-    if (dailyEntity || monthlyEntity) {
+    if (dailyEntity) {
       // Use sensor data
-      dailyUsage = dailyEntity ? parseValue(dailyEntity.state) : 0
-      monthlyUsage = monthlyEntity ? parseValue(monthlyEntity.state) : 0
+      dailyUsage = parseValue(dailyEntity.state)
+      
+      if (monthlyEntity) {
+        // Use monthly sensor if available
+        monthlyUsage = parseValue(monthlyEntity.state)
+      } else {
+        // Accumulate daily values when no monthly sensor exists
+        const tracked = trackEnergyLocally(0)
+        monthlyUsage = tracked.monthly + dailyUsage
+      }
+      
       // eslint-disable-next-line no-console
-      console.log('[Energy] Using sensor data - Daily:', dailyUsage, 'Monthly:', monthlyUsage)
+      console.log('[Energy] Using sensor data - Daily:', dailyUsage, 'kWh, Monthly:', monthlyUsage, 'kWh (monthly sensor:', monthlyEntity ? 'exists' : 'accumulated', ')')
     } else {
       // Track locally from power readings
       const tracked = trackEnergyLocally(currentPower)
@@ -577,7 +589,14 @@ export default function Dashboard({
 
     if (gasDailyEntity || gasMonthlyEntity) {
       gasDailyUsage = gasDailyEntity ? parseValue(gasDailyEntity.state) : 0
-      gasMonthlyUsage = gasMonthlyEntity ? parseValue(gasMonthlyEntity.state) : 0
+      
+      if (gasMonthlyEntity) {
+        gasMonthlyUsage = parseValue(gasMonthlyEntity.state)
+      } else if (gasDailyEntity) {
+        // Accumulate when no monthly sensor
+        const trackedGas = trackGasFromMeter(0)
+        gasMonthlyUsage = trackedGas.monthly + gasDailyUsage
+      }
     } else if (gasMeterEntity) {
       const trackedGas = trackGasFromMeter(parseValue(gasMeterEntity.state))
       gasDailyUsage = trackedGas.daily
