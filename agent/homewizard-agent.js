@@ -126,8 +126,8 @@ const sendToIngest = async ({ environmentId, payload }) => {
 
 const main = async () => {
   const auth0Domain = getEnv('AUTH0_DOMAIN')
-  const environmentId = getEnv('HOMEWIZARD_ENVIRONMENT_ID')
-  const intervalMs = Number(process.env.HOMEWIZARD_POLL_MS || 10000)
+  const environmentId = getEnv('ENVIRONMENT_ID')
+  const intervalMs = Number(process.env.POLL_INTERVAL_MS || 10000)
 
   // Get HA config from Auth0 metadata (same as dashboard uses)
   console.log('[agent] fetching HA configuration from Auth0...')

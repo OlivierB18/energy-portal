@@ -812,98 +812,133 @@ export default function Dashboard({
     }
   }, [liveGasStorageKey])
 
-  // Fetch historical data from Supabase
+  // Fetch historical data from Home Assistant
   useEffect(() => {
-    if (!selectedEnvironment || !isAuthenticated) {
+    if (!selectedEnvironment || !isAuthenticated || !haEntities.length) {
       return
     }
 
     const fetchHistoricalData = async () => {
       try {
-        // Fetch data from last 7 days for charts
+        // Find power and gas entities
+        const powerEntity = haEntities.find(
+          (e) => e.entity_id.toLowerCase().includes('power') || e.entity_id.toLowerCase().includes('watt'),
+        )
+        const gasEntity = haEntities.find(
+          (e) => e.entity_id.toLowerCase().includes('gas_total') || e.entity_id.toLowerCase().includes('gas_m3'),
+        )
+
+        if (!powerEntity && !gasEntity) {
+          return
+        }
+
+        // Fetch last 7 days of history
         const now = new Date()
         const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
-        
-        const token = await getAuthToken()
-        const response = await fetch(
-          `/.netlify/functions/get-device-data?environment_id=${selectedEnvironment}&start_time=${sevenDaysAgo.toISOString()}&end_time=${now.toISOString()}`,
+
+        // Get HA config from ha-entities function to access HA URL and token
+        const haConfig = await fetch(
+          `/.netlify/functions/ha-entities?environmentId=${selectedEnvironment}`,
           {
             headers: {
-              Authorization: `Bearer ${token}`,
+              Authorization: `Bearer ${await getAuthToken()}`,
+            },
+          },
+        ).then((r) => r.json())
+
+        if (!haConfig.baseUrl || !haConfig.token) {
+          console.log('[HA History] HA config not available')
+          return
+        }
+
+        const entityIds = []
+        if (powerEntity) entityIds.push(powerEntity.entity_id)
+        if (gasEntity) entityIds.push(gasEntity.entity_id)
+
+        // Query HA history endpoint
+        const historyResponse = await fetch(
+          `${haConfig.baseUrl}/api/history/period/${sevenDaysAgo.toISOString()}?end_time=${now.toISOString()}&entity_ids=${entityIds.join(',')}`,
+          {
+            headers: {
+              Authorization: `Bearer ${haConfig.token}`,
             },
           },
         )
 
-        if (!response.ok) {
-          console.error('[Device Data] Failed to fetch:', response.status)
+        if (!historyResponse.ok) {
+          console.error('[HA History] Failed to fetch:', historyResponse.status)
           return
         }
 
-        const result = await response.json()
-        const data = result.data || []
+        const historyData = await historyResponse.json()
 
-        // Convert Supabase data to PowerSamples format
-        const newPowerSamples: PowerSample[] = data
-          .filter((row: any) => row.current_power != null)
-          .map((row: any) => ({
-            timestamp: new Date(row.timestamp).getTime(),
-            power: row.current_power / 1000, // Convert W to kW
-          }))
+        // Convert power history to samples
+        if (powerEntity && historyData.length > 0) {
+          const powerHistory = historyData.find((h: any) => h[0]?.entity_id === powerEntity.entity_id)
+          if (powerHistory) {
+            const newPowerSamples: PowerSample[] = powerHistory
+              .filter((state: any) => state.state && !Number.isNaN(parseFloat(state.state)))
+              .map((state: any) => ({
+                timestamp: new Date(state.last_changed).getTime(),
+                power: parseFloat(state.state) > 100 ? parseFloat(state.state) / 1000 : parseFloat(state.state), // Convert W to kW if needed
+              }))
 
-        // Convert Supabase data to GasSamples format
-        const newGasSamples: GasSample[] = data
-          .filter((row: any) => row.gas_total_m3 != null)
-          .map((row: any) => ({
-            timestamp: new Date(row.timestamp).getTime(),
-            gas: row.gas_total_m3,
-          }))
-
-        if (newPowerSamples.length > 0) {
-          setPowerSamples((prev) => {
-            // Merge with existing localStorage data, remove duplicates
-            const combined = [...prev, ...newPowerSamples]
-            const uniqueMap = new Map()
-            combined.forEach((sample) => {
-              // Round timestamp to nearest 10 seconds to deduplicate
-              const key = Math.floor(sample.timestamp / 10000) * 10000
-              if (!uniqueMap.has(key) || sample.timestamp > uniqueMap.get(key).timestamp) {
-                uniqueMap.set(key, sample)
-              }
-            })
-            const merged = Array.from(uniqueMap.values()).sort((a, b) => a.timestamp - b.timestamp)
-            
-            // Update localStorage with merged data
-            localStorage.setItem(livePowerStorageKey, JSON.stringify(merged))
-            return merged
-          })
+            if (newPowerSamples.length > 0) {
+              setPowerSamples((prev) => {
+                const combined = [...prev, ...newPowerSamples]
+                const uniqueMap = new Map()
+                combined.forEach((sample) => {
+                  const key = Math.floor(sample.timestamp / 10000) * 10000
+                  if (!uniqueMap.has(key) || sample.timestamp > uniqueMap.get(key).timestamp) {
+                    uniqueMap.set(key, sample)
+                  }
+                })
+                const merged = Array.from(uniqueMap.values()).sort((a, b) => a.timestamp - b.timestamp)
+                localStorage.setItem(livePowerStorageKey, JSON.stringify(merged))
+                return merged
+              })
+            }
+          }
         }
 
-        if (newGasSamples.length > 0) {
-          setGasSamples((prev) => {
-            const combined = [...prev, ...newGasSamples]
-            const uniqueMap = new Map()
-            combined.forEach((sample) => {
-              const key = Math.floor(sample.timestamp / 10000) * 10000
-              if (!uniqueMap.has(key) || sample.timestamp > uniqueMap.get(key).timestamp) {
-                uniqueMap.set(key, sample)
-              }
-            })
-            const merged = Array.from(uniqueMap.values()).sort((a, b) => a.timestamp - b.timestamp)
-            
-            localStorage.setItem(liveGasStorageKey, JSON.stringify(merged))
-            return merged
-          })
+        // Convert gas history to samples
+        if (gasEntity && historyData.length > 0) {
+          const gasHistory = historyData.find((h: any) => h[0]?.entity_id === gasEntity.entity_id)
+          if (gasHistory) {
+            const newGasSamples: GasSample[] = gasHistory
+              .filter((state: any) => state.state && !Number.isNaN(parseFloat(state.state)))
+              .map((state: any) => ({
+                timestamp: new Date(state.last_changed).getTime(),
+                gas: parseFloat(state.state),
+              }))
+
+            if (newGasSamples.length > 0) {
+              setGasSamples((prev) => {
+                const combined = [...prev, ...newGasSamples]
+                const uniqueMap = new Map()
+                combined.forEach((sample) => {
+                  const key = Math.floor(sample.timestamp / 10000) * 10000
+                  if (!uniqueMap.has(key) || sample.timestamp > uniqueMap.get(key).timestamp) {
+                    uniqueMap.set(key, sample)
+                  }
+                })
+                const merged = Array.from(uniqueMap.values()).sort((a, b) => a.timestamp - b.timestamp)
+                localStorage.setItem(liveGasStorageKey, JSON.stringify(merged))
+                return merged
+              })
+            }
+          }
         }
 
         // eslint-disable-next-line no-console
-        console.log(`[Device Data] Loaded ${newPowerSamples.length} power samples and ${newGasSamples.length} gas samples from Supabase`)
+        console.log('[HA History] Loaded historical data from Home Assistant')
       } catch (error) {
-        console.error('[Device Data] Error fetching historical data:', error)
+        console.error('[HA History] Error fetching historical data:', error)
       }
     }
 
     void fetchHistoricalData()
-  }, [selectedEnvironment, isAuthenticated, livePowerStorageKey, liveGasStorageKey, getAuthToken])
+  }, [selectedEnvironment, isAuthenticated, haEntities, livePowerStorageKey, liveGasStorageKey, getAuthToken])
 
   useEffect(() => {
     if (!selectedEnvironment || visibleEnvironments.length === 0) {
