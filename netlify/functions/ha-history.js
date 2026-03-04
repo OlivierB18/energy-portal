@@ -13,17 +13,38 @@ const HA_ENVIRONMENTS = {
     urlEnv: 'HA_BROUWER_TEST_URL',
     tokenEnv: 'HA_BROUWER_TEST_TOKEN',
   },
+  'Brouwer TEST': {
+    urlEnv: 'HA_BROUWER_TEST_URL',
+    tokenEnv: 'HA_BROUWER_TEST_TOKEN',
+  },
+  'brouwer': {
+    urlEnv: 'HA_BROUWER_TEST_URL',
+    tokenEnv: 'HA_BROUWER_TEST_TOKEN',
+  },
 }
 
 const getHaConfigDirect = (environmentId) => {
-  const fallback = HA_ENVIRONMENTS[environmentId]
+  // Try exact match first
+  let fallback = HA_ENVIRONMENTS[environmentId]
+  
+  // Try case-insensitive match
   if (!fallback) {
-    throw new Error('Unknown environment: ' + environmentId)
+    const key = Object.keys(HA_ENVIRONMENTS).find(k => k.toLowerCase() === environmentId.toLowerCase())
+    if (key) {
+      fallback = HA_ENVIRONMENTS[key]
+    }
+  }
+  
+  if (!fallback) {
+    throw new Error(`Unknown environment: ${environmentId}. Available: ${Object.keys(HA_ENVIRONMENTS).join(', ')}`)
   }
 
-  return {
-    baseUrl: getEnv(fallback.urlEnv),
-    token: getEnv(fallback.tokenEnv),
+  try {
+    const baseUrl = getEnv(fallback.urlEnv)
+    const token = getEnv(fallback.tokenEnv)
+    return { baseUrl, token }
+  } catch (err) {
+    throw new Error(`Missing environment variables for ${fallback.urlEnv} or ${fallback.tokenEnv}: ${err.message}`)
   }
 }
 
@@ -168,16 +189,28 @@ export const handler = async (event) => {
 
     console.log('[HA History] Fetching from:', historyUrl.toString())
 
-    const historyResponse = await fetch(historyUrl.toString(), {
-      headers: {
-        Authorization: `Bearer ${haToken}`,
-        'Content-Type': 'application/json',
-      },
-    })
+    let historyResponse
+    try {
+      historyResponse = await fetch(historyUrl.toString(), {
+        headers: {
+          Authorization: `Bearer ${haToken}`,
+          'Content-Type': 'application/json',
+        },
+      })
+    } catch (fetchErr) {
+      console.error('[HA History] Network fetch failed:', fetchErr.message)
+      return {
+        statusCode: 503,
+        body: JSON.stringify({
+          error: 'Failed to connect to Home Assistant',
+          details: fetchErr instanceof Error ? fetchErr.message : String(fetchErr),
+        }),
+      }
+    }
 
     if (!historyResponse.ok) {
       const errorBody = await historyResponse.text()
-      console.error('[HA History] HA request failed:', historyResponse.status, errorBody)
+      console.error('[HA History] HA returned status', historyResponse.status, ':', errorBody)
       return {
         statusCode: historyResponse.status,
         body: JSON.stringify({

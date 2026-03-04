@@ -820,24 +820,27 @@ export default function Dashboard({
 
     const fetchHistoricalData = async () => {
       try {
-        // Find power and gas entities - more flexible matching
+        console.log('[HA History] Starting fetch for environment:', selectedEnvironment)
+
+        // Find power and gas entities - look for exact matches from HA
         const powerEntity = haEntities.find(
           (e) => {
             const id = e.entity_id.toLowerCase()
-            const friendly = (e.friendly_name || '').toLowerCase()
-            return id.includes('power') || id.includes('watt') || 
+            // Match multiple patterns
+            return id.includes('electricity_meter_power_consumption') ||
                    id.includes('current_power') ||
-                   friendly.includes('power') || friendly.includes('watt')
+                   id.includes('power') ||
+                   id.includes('watt')
           }
         )
         
         const gasEntity = haEntities.find(
           (e) => {
             const id = e.entity_id.toLowerCase()
-            const friendly = (e.friendly_name || '').toLowerCase()
-            return id.includes('gas') || id.includes('m3') || 
+            return id.includes('gas_meter_gas_consumption') ||
+                   id.includes('gas_consumption') ||
                    id.includes('gas_total') ||
-                   friendly.includes('gas') || friendly.includes('m³')
+                   id.includes('gas_m3')
           }
         )
 
@@ -862,14 +865,15 @@ export default function Dashboard({
         console.log('[HA History] Fetching from', sevenDaysAgo.toISOString(), 'to', now.toISOString())
 
         const token = await getAuthToken()
-        const response = await fetch(
-          `/.netlify/functions/ha-history?environmentId=${selectedEnvironment}&startTime=${sevenDaysAgo.toISOString()}&endTime=${now.toISOString()}&entityIds=${entityIds.join(',')}`,
-          {
-            headers: {
-              Authorization: `Bearer ${token}`,
-            },
+        const url = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(sevenDaysAgo.toISOString())}&endTime=${encodeURIComponent(now.toISOString())}&entityIds=${encodeURIComponent(entityIds.join(','))}`
+        
+        console.log('[HA History] Request URL:', url)
+
+        const response = await fetch(url, {
+          headers: {
+            Authorization: `Bearer ${token}`,
           },
-        )
+        })
 
         if (!response.ok) {
           const errorText = await response.text()
