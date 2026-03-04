@@ -822,6 +822,24 @@ export default function Dashboard({
       try {
         console.log('[HA History] Starting fetch for environment:', selectedEnvironment)
 
+        // Get last fetch timestamp from localStorage
+        const lastFetchKey = `ha_history_last_fetch_${selectedEnvironment}`
+        const lastFetchStr = localStorage.getItem(lastFetchKey)
+        const lastFetch = lastFetchStr ? new Date(lastFetchStr) : null
+        
+        const now = new Date()
+        let startTime: Date
+        
+        if (lastFetch && (now.getTime() - lastFetch.getTime()) < 8 * 24 * 60 * 60 * 1000) {
+          // If we fetched recently (within 8 days), only get new data since then
+          startTime = new Date(lastFetch.getTime() - 60000) // Start 1 minute before last fetch to avoid gaps
+          console.log('[HA History] Incremental fetch from', startTime.toISOString())
+        } else {
+          // First time or stale data: fetch last 7 days
+          startTime = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+          console.log('[HA History] Full fetch (7 days) from', startTime.toISOString())
+        }
+
         // Find power and gas entities - prioritize specific meter entities
         const powerEntity = haEntities.find(
           (e) => {
@@ -869,14 +887,10 @@ export default function Dashboard({
         if (powerEntity) entityIds.push(powerEntity.entity_id)
         if (gasEntity) entityIds.push(gasEntity.entity_id)
 
-        // Fetch last 7 days of history via Netlify function
-        const now = new Date()
-        const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
-
-        console.log('[HA History] Fetching from', sevenDaysAgo.toISOString(), 'to', now.toISOString())
+        console.log('[HA History] Fetching from', startTime.toISOString(), 'to', now.toISOString())
 
         const token = await getAuthToken()
-        const url = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(sevenDaysAgo.toISOString())}&endTime=${encodeURIComponent(now.toISOString())}&entityIds=${encodeURIComponent(entityIds.join(','))}`
+        const url = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(startTime.toISOString())}&endTime=${encodeURIComponent(now.toISOString())}&entityIds=${encodeURIComponent(entityIds.join(','))}`
         
         console.log('[HA History] Request URL:', url)
 
@@ -946,6 +960,10 @@ export default function Dashboard({
 
           console.log('[HA History] Loaded', newGasSamples.length, 'gas samples')
         }
+
+        // Save fetch timestamp for incremental updates
+        localStorage.setItem(lastFetchKey, now.toISOString())
+        console.log('[HA History] Saved fetch timestamp for incremental updates')
       } catch (error) {
         console.error('[HA History] Error fetching historical data:', error)
       }
