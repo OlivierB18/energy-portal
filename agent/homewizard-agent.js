@@ -19,24 +19,41 @@ const fetchJson = async (url, options = {}) => {
   return response.json()
 }
 
-const getP1Data = async ({ ip, token }) => {
-  const baseUrl = ip.startsWith('http') ? ip : `http://${ip}`
+const getP1DataFromHA = async ({ haUrl, haToken }) => {
+  const baseUrl = haUrl.endsWith('/') ? haUrl.slice(0, -1) : haUrl
   const headers = {
-    Authorization: `Bearer ${token}`,
-    'X-Api-Version': '2',
+    Authorization: `Bearer ${haToken}`,
+    'Content-Type': 'application/json',
   }
 
-  const data = await fetchJson(`${baseUrl}/api`, { headers })
-  const measurements = await fetchJson(`${baseUrl}/api/measurement`, { headers })
+  // Get all states to find P1 meter entities
+  const states = await fetchJson(`${baseUrl}/api/states`, { headers })
+
+  // Helper to find sensor value
+  const findSensorValue = (pattern) => {
+    const sensor = states.find((s) => s.entity_id.toLowerCase().includes(pattern.toLowerCase()))
+    if (sensor && !Number.isNaN(parseFloat(sensor.state))) {
+      return parseFloat(sensor.state)
+    }
+    return null
+  }
+
+  // Find relevant sensor values
+  const currentPower = findSensorValue('power') || null
+  const energyImportT1 = findSensorValue('energy_import_t1') || findSensorValue('energy') || null
+  const energyImportT2 = findSensorValue('energy_import_t2') || null
+  const energyExportT1 = findSensorValue('energy_export_t1') || null
+  const energyExportT2 = findSensorValue('energy_export_t2') || null
+  const gasMeter = findSensorValue('gas_total') || findSensorValue('gas') || null
 
   return {
-    device_id: data.serial ?? 'unknown',
-    current_power: measurements.power_w ?? null,
-    energy_import_t1_kwh: measurements.energy_import_t1_kwh ?? null,
-    energy_import_t2_kwh: measurements.energy_import_t2_kwh ?? null,
-    energy_export_t1_kwh: measurements.energy_export_t1_kwh ?? null,
-    energy_export_t2_kwh: measurements.energy_export_t2_kwh ?? null,
-    gas_total_m3: measurements.gas_m3 ?? null,
+    device_id: 'home-assistant',
+    current_power: currentPower,
+    energy_import_t1_kwh: energyImportT1,
+    energy_import_t2_kwh: energyImportT2,
+    energy_export_t1_kwh: energyExportT1,
+    energy_export_t2_kwh: energyExportT2,
+    gas_total_m3: gasMeter,
   }
 }
 
@@ -58,15 +75,15 @@ const sendToIngest = async ({ environmentId, payload }) => {
 }
 
 const main = async () => {
-  const ip = getEnv('HOMEWIZARD_IP')
-  const token = getEnv('HOMEWIZARD_TOKEN')
+  const haUrl = getEnv('HOME_ASSISTANT_URL')
+  const haToken = getEnv('HOME_ASSISTANT_TOKEN')
   const environmentId = getEnv('HOMEWIZARD_ENVIRONMENT_ID')
   const intervalMs = Number(process.env.HOMEWIZARD_POLL_MS || 10000)
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
     try {
-      const payload = await getP1Data({ ip, token })
+      const payload = await getP1DataFromHA({ haUrl, haToken })
       await sendToIngest({ environmentId, payload })
       console.log(`[agent] sent data for ${environmentId} (${payload.device_id})`)
     } catch (error) {
