@@ -107,13 +107,11 @@ const getClientMetadata = async (domain, token) => {
 
 const verifyAuth0Token = async (token) => {
   const domain = getEnv('AUTH0_DOMAIN')
-  const clientId = getEnv('AUTH0_APP_CLIENT_ID')
   const issuer = `https://${domain}/`
 
   const JWKS = createRemoteJWKSet(new URL(`${issuer}.well-known/jwks.json`))
 
   const verified = await jwtVerify(token, JWKS, {
-    audience: clientId,
     issuer,
   })
 
