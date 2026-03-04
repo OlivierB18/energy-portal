@@ -15,36 +15,10 @@ const HA_ENVIRONMENTS = {
   },
 }
 
-const getHaConfig = (metadata, environmentId) => {
-  const envMap = metadata.environments || {}
-  const envConfig = envMap[environmentId]
-
-  if (envConfig) {
-    if (envConfig.type && envConfig.type !== 'home_assistant') {
-      throw new Error('Environment is not Home Assistant')
-    }
-
-    const config = envConfig.config || {}
-    const baseUrl = config.base_url || config.baseUrl || envConfig.base_url || envConfig.url
-    const token = config.api_key || config.apiKey || envConfig.token
-    if (baseUrl && token) {
-      return { baseUrl, token }
-    }
-  }
-
-  const legacyMap = metadata.ha_environments || {}
-  const legacy = legacyMap[environmentId]
-  if (legacy) {
-    const baseUrl = legacy.base_url || legacy.url
-    const token = legacy.token
-    if (baseUrl && token) {
-      return { baseUrl, token }
-    }
-  }
-
+const getHaConfigDirect = (environmentId) => {
   const fallback = HA_ENVIRONMENTS[environmentId]
   if (!fallback) {
-    throw new Error('Unknown environment')
+    throw new Error('Unknown environment: ' + environmentId)
   }
 
   return {
@@ -164,14 +138,11 @@ export const handler = async (event) => {
 
     console.log('[HA History] Request for environment:', environmentId, 'entities:', entityIds)
 
-    // Get HA config from Auth0 metadata
+    // Get HA config directly from environment variables
     let haConfig
     try {
-      const domain = getEnv('AUTH0_DOMAIN')
-      const mgmtToken = await getManagementToken(domain)
-      const metadata = await getClientMetadata(domain, mgmtToken)
-      haConfig = getHaConfig(metadata, environmentId)
-      console.log('[HA History] Got HA config for URL:', haConfig.baseUrl?.split('/')[2])
+      haConfig = getHaConfigDirect(environmentId)
+      console.log('[HA History] Got HA config, URL host:', new URL(haConfig.baseUrl).hostname)
     } catch (err) {
       console.error('[HA History] Failed to get HA config:', err.message || err)
       return {
