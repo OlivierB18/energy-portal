@@ -1,0 +1,231 @@
+import { createRemoteJWKSet, jwtVerify } from 'jose'
+
+const getEnv = (key) => {
+  const value = process.env[key]
+  if (!value) {
+    throw new Error(`Missing ${key}`)
+  }
+  return value
+}
+
+const HA_ENVIRONMENTS = {
+  vacation: {
+    urlEnv: 'HA_BROUWER_TEST_URL',
+    tokenEnv: 'HA_BROUWER_TEST_TOKEN',
+  },
+}
+
+const getHaConfig = (metadata, environmentId) => {
+  const envMap = metadata.environments || {}
+  const envConfig = envMap[environmentId]
+
+  if (envConfig) {
+    if (envConfig.type && envConfig.type !== 'home_assistant') {
+      throw new Error('Environment is not Home Assistant')
+    }
+
+    const config = envConfig.config || {}
+    const baseUrl = config.base_url || config.baseUrl || envConfig.base_url || envConfig.url
+    const token = config.api_key || config.apiKey || envConfig.token
+    if (baseUrl && token) {
+      return { baseUrl, token }
+    }
+  }
+
+  const legacyMap = metadata.ha_environments || {}
+  const legacy = legacyMap[environmentId]
+  if (legacy) {
+    const baseUrl = legacy.base_url || legacy.url
+    const token = legacy.token
+    if (baseUrl && token) {
+      return { baseUrl, token }
+    }
+  }
+
+  const fallback = HA_ENVIRONMENTS[environmentId]
+  if (!fallback) {
+    throw new Error('Unknown environment')
+  }
+
+  return {
+    baseUrl: getEnv(fallback.urlEnv),
+    token: getEnv(fallback.tokenEnv),
+  }
+}
+
+const managementTokenCache = { token: null, expiresAt: 0 }
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const getManagementToken = async (domain) => {
+  const now = Date.now()
+  if (managementTokenCache.token && now < managementTokenCache.expiresAt - 60000) {
+    return managementTokenCache.token
+  }
+
+  const fetchToken = async () => {
+    const response = await fetch(`https://${domain}/oauth/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id: getEnv('AUTH0_M2M_CLIENT_ID'),
+        client_secret: getEnv('AUTH0_M2M_CLIENT_SECRET'),
+        audience: `https://${domain}/api/v2/`,
+        grant_type: 'client_credentials',
+      }),
+    })
+    if (!response.ok) {
+      const body = await response.text()
+      console.error('Failed to get management token:', response.status, body)
+      throw new Error('Unable to get management token')
+    }
+    return response.json()
+  }
+
+  try {
+    const data = await fetchToken()
+    const expiresIn = Number(data.expires_in) || 600
+    managementTokenCache.token = data.access_token
+    managementTokenCache.expiresAt = Date.now() + expiresIn * 1000
+    return managementTokenCache.token
+  } catch (error) {
+    await sleep(200)
+    const data = await fetchToken()
+    const expiresIn = Number(data.expires_in) || 600
+    managementTokenCache.token = data.access_token
+    managementTokenCache.expiresAt = Date.now() + expiresIn * 1000
+    return managementTokenCache.token
+  }
+}
+
+const getClientMetadata = async (domain, token) => {
+  const clientId = getEnv('AUTH0_APP_CLIENT_ID')
+  const response = await fetch(`https://${domain}/api/v2/clients/${encodeURIComponent(clientId)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  if (!response.ok) {
+    throw new Error('Unable to fetch app metadata')
+  }
+  const client = await response.json()
+  return client.client_metadata || {}
+}
+
+const verifyAuth0Token = async (token) => {
+  const domain = getEnv('AUTH0_DOMAIN')
+  const clientId = getEnv('AUTH0_APP_CLIENT_ID')
+  const issuer = `https://${domain}/`
+
+  const JWKS = createRemoteJWKSet(new URL(`${issuer}.well-known/jwks.json`))
+
+  const verified = await jwtVerify(token, JWKS, {
+    audience: clientId,
+    issuer,
+  })
+
+  return verified.payload
+}
+
+export const handler = async (event) => {
+  try {
+    const authHeader = event.headers.authorization
+    if (!authHeader?.startsWith('Bearer ')) {
+      return {
+        statusCode: 401,
+        body: JSON.stringify({ error: 'Missing authorization header' }),
+      }
+    }
+
+    const token = authHeader.slice(7)
+    let payload
+
+    try {
+      payload = await verifyAuth0Token(token)
+    } catch {
+      return {
+        statusCode: 401,
+        body: JSON.stringify({ error: 'Invalid token' }),
+      }
+    }
+
+    const environmentId = event.queryStringParameters?.environmentId || 'vacation'
+    const startTime = event.queryStringParameters?.startTime
+    const endTime = event.queryStringParameters?.endTime
+    const entityIds = event.queryStringParameters?.entityIds
+
+    if (!startTime || !endTime || !entityIds) {
+      return {
+        statusCode: 400,
+        body: JSON.stringify({ error: 'Missing query parameters: startTime, endTime, entityIds' }),
+      }
+    }
+
+    // Get HA config from Auth0 metadata
+    const domain = getEnv('AUTH0_DOMAIN')
+    const mgmtToken = await getManagementToken(domain)
+    const metadata = await getClientMetadata(domain, mgmtToken)
+
+    const haConfig = getHaConfig(metadata, environmentId)
+    const { baseUrl, token: haToken } = haConfig
+
+    // Parse entity IDs
+    const entityIdsList = entityIds.split(',').map((id) => id.trim())
+
+    // Fetch history from Home Assistant
+    const historyUrl = new URL(baseUrl)
+    historyUrl.pathname = '/api/history/period'
+    historyUrl.searchParams.append('entity_ids', entityIdsList.join(','))
+    historyUrl.searchParams.append('start_time', startTime)
+    historyUrl.searchParams.append('end_time', endTime)
+
+    console.log('[HA History] Fetching from:', historyUrl.toString())
+
+    const historyResponse = await fetch(historyUrl.toString(), {
+      headers: {
+        Authorization: `Bearer ${haToken}`,
+        'Content-Type': 'application/json',
+      },
+    })
+
+    if (!historyResponse.ok) {
+      console.error('[HA History] HA request failed:', historyResponse.status)
+      return {
+        statusCode: historyResponse.status,
+        body: JSON.stringify({
+          error: `Home Assistant API error: ${historyResponse.status}`,
+        }),
+      }
+    }
+
+    const historyData = await historyResponse.json()
+
+    // Convert HA history to our format: array of { entity_id, history: [...] }
+    const formatted = historyData.map((entityHistory) => ({
+      entity_id: entityHistory[0]?.entity_id || 'unknown',
+      history: (entityHistory || [])
+        .filter((state) => state.state && !Number.isNaN(parseFloat(state.state)))
+        .map((state) => ({
+          timestamp: new Date(state.last_changed).getTime(),
+          value: parseFloat(state.state),
+          state: state.state,
+        })),
+    }))
+
+    console.log('[HA History] Loaded', formatted.length, 'entity histories')
+
+    return {
+      statusCode: 200,
+      body: JSON.stringify({
+        entities: formatted,
+        timestamp: new Date().toISOString(),
+      }),
+    }
+  } catch (error) {
+    console.error('[HA History] Error:', error)
+    return {
+      statusCode: 500,
+      body: JSON.stringify({
+        error: error instanceof Error ? error.message : 'Server error',
+      }),
+    }
+  }
+}
