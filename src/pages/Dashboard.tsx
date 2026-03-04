@@ -1036,16 +1036,29 @@ export default function Dashboard({
     // Always include a point at the range start for daily/weekly views
     const shouldAddStart = timeRange !== 'month' && filtered[0]?.timestamp > selectedRange.startMs
 
-    const chartPoints = reduced.map((sample) => ({
+    const chartPoints: Array<{ time: string; power: number }> = []
+
+    // Always add range start point first for daily/weekly views
+    if (timeRange !== 'month') {
+      chartPoints.push({
+        time: new Date(selectedRange.startMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        power: shouldAddStart ? startValue : reduced[0]?.value ?? 0,
+      })
+    }
+
+    // Add the reduced data points
+    const dataPoints = reduced.map((sample) => ({
       time: new Date(sample.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       power: sample.value,
     }))
-
-    if (shouldAddStart) {
-      chartPoints.unshift({
-        time: new Date(selectedRange.startMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        power: startValue,
-      })
+    
+    // Avoid duplicate if first data point is at range start
+    const firstDataTime = dataPoints[0]?.time
+    const startPointTime = chartPoints[0]?.time
+    if (firstDataTime !== startPointTime) {
+      chartPoints.push(...dataPoints)
+    } else {
+      chartPoints.push(...dataPoints.slice(1))
     }
 
     return chartPoints

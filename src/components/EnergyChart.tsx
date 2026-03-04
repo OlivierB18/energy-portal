@@ -43,6 +43,9 @@ export default function EnergyChart({
             dataKey="time"
             stroke="rgb(234, 233, 229)"
             style={{ fontSize: '0.875rem' }}
+            angle={-45}
+            textAnchor="end"
+            height={60}
           />
           <YAxis
             stroke="rgb(234, 233, 229)"
