@@ -19,6 +19,56 @@ const fetchJson = async (url, options = {}) => {
   return response.json()
 }
 
+let managementTokenCache = { token: null, expiresAt: 0 }
+
+const getManagementToken = async (domain) => {
+  const now = Date.now()
+  if (managementTokenCache.token && now < managementTokenCache.expiresAt - 60000) {
+    return managementTokenCache.token
+  }
+
+  const data = await fetchJson(`https://${domain}/oauth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      client_id: getEnv('AUTH0_M2M_CLIENT_ID'),
+      client_secret: getEnv('AUTH0_M2M_CLIENT_SECRET'),
+      audience: `https://${domain}/api/v2/`,
+      grant_type: 'client_credentials',
+    }),
+  })
+
+  const expiresIn = Number(data.expires_in) || 600
+  managementTokenCache.token = data.access_token
+  managementTokenCache.expiresAt = Date.now() + expiresIn * 1000
+  return managementTokenCache.token
+}
+
+const getHaConfig = async (domain, managementToken, environmentId) => {
+  const clientId = getEnv('AUTH0_APP_CLIENT_ID')
+  const client = await fetchJson(`https://${domain}/api/v2/clients/${encodeURIComponent(clientId)}`, {
+    headers: { Authorization: `Bearer ${managementToken}` },
+  })
+
+  const metadata = client.client_metadata || {}
+  const envMap = metadata.environments || {}
+  const envConfig = envMap[environmentId]
+
+  if (!envConfig) {
+    throw new Error(`Environment ${environmentId} not found in Auth0 metadata`)
+  }
+
+  const config = envConfig.config || {}
+  const baseUrl = config.base_url || config.baseUrl || envConfig.base_url || envConfig.url
+  const token = config.api_key || config.apiKey || envConfig.token
+
+  if (!baseUrl || !token) {
+    throw new Error(`Missing HA configuration for environment ${environmentId}`)
+  }
+
+  return { baseUrl, token }
+}
+
 const getP1DataFromHA = async ({ haUrl, haToken }) => {
   const baseUrl = haUrl.endsWith('/') ? haUrl.slice(0, -1) : haUrl
   const headers = {
@@ -75,15 +125,20 @@ const sendToIngest = async ({ environmentId, payload }) => {
 }
 
 const main = async () => {
-  const haUrl = getEnv('HOME_ASSISTANT_URL')
-  const haToken = getEnv('HOME_ASSISTANT_TOKEN')
+  const auth0Domain = getEnv('AUTH0_DOMAIN')
   const environmentId = getEnv('HOMEWIZARD_ENVIRONMENT_ID')
   const intervalMs = Number(process.env.HOMEWIZARD_POLL_MS || 10000)
+
+  // Get HA config from Auth0 metadata (same as dashboard uses)
+  console.log('[agent] fetching HA configuration from Auth0...')
+  const managementToken = await getManagementToken(auth0Domain)
+  const haConfig = await getHaConfig(auth0Domain, managementToken, environmentId)
+  console.log(`[agent] connected to HA at ${haConfig.baseUrl}`)
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
     try {
-      const payload = await getP1DataFromHA({ haUrl, haToken })
+      const payload = await getP1DataFromHA({ haUrl: haConfig.baseUrl, haToken: haConfig.token })
       await sendToIngest({ environmentId, payload })
       console.log(`[agent] sent data for ${environmentId} (${payload.device_id})`)
     } catch (error) {
