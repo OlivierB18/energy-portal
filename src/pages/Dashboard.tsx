@@ -792,17 +792,26 @@ export default function Dashboard({
     try {
       const stored = localStorage.getItem(liveGasStorageKey)
       if (!stored) {
+        console.log('[Gas Load] No stored gas samples found for key:', liveGasStorageKey)
         setGasSamples([])
         return
       }
 
       const parsed: GasSample[] = JSON.parse(stored)
       if (Array.isArray(parsed)) {
-        setGasSamples(parsed.sort((a, b) => a.timestamp - b.timestamp))
+        const sorted = parsed.sort((a, b) => a.timestamp - b.timestamp)
+        console.log('[Gas Load] Loaded', sorted.length, 'gas samples from localStorage')
+        if (sorted.length > 0) {
+          console.log('[Gas Load] First sample:', new Date(sorted[0].timestamp).toISOString(), sorted[0].gas, 'm³')
+          console.log('[Gas Load] Last sample:', new Date(sorted[sorted.length - 1].timestamp).toISOString(), sorted[sorted.length - 1].gas, 'm³')
+        }
+        setGasSamples(sorted)
       } else {
+        console.warn('[Gas Load] Stored data is not an array')
         setGasSamples([])
       }
-    } catch {
+    } catch (error) {
+      console.error('[Gas Load] Error parsing stored gas samples:', error)
       setGasSamples([])
     }
   }, [liveGasStorageKey])
@@ -857,11 +866,20 @@ export default function Dashboard({
         const gasEntity = haEntities.find(
           (e) => {
             const id = e.entity_id.toLowerCase()
+            // Prioritize specific gas meter consumption entity
             return id.includes('gas_meter_gas_consumption') ||
                    (id.includes('gas_meter') && id.includes('consumption')) ||
                    id.includes('gas_consumption') ||
                    id.includes('gas_total') ||
                    (id.includes('gas') && id.includes('m3'))
+          }
+        ) || haEntities.find(
+          (e) => {
+            const id = e.entity_id.toLowerCase()
+            // Fallback to any sensor with 'gas' in the name
+            return !id.startsWith('binary_sensor') && 
+                   id.startsWith('sensor.') && 
+                   id.includes('gas')
           }
         )
 
