@@ -789,13 +789,6 @@ export default function Dashboard({
   }, [livePowerStorageKey])
 
   useEffect(() => {
-    // Clear old gas storage key with cumulative data
-    if (selectedEnvironment) {
-      const envKey = selectedEnvironment || 'default'
-      localStorage.removeItem(`energy_live_gas_samples_${envKey}`)
-      localStorage.removeItem(`energy_live_gas_samples_v2_${envKey}`)
-    }
-
     try {
       const stored = localStorage.getItem(liveGasStorageKey)
       if (!stored) {
@@ -804,25 +797,15 @@ export default function Dashboard({
       }
 
       const parsed: GasSample[] = JSON.parse(stored)
-      if (!Array.isArray(parsed)) {
-        return
+      if (Array.isArray(parsed)) {
+        setGasSamples(parsed.sort((a, b) => a.timestamp - b.timestamp))
+      } else {
+        setGasSamples([])
       }
-
-      const cleaned = parsed
-        .filter(
-          (sample) =>
-            typeof sample.timestamp === 'number' &&
-            typeof sample.gas === 'number' &&
-            Number.isFinite(sample.gas) &&
-            sample.gas >= 0 &&
-            sample.gas <= 100, // Allow up to 100 m³/hour (unrealistic but no premature filtering)
-        )
-        .sort((a, b) => a.timestamp - b.timestamp)
-      setGasSamples(cleaned)
     } catch {
       setGasSamples([])
     }
-  }, [liveGasStorageKey, selectedEnvironment])
+  }, [liveGasStorageKey])
 
   // Fetch historical data from Home Assistant
   useEffect(() => {
@@ -835,23 +818,18 @@ export default function Dashboard({
         console.log('[HA History] Starting fetch for environment:', selectedEnvironment)
 
         // Get last fetch timestamp from localStorage
-        const lastFetchKey = `ha_history_last_fetch_v3_${selectedEnvironment}`
+        const lastFetchKey = `ha_history_last_fetch_${selectedEnvironment}`
         const lastFetchStr = localStorage.getItem(lastFetchKey)
         const lastFetch = lastFetchStr ? new Date(lastFetchStr) : null
-        const hasStoredGasSamples = Boolean(localStorage.getItem(liveGasStorageKey))
         
         const now = new Date()
         let startTime: Date
         
-        // Always do full fetch on first time (v3 key is new) 
-        if (lastFetch && hasStoredGasSamples && (now.getTime() - lastFetch.getTime()) < 8 * 24 * 60 * 60 * 1000) {
-          // If we fetched recently (within 8 days), only get new data since then
-          startTime = new Date(lastFetch.getTime() - 60000) // Start 1 minute before last fetch to avoid gaps
-          console.log('[HA History] Incremental fetch from', startTime.toISOString())
+        // Simple: if we have recent data, fetch incrementally. Otherwise full 7-day fetch.
+        if (lastFetch && (now.getTime() - lastFetch.getTime()) < 8 * 24 * 60 * 60 * 1000) {
+          startTime = new Date(lastFetch.getTime() - 60000)
         } else {
-          // First time or stale data: fetch last 7 days (forces data population on v3 migration)
           startTime = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
-          console.log('[HA History] Full fetch (7 days) from', startTime.toISOString())
         }
 
         // Find power and gas entities - prioritize specific meter entities
@@ -959,11 +937,16 @@ export default function Dashboard({
 
         // Process gas data - convert meter readings to interval consumption (delta between readings)
         const gasData = historyData.find((h: any) => h.entity_id === gasEntity?.entity_id)
+        console.log('[Gas Debug] Looking for gas entity:', gasEntity?.entity_id)
+        console.log('[Gas Debug] Available entities in history:', historyData.map((h: any) => h.entity_id))
+        console.log('[Gas Debug] Found gasData?', !!gasData, 'with', gasData?.history?.length || 0, 'samples')
+        
         if (gasData?.history && gasData.history.length > 0) {
           // Sort by timestamp to ensure chronological order
           const sortedHistory = [...gasData.history].sort((a, b) => a.timestamp - b.timestamp)
           
           console.log('[Gas Debug] First meter reading:', parseFloat(sortedHistory[0].value), 'm³')
+          console.log('[Gas Debug] Total history entries:', sortedHistory.length)
           
           // Convert meter readings to interval consumption (delta between consecutive readings)
           const newGasSamples: GasSample[] = []
@@ -992,6 +975,7 @@ export default function Dashboard({
             }
           }
 
+          console.log('[Gas Debug] Converted to', newGasSamples.length, 'interval samples')
           console.log('[Gas Debug] First 5 interval consumptions:', newGasSamples.slice(0, 5).map((s) => ({ 
             ts: new Date(s.timestamp).toLocaleTimeString(), 
             consumption: s.gas 
@@ -1011,11 +995,14 @@ export default function Dashboard({
               }
             })
             const merged = Array.from(uniqueMap.values()).sort((a, b) => a.timestamp - b.timestamp)
+            console.log('[Gas Debug] Storing', merged.length, 'merged samples to localStorage')
             localStorage.setItem(liveGasStorageKey, JSON.stringify(merged))
             return merged
           })
 
           console.log('[HA History] Loaded', newGasSamples.length, 'gas samples (interval consumption)')
+        } else {
+          console.warn('[Gas Debug] No gas data found - gasEntity:', gasEntity?.entity_id, 'or no history')
         }
 
         // Save fetch timestamp for incremental updates
@@ -1150,15 +1137,17 @@ export default function Dashboard({
   }, [powerSamples, selectedRange.endMs, selectedRange.startMs, timeRange])
 
   const gasChartData = useMemo(() => {
-    // Bucket gas consumption per hour for better readability
-    const filtered = gasSamples.filter(
-      (sample) =>
-        sample.timestamp >= selectedRange.startMs &&
-        sample.timestamp <= selectedRange.endMs &&
-        Number.isFinite(sample.gas) &&
-        sample.gas >= 0 &&
-        sample.gas <= 100, // Allow realistic consumption values
-    )
+    if (gasSamples.length === 0) {
+      return [{
+        time: new Date(selectedRange.startMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        power: 0,
+      }]
+    }
+
+    // Filter samples in range and sort by timestamp
+    const filtered = gasSamples
+      .filter((sample) => sample.timestamp >= selectedRange.startMs && sample.timestamp <= selectedRange.endMs)
+      .sort((a, b) => a.timestamp - b.timestamp)
 
     if (filtered.length === 0) {
       return [{
@@ -1167,12 +1156,12 @@ export default function Dashboard({
       }]
     }
 
-    // Group by hour
+    // Group by hour and sum consumption
     const hourlyBuckets = new Map<number, number>()
     
     filtered.forEach((sample) => {
       const date = new Date(sample.timestamp)
-      date.setMinutes(0, 0, 0) // Round down to hour
+      date.setMinutes(0, 0, 0)
       const hourTimestamp = date.getTime()
       
       const currentTotal = hourlyBuckets.get(hourTimestamp) || 0
@@ -1184,11 +1173,14 @@ export default function Dashboard({
       .sort((a, b) => a[0] - b[0])
       .map(([timestamp, consumption]) => ({
         time: new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        power: parseFloat(consumption.toFixed(3)),
+        power: parseFloat(Math.max(0, consumption).toFixed(3)),
       }))
 
-    return chartPoints
-  }, [gasSamples, selectedRange.endMs, selectedRange.startMs])
+    return chartPoints.length > 0 ? chartPoints : [{
+      time: new Date(selectedRange.startMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      power: 0,
+    }]
+  }, [gasSamples, selectedRange.startMs, selectedRange.endMs])
 
   // Show loading screen while checking permissions
   if (isCheckingPermissions) {
