@@ -129,9 +129,7 @@ export default function Dashboard({
   const [showHaConfig, setShowHaConfig] = useState(false)
   const [haRefreshKey, setHaRefreshKey] = useState(0)
   const [powerSamples, setPowerSamples] = useState<PowerSample[]>([])
-  const [gasChartStats, setGasChartStats] = useState<Array<{ start: number; change: number }>>([])
-  const [gasDayStats, setGasDayStats] = useState<Array<{ start: number; change: number }>>([])
-  const [gasMonthStats, setGasMonthStats] = useState<Array<{ start: number; change: number }>>([])
+  const [gasMeterReadings, setGasMeterReadings] = useState<Array<{ timestamp: number; value: number }>>([])
   const [showPriceModal, setShowPriceModal] = useState(false)
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false)
   const [pricingConfig, setPricingConfig] = useState<EnergyPricingConfig | null>(null)
@@ -820,6 +818,7 @@ export default function Dashboard({
   }, [haEntities, lastKnownHaEntities, pricingConfig, selectedEnvironment, gasRatePerM3, powerSamples])
 
   const livePowerStorageKey = `energy_live_power_samples_${selectedEnvironment || 'default'}`
+  const liveGasMeterKey = `energy_gas_meter_readings_${selectedEnvironment || 'default'}`
   const latestPowerRef = useRef(realTimeData.currentPower)
 
   useEffect(() => {
@@ -847,6 +846,30 @@ export default function Dashboard({
       setPowerSamples([])
     }
   }, [livePowerStorageKey])
+
+  // Load stored gas meter readings from localStorage
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(liveGasMeterKey)
+      if (!stored) {
+        setGasMeterReadings([])
+        return
+      }
+      const parsed = JSON.parse(stored)
+      if (!Array.isArray(parsed)) {
+        setGasMeterReadings([])
+        return
+      }
+      const cleaned = parsed
+        .filter((r: { timestamp?: number; value?: number }) =>
+          typeof r?.timestamp === 'number' && typeof r?.value === 'number' &&
+          Number.isFinite(r.timestamp) && Number.isFinite(r.value))
+        .sort((a: { timestamp: number }, b: { timestamp: number }) => a.timestamp - b.timestamp)
+      setGasMeterReadings(cleaned)
+    } catch {
+      setGasMeterReadings([])
+    }
+  }, [liveGasMeterKey])
 
   // Fetch electricity history from Home Assistant
   useEffect(() => {
@@ -995,6 +1018,47 @@ export default function Dashboard({
     return () => window.clearInterval(interval)
   }, [livePowerStorageKey, selectedEnvironment, visibleEnvironments.length])
 
+  // Capture gas meter readings locally (HA doesn't provide history for gas entity)
+  useEffect(() => {
+    if (!selectedEnvironment || visibleEnvironments.length === 0) {
+      return
+    }
+
+    const entities = haEntities.length > 0 ? haEntities : lastKnownHaEntities
+    const gasEntity = findGasConsumptionEntity(entities)
+
+    if (!gasEntity) {
+      return
+    }
+
+    const captureGasMeter = () => {
+      const meterValue = parseNumericValue(gasEntity.state)
+      if (!Number.isFinite(meterValue)) {
+        return
+      }
+
+      const now = Date.now()
+      setGasMeterReadings((prev) => {
+        const last = prev[prev.length - 1]
+        // Don't capture if value hasn't changed and was captured recently
+        if (last && now - last.timestamp < 8000 && last.value === meterValue) {
+          return prev
+        }
+
+        // Keep max 30 days of data (1 reading per 10 sec = ~260k/month, cap at 50k entries)
+        const cutoff = now - 30 * 24 * 60 * 60 * 1000
+        const trimmed = prev.filter((r) => r.timestamp > cutoff)
+        const next = [...trimmed, { timestamp: now, value: meterValue }]
+        localStorage.setItem(liveGasMeterKey, JSON.stringify(next))
+        return next
+      })
+    }
+
+    captureGasMeter()
+    const interval = window.setInterval(captureGasMeter, 10000)
+    return () => window.clearInterval(interval)
+  }, [haEntities, lastKnownHaEntities, liveGasMeterKey, selectedEnvironment, visibleEnvironments.length])
+
   const selectedRange = useMemo(() => {
     const [year, month, day] = selectedChartDate.split('-').map(Number)
     const isValidDate = Number.isFinite(year) && Number.isFinite(month) && Number.isFinite(day)
@@ -1023,278 +1087,45 @@ export default function Dashboard({
     }
   }, [selectedChartDate, timeRange])
 
-  // Fetch gas statistics for chart (hourly bars for day view, daily bars for week/month)
-  useEffect(() => {
-    const availableEntities = haEntities.length > 0 ? haEntities : lastKnownHaEntities
+  // Build gas chart data from locally captured meter readings
+  // HA does not provide history/statistics for this gas entity (returns 404),
+  // so we capture the meter value every 10sec via entity polling and derive consumption.
+  const bucketGasReadings = useCallback(
+    (startMs: number, endMs: number, bucketMs: number) => {
+      const readings = gasMeterReadings.filter(
+        (r) => r.timestamp >= startMs - bucketMs && r.timestamp <= endMs,
+      )
 
-    if (!selectedEnvironment || !isAuthenticated || availableEntities.length === 0) {
-      setGasChartStats([])
-      return
-    }
+      if (readings.length < 2) {
+        return [] as Array<{ start: number; change: number }>
+      }
 
-    const gasEntity = findGasConsumptionEntity(availableEntities)
-    if (!gasEntity) {
-      console.warn('[Gas Chart] No gas meter entity found')
-      setGasChartStats([])
-      return
-    }
+      const bucketStart = Math.floor(startMs / bucketMs) * bucketMs
+      const bucketEnd = Math.ceil(endMs / bucketMs) * bucketMs
+      const buckets: Array<{ start: number; change: number }> = []
 
-    let isCancelled = false
+      for (let t = bucketStart; t < bucketEnd; t += bucketMs) {
+        const nextT = t + bucketMs
+        // Find the reading closest to bucket start (at or before)
+        const atStart = readings.filter((r) => r.timestamp <= t).pop()
+          ?? readings.find((r) => r.timestamp >= t && r.timestamp < nextT)
+        // Find the reading closest to bucket end (at or before bucket end)
+        const atEnd = readings.filter((r) => r.timestamp <= nextT).pop()
 
-    const fetchGasStats = async () => {
-      try {
-        const token = await getAuthToken()
-        const period = timeRange === 'today' ? 'hour' : 'day'
-        const startIso = new Date(selectedRange.startMs).toISOString()
-        const endIso = new Date(selectedRange.endMs).toISOString()
-
-        let stats: Array<{ start: number; change: number }> = []
-
-        // --- Attempt 1: HA statistics API (has hourly/daily change values) ---
-        console.log('[Gas Chart] Attempt 1: Statistics API', { period, start: startIso, end: endIso })
-        const statsUrl = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(startIso)}&endTime=${encodeURIComponent(endIso)}&entityIds=${encodeURIComponent(gasEntity.entity_id)}&mode=statistics&period=${period}`
-        const statsResponse = await fetch(statsUrl, {
-          headers: { Authorization: `Bearer ${token}` },
-        })
-
-        if (statsResponse.ok) {
-          const result = await statsResponse.json()
-          const entityData = Array.isArray(result?.entities)
-            ? result.entities.find((e: { entity_id?: string }) => e.entity_id === gasEntity.entity_id)
-            : null
-          const history: Array<{ timestamp?: number; value?: number; change?: number }> = entityData?.history || []
-
-          console.log('[Gas Chart] Statistics returned', history.length, 'rows')
-          if (history.length > 0) {
-            console.log('[Gas Chart] First row:', JSON.stringify(history[0]))
-          }
-
-          const hasChange = history.some((r) => typeof r.change === 'number' && r.change > 0)
-
-          if (hasChange) {
-            console.log('[Gas Chart] Using change values')
-            stats = history
-              .map((row) => ({
-                start: Number(row?.timestamp),
-                change: typeof row?.change === 'number' ? Math.max(0, row.change) : 0,
-              }))
-              .filter((r) => Number.isFinite(r.start))
-          } else if (history.length >= 2) {
-            console.log('[Gas Chart] Computing deltas from cumulative values')
-            const sorted = history
-              .map((row) => ({ start: Number(row?.timestamp), value: typeof row?.value === 'number' ? row.value : NaN }))
-              .filter((r) => Number.isFinite(r.start) && Number.isFinite(r.value))
-              .sort((a, b) => a.start - b.start)
-
-            stats = sorted.slice(1).map((cur, i) => {
-              const delta = cur.value - sorted[i].value
-              return { start: cur.start, change: Number.isFinite(delta) && delta >= 0 && delta < 50 ? delta : 0 }
-            })
-          }
-        } else {
-          console.warn('[Gas Chart] Statistics API returned', statsResponse.status, '- skipping to fallback')
-        }
-
-        // --- Attempt 2: Regular history API (cumulative meter readings → bucket into hours/days) ---
-        if (stats.length === 0 || stats.every((s) => s.change === 0)) {
-          console.log('[Gas Chart] Attempt 2: Regular history API')
-          const histUrl = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(startIso)}&endTime=${encodeURIComponent(endIso)}&entityIds=${encodeURIComponent(gasEntity.entity_id)}`
-          const histResponse = await fetch(histUrl, {
-            headers: { Authorization: `Bearer ${token}` },
+        if (atStart && atEnd && atEnd.value > atStart.value) {
+          buckets.push({
+            start: t,
+            change: parseFloat((atEnd.value - atStart.value).toFixed(3)),
           })
-
-          if (histResponse.ok) {
-            const histResult = await histResponse.json()
-            const histEntity = Array.isArray(histResult?.entities)
-              ? histResult.entities.find((e: { entity_id?: string }) => e.entity_id === gasEntity.entity_id)
-              : null
-            const histRows: Array<{ timestamp?: number; value?: number }> = histEntity?.history || []
-
-            console.log('[Gas Chart] Regular history returned', histRows.length, 'readings')
-
-            if (histRows.length >= 2) {
-              const sorted = histRows
-                .map((r) => ({ ts: Number(r?.timestamp), val: typeof r?.value === 'number' ? r.value : NaN }))
-                .filter((r) => Number.isFinite(r.ts) && Number.isFinite(r.val))
-                .sort((a, b) => a.ts - b.ts)
-
-              if (sorted.length >= 2) {
-                const bucketMs = period === 'hour' ? 3_600_000 : 86_400_000
-                const bucketStart = Math.floor(sorted[0].ts / bucketMs) * bucketMs
-                const bucketEnd = Math.ceil(sorted[sorted.length - 1].ts / bucketMs) * bucketMs
-
-                const buckets: Array<{ start: number; change: number }> = []
-                for (let t = bucketStart; t < bucketEnd; t += bucketMs) {
-                  const readingBefore = sorted.filter((r) => r.ts <= t).pop()
-                  const readingAtEnd = sorted.filter((r) => r.ts <= t + bucketMs).pop()
-
-                  if (readingBefore && readingAtEnd && readingAtEnd.val > readingBefore.val) {
-                    buckets.push({ start: t, change: parseFloat((readingAtEnd.val - readingBefore.val).toFixed(3)) })
-                  } else {
-                    buckets.push({ start: t, change: 0 })
-                  }
-                }
-
-                if (buckets.some((b) => b.change > 0)) {
-                  stats = buckets
-                  console.log('[Gas Chart] History fallback produced', stats.length, 'buckets')
-                }
-              }
-            }
-          } else {
-            console.warn('[Gas Chart] Regular history API returned', histResponse.status)
-          }
-        }
-
-        console.log('[Gas Chart] Final result:', stats.length, 'bars, total:', stats.reduce((s, r) => s + r.change, 0).toFixed(3), 'm³')
-
-        if (!isCancelled) {
-          setGasChartStats(stats)
-        }
-      } catch (error) {
-        console.error('[Gas Chart] Error:', error)
-        if (!isCancelled) setGasChartStats([])
-      }
-    }
-
-    void fetchGasStats()
-
-    return () => { isCancelled = true }
-  }, [
-    getAuthToken,
-    haEntities,
-    isAuthenticated,
-    lastKnownHaEntities,
-    selectedEnvironment,
-    selectedRange.startMs,
-    selectedRange.endMs,
-    timeRange,
-  ])
-
-  // Fetch gas statistics for cards (today totals + month totals)
-  useEffect(() => {
-    const availableEntities = haEntities.length > 0 ? haEntities : lastKnownHaEntities
-
-    if (!selectedEnvironment || !isAuthenticated || availableEntities.length === 0) {
-      setGasDayStats([])
-      setGasMonthStats([])
-      return
-    }
-
-    const gasEntity = findGasConsumptionEntity(availableEntities)
-    if (!gasEntity) {
-      setGasDayStats([])
-      setGasMonthStats([])
-      return
-    }
-
-    let isCancelled = false
-
-    const parseStatsResponse = (result: { entities?: Array<{ entity_id?: string; history?: Array<{ timestamp?: number; value?: number; change?: number }> }> }) => {
-      const entityData = Array.isArray(result?.entities)
-        ? result.entities.find((e) => e.entity_id === gasEntity.entity_id)
-        : null
-      const rows = entityData?.history || []
-      const hasChange = rows.some((r) => typeof r?.change === 'number' && r.change > 0)
-
-      if (hasChange) {
-        return rows
-          .map((row) => ({
-            start: Number(row?.timestamp),
-            change: typeof row?.change === 'number' ? Math.max(0, row.change) : 0,
-          }))
-          .filter((r) => Number.isFinite(r.start))
-      }
-
-      // Fallback: compute deltas from cumulative values
-      const sorted = rows
-        .map((row) => ({
-          start: Number(row?.timestamp),
-          value: typeof row?.value === 'number' ? row.value : NaN,
-        }))
-        .filter((r) => Number.isFinite(r.start) && Number.isFinite(r.value))
-        .sort((a, b) => a.start - b.start)
-
-      return sorted.slice(1).map((current, i) => {
-        const delta = current.value - sorted[i].value
-        return {
-          start: current.start,
-          change: Number.isFinite(delta) && delta >= 0 && delta < 50 ? delta : 0,
-        }
-      })
-    }
-
-    const fetchStatsOrHistory = async (
-      token: string,
-      startIso: string,
-      endIso: string,
-      period: 'hour' | 'day',
-    ): Promise<Array<{ start: number; change: number }>> => {
-      // Try statistics API first
-      const statsUrl = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(startIso)}&endTime=${encodeURIComponent(endIso)}&entityIds=${encodeURIComponent(gasEntity.entity_id)}&mode=statistics&period=${period}`
-      const statsResp = await fetch(statsUrl, { headers: { Authorization: `Bearer ${token}` } })
-
-      if (statsResp.ok) {
-        const parsed = parseStatsResponse(await statsResp.json())
-        if (parsed.length > 0 && parsed.some((s) => s.change > 0)) {
-          return parsed
+        } else {
+          buckets.push({ start: t, change: 0 })
         }
       }
 
-      // Fallback: regular history API → bucket into intervals
-      const histUrl = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(startIso)}&endTime=${encodeURIComponent(endIso)}&entityIds=${encodeURIComponent(gasEntity.entity_id)}`
-      const histResp = await fetch(histUrl, { headers: { Authorization: `Bearer ${token}` } })
-
-      if (!histResp.ok) return []
-
-      const histResult = await histResp.json()
-      const histEntity = Array.isArray(histResult?.entities)
-        ? histResult.entities.find((e: { entity_id?: string }) => e.entity_id === gasEntity.entity_id)
-        : null
-      const rows: Array<{ timestamp?: number; value?: number }> = histEntity?.history || []
-      const sorted = rows
-        .map((r) => ({ ts: Number(r?.timestamp), val: typeof r?.value === 'number' ? r.value : NaN }))
-        .filter((r) => Number.isFinite(r.ts) && Number.isFinite(r.val))
-        .sort((a, b) => a.ts - b.ts)
-
-      if (sorted.length < 2) return []
-
-      // Simple total: last value minus first value
-      const total = Math.max(0, sorted[sorted.length - 1].val - sorted[0].val)
-      return [{ start: sorted[0].ts, change: total }]
-    }
-
-    const fetchCardStats = async () => {
-      try {
-        const token = await getAuthToken()
-        const now = new Date()
-        const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0)
-        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0)
-
-        const [dayStats, monthStats] = await Promise.all([
-          fetchStatsOrHistory(token, startOfToday.toISOString(), now.toISOString(), 'hour'),
-          fetchStatsOrHistory(token, startOfMonth.toISOString(), now.toISOString(), 'day'),
-        ])
-
-        if (!isCancelled) {
-          setGasDayStats(dayStats)
-          setGasMonthStats(monthStats)
-        }
-      } catch (error) {
-        console.error('[Gas Cards] Error fetching statistics:', error)
-      }
-    }
-
-    void fetchCardStats()
-
-    return () => { isCancelled = true }
-  }, [
-    getAuthToken,
-    haEntities,
-    isAuthenticated,
-    lastKnownHaEntities,
-    selectedEnvironment,
-  ])
+      return buckets
+    },
+    [gasMeterReadings],
+  )
 
   const mapSamplesToChartPoints = (
     samples: Array<{ timestamp: number; value: number }>,
@@ -1370,24 +1201,28 @@ export default function Dashboard({
   }, [powerSamples, selectedRange.endMs, selectedRange.startMs, timeRange])
 
   const gasChartData = useMemo(() => {
-    if (gasChartStats.length === 0) {
+    const bucketMs = timeRange === 'today' ? 3_600_000 : 86_400_000
+    const buckets = bucketGasReadings(selectedRange.startMs, selectedRange.endMs, bucketMs)
+
+    if (buckets.length === 0) {
+      // No local readings yet — show empty chart
       return [{ time: '', power: 0 }]
     }
 
-    return gasChartStats.map((stat) => {
-      const d = new Date(stat.start)
+    return buckets.map((b) => {
+      const d = new Date(b.start)
       const time = timeRange === 'today'
         ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         : d.toLocaleDateString([], { day: '2-digit', month: '2-digit' })
-      return { time, power: Math.max(0, parseFloat(stat.change.toFixed(3))) }
+      return { time, power: Math.max(0, b.change) }
     })
-  }, [gasChartStats, timeRange])
+  }, [bucketGasReadings, selectedRange.startMs, selectedRange.endMs, timeRange])
 
   const gasSelectedPeriodTotal = useMemo(() => {
     return parseFloat(
-      gasChartStats.reduce((sum, stat) => sum + Math.max(0, stat.change), 0).toFixed(2),
+      gasChartData.reduce((sum, item) => sum + Math.max(0, item.power), 0).toFixed(2),
     )
-  }, [gasChartStats])
+  }, [gasChartData])
 
   const gasSelectedPeriodLabel = timeRange === 'today'
     ? 'Gas Day Total'
@@ -1395,15 +1230,28 @@ export default function Dashboard({
       ? 'Gas Week Total'
       : 'Gas Month Total'
 
+  // Gas card values: use local meter readings to compute daily/monthly totals
   const gasTodayCardValue = useMemo(() => {
-    const statsTotal = gasDayStats.reduce((sum, s) => sum + Math.max(0, s.change), 0)
-    return parseFloat(Math.max(realTimeData.gasDailyUsage, statsTotal).toFixed(2))
-  }, [gasDayStats, realTimeData.gasDailyUsage])
+    const now = new Date()
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0).getTime()
+    const readings = gasMeterReadings.filter((r) => r.timestamp >= startOfToday)
+    if (readings.length >= 2) {
+      const total = Math.max(0, readings[readings.length - 1].value - readings[0].value)
+      return parseFloat(Math.max(realTimeData.gasDailyUsage, total).toFixed(2))
+    }
+    return realTimeData.gasDailyUsage
+  }, [gasMeterReadings, realTimeData.gasDailyUsage])
 
   const gasMonthCardValue = useMemo(() => {
-    const statsTotal = gasMonthStats.reduce((sum, s) => sum + Math.max(0, s.change), 0)
-    return parseFloat(Math.max(realTimeData.gasMonthlyUsage, statsTotal).toFixed(2))
-  }, [gasMonthStats, realTimeData.gasMonthlyUsage])
+    const now = new Date()
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0).getTime()
+    const readings = gasMeterReadings.filter((r) => r.timestamp >= startOfMonth)
+    if (readings.length >= 2) {
+      const total = Math.max(0, readings[readings.length - 1].value - readings[0].value)
+      return parseFloat(Math.max(realTimeData.gasMonthlyUsage, total).toFixed(2))
+    }
+    return realTimeData.gasMonthlyUsage
+  }, [gasMeterReadings, realTimeData.gasMonthlyUsage])
 
   const gasTodayCardCost = parseFloat((gasTodayCardValue * gasRatePerM3).toFixed(2))
   const gasMonthCardCost = parseFloat((gasMonthCardValue * gasRatePerM3).toFixed(2))
