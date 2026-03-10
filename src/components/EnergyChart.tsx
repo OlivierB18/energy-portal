@@ -30,7 +30,7 @@ export default function EnergyChart({
   rangeLabel,
   chartType = 'line',
 }: EnergyChartProps) {
-  const decimals = unit === 'm³' ? 3 : 2
+  const decimals = 2
 
   const commonAxisProps = {
     stroke: "rgb(234, 233, 229)",

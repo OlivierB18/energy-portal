@@ -881,30 +881,37 @@ export default function Dashboard({
           }
         )
         
-        const gasEntity = haEntities.find(
-          (e) => {
-            const id = e.entity_id.toLowerCase()
-            // Prioritize specific gas meter consumption entity
-            return id.includes('gas_meter_gas_consumption') ||
-                   (id.includes('gas_meter') && id.includes('consumption')) ||
-                   id.includes('gas_consumption') ||
-                   id.includes('gas_total') ||
-                   (id.includes('gas') && id.includes('m3'))
-          }
-        ) || haEntities.find(
-          (e) => {
-            const id = e.entity_id.toLowerCase()
-            // Fallback to any sensor with 'gas' in the name
-            return !id.startsWith('binary_sensor') && 
-                   id.startsWith('sensor.') && 
-                   id.includes('gas')
-          }
-        )
+        const gasEntity = haEntities.find((e) => {
+          const id = e.entity_id.toLowerCase()
+          const friendlyName = (e.friendly_name || '').toLowerCase()
+          return (
+            id.includes('gas_meter_gas_consumption') ||
+            friendlyName.includes('gas meter gas consumption')
+          )
+        }) || haEntities.find((e) => {
+          const id = e.entity_id.toLowerCase()
+          const friendlyName = (e.friendly_name || '').toLowerCase()
+          return (
+            !id.startsWith('binary_sensor') &&
+            (
+              (id.includes('gas_meter') && id.includes('consumption')) ||
+              id.includes('gas_consumption') ||
+              id.includes('gas_total') ||
+              (id.includes('gas') && id.includes('m3')) ||
+              friendlyName.includes('gas meter')
+            )
+          )
+        }) || haEntities.find((e) => {
+          const id = e.entity_id.toLowerCase()
+          const friendlyName = (e.friendly_name || '').toLowerCase()
+          return !id.startsWith('binary_sensor') && id.startsWith('sensor.') && (id.includes('gas') || friendlyName.includes('gas'))
+        })
 
         // Collect ALL gas-related entities for fetch (as fallback)
         const allGasEntities = haEntities.filter((e) => {
           const id = e.entity_id.toLowerCase()
-          return !id.startsWith('binary_sensor') && id.includes('gas')
+          const friendlyName = (e.friendly_name || '').toLowerCase()
+          return !id.startsWith('binary_sensor') && (id.includes('gas') || friendlyName.includes('gas'))
         })
 
         console.log('[HA History] Available entities:', haEntities.map((e) => e.entity_id).join(', '))
@@ -982,9 +989,19 @@ export default function Dashboard({
 
         // Process gas data - convert meter readings to interval consumption (delta between readings)
         // Prefer matched gas entity, then fallback to any gas-like entity with history.
+        const gasEntityMap = new Map(allGasEntities.map((entity) => [entity.entity_id, entity]))
         const gasHistoryCandidates = historyData.filter((h: any) => {
           const id = String(h?.entity_id || '').toLowerCase()
-          return id.includes('gas') && Array.isArray(h?.history) && h.history.length > 1
+          const entityMeta = gasEntityMap.get(h.entity_id)
+          const friendlyName = String(entityMeta?.friendly_name || '').toLowerCase()
+          const looksLikeGasMeter =
+            id.includes('gas_meter') ||
+            id.includes('gas_consumption') ||
+            id.includes('gas_total') ||
+            id.includes('gas_m3') ||
+            friendlyName.includes('gas meter')
+
+          return looksLikeGasMeter && Array.isArray(h?.history) && h.history.length > 1
         })
 
         let gasData = historyData.find((h: any) => {
@@ -993,7 +1010,26 @@ export default function Dashboard({
 
         if (!gasData && gasHistoryCandidates.length > 0) {
           gasData = [...gasHistoryCandidates].sort((a: any, b: any) => {
-            return (b.history?.length || 0) - (a.history?.length || 0)
+            const aId = String(a?.entity_id || '').toLowerCase()
+            const bId = String(b?.entity_id || '').toLowerCase()
+            const aMeta = gasEntityMap.get(a.entity_id)
+            const bMeta = gasEntityMap.get(b.entity_id)
+            const aFriendlyName = String(aMeta?.friendly_name || '').toLowerCase()
+            const bFriendlyName = String(bMeta?.friendly_name || '').toLowerCase()
+
+            const scoreCandidate = (id: string, friendlyName: string, length: number) => {
+              let score = 0
+              if (id.includes('gas_meter_gas_consumption') || friendlyName.includes('gas meter gas consumption')) score += 100
+              if (id.includes('gas_meter')) score += 40
+              if (id.includes('gas_consumption')) score += 30
+              if (id.includes('gas_total') || id.includes('gas_m3')) score += 20
+              score += Math.min(20, Math.floor(length / 50))
+              return score
+            }
+
+            const aScore = scoreCandidate(aId, aFriendlyName, a.history?.length || 0)
+            const bScore = scoreCandidate(bId, bFriendlyName, b.history?.length || 0)
+            return bScore - aScore
           })[0]
           console.log('[Gas Debug] Using fallback gas entity:', gasData?.entity_id)
         }
@@ -1189,50 +1225,90 @@ export default function Dashboard({
   }, [powerSamples, selectedRange.endMs, selectedRange.startMs, timeRange])
 
   const gasChartData = useMemo(() => {
-    if (gasSamples.length === 0) {
-      return [{
-        time: new Date(selectedRange.startMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        power: 0,
-      }]
+    const isDayView = timeRange === 'today'
+    const toNormalizedTimestamp = (timestamp: number) => (
+      timestamp < 1_000_000_000_000 ? timestamp * 1000 : timestamp
+    )
+
+    const toBucketStart = (timestamp: number) => {
+      const date = new Date(timestamp)
+      if (isDayView) {
+        date.setMinutes(0, 0, 0)
+      } else {
+        date.setHours(0, 0, 0, 0)
+      }
+      return date.getTime()
     }
 
-    // Filter samples in range and sort by timestamp
-    const filtered = gasSamples
+    const formatBucketLabel = (timestamp: number) => {
+      if (isDayView) {
+        return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      }
+
+      return new Date(timestamp).toLocaleDateString([], { day: '2-digit', month: 'short' })
+    }
+
+    const samplesInRange = gasSamples
+      .filter((sample) => Number.isFinite(sample.timestamp) && Number.isFinite(sample.gas))
+      .map((sample) => ({
+        timestamp: toNormalizedTimestamp(sample.timestamp),
+        gas: sample.gas,
+      }))
       .filter((sample) => sample.timestamp >= selectedRange.startMs && sample.timestamp <= selectedRange.endMs)
-      .sort((a, b) => a.timestamp - b.timestamp)
 
-    if (filtered.length === 0) {
-      return [{
-        time: new Date(selectedRange.startMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        power: 0,
-      }]
-    }
-
-    // Group by hour and sum consumption
-    const hourlyBuckets = new Map<number, number>()
-    
-    filtered.forEach((sample) => {
-      const date = new Date(sample.timestamp)
-      date.setMinutes(0, 0, 0)
-      const hourTimestamp = date.getTime()
-      
-      const currentTotal = hourlyBuckets.get(hourTimestamp) || 0
-      hourlyBuckets.set(hourTimestamp, currentTotal + sample.gas)
+    const bucketTotals = new Map<number, number>()
+    samplesInRange.forEach((sample) => {
+      const bucketStart = toBucketStart(sample.timestamp)
+      const currentTotal = bucketTotals.get(bucketStart) || 0
+      bucketTotals.set(bucketStart, currentTotal + Math.max(0, sample.gas))
     })
 
-    // Convert to chart points
-    const chartPoints = Array.from(hourlyBuckets.entries())
-      .sort((a, b) => a[0] - b[0])
-      .map(([timestamp, consumption]) => ({
-        time: new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        power: parseFloat(Math.max(0, consumption).toFixed(3)),
-      }))
+    const buckets: number[] = []
+    const cursor = new Date(selectedRange.startMs)
+    const end = new Date(selectedRange.endMs)
 
-    return chartPoints.length > 0 ? chartPoints : [{
-      time: new Date(selectedRange.startMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      power: 0,
-    }]
-  }, [gasSamples, selectedRange.startMs, selectedRange.endMs])
+    if (isDayView) {
+      cursor.setMinutes(0, 0, 0)
+      end.setMinutes(0, 0, 0)
+
+      while (cursor.getTime() <= end.getTime()) {
+        buckets.push(cursor.getTime())
+        cursor.setHours(cursor.getHours() + 1)
+      }
+    } else {
+      cursor.setHours(0, 0, 0, 0)
+      end.setHours(0, 0, 0, 0)
+
+      while (cursor.getTime() <= end.getTime()) {
+        buckets.push(cursor.getTime())
+        cursor.setDate(cursor.getDate() + 1)
+      }
+    }
+
+    if (buckets.length === 0) {
+      const fallbackBucket = toBucketStart(selectedRange.startMs)
+      return [{
+        time: formatBucketLabel(fallbackBucket),
+        power: 0,
+      }]
+    }
+
+    return buckets.map((bucketStart) => ({
+      time: formatBucketLabel(bucketStart),
+      power: parseFloat((bucketTotals.get(bucketStart) || 0).toFixed(2)),
+    }))
+  }, [gasSamples, selectedRange.startMs, selectedRange.endMs, timeRange])
+
+  const gasSelectedPeriodTotal = useMemo(() => {
+    const total = gasChartData.reduce((sum, item) => sum + Math.max(0, item.power), 0)
+    return parseFloat(total.toFixed(2))
+  }, [gasChartData])
+
+  const gasSelectedPeriodLabel = timeRange === 'today'
+    ? 'Gas Day Total'
+    : timeRange === 'week'
+      ? 'Gas Week Total'
+      : 'Gas Month Total'
 
   // Show loading screen while checking permissions
   if (isCheckingPermissions) {
@@ -1468,10 +1544,16 @@ export default function Dashboard({
 
         {/* Gas Chart Section */}
         <div className="glass-panel rounded-3xl shadow-2xl p-8 mt-8">
-          <h2 className="text-2xl font-heavy text-dark-1 mb-6 flex items-center gap-2">
-            <Flame className="w-6 h-6 text-brand-2" />
-            Gas Consumption Chart
-          </h2>
+          <div className="mb-6 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <h2 className="text-2xl font-heavy text-dark-1 flex items-center gap-2">
+              <Flame className="w-6 h-6 text-brand-2" />
+              Gas Consumption Chart
+            </h2>
+            <div className="glass-card rounded-xl px-4 py-3 md:min-w-[220px]">
+              <p className="text-light-1 text-xs font-medium uppercase">{gasSelectedPeriodLabel}</p>
+              <p className="text-2xl font-heavy text-light-2">{gasSelectedPeriodTotal.toFixed(2)} m³</p>
+            </div>
+          </div>
           <EnergyChart
             data={gasChartData}
             timeRange={timeRange}
