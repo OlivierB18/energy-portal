@@ -759,14 +759,12 @@ export default function Dashboard({
   }, [haEntities, lastKnownHaEntities, pricingConfig, selectedEnvironment, gasRatePerM3, powerSamples])
 
   const livePowerStorageKey = `energy_live_power_samples_${selectedEnvironment || 'default'}`
-  const liveGasStorageKey = `energy_live_gas_samples_v2_${selectedEnvironment || 'default'}`
+  const liveGasStorageKey = `energy_live_gas_interval_samples_v3_${selectedEnvironment || 'default'}`
   const latestPowerRef = useRef(realTimeData.currentPower)
-  const latestGasRef = useRef(realTimeData.gasChartValue)
 
   useEffect(() => {
     latestPowerRef.current = realTimeData.currentPower
-    latestGasRef.current = realTimeData.gasChartValue
-  }, [realTimeData.currentPower, realTimeData.gasChartValue])
+  }, [realTimeData.currentPower])
 
   useEffect(() => {
     try {
@@ -793,8 +791,9 @@ export default function Dashboard({
   useEffect(() => {
     // Clear old gas storage key with cumulative data
     if (selectedEnvironment) {
-      const oldGasKey = `energy_live_gas_samples_${selectedEnvironment}`
-      localStorage.removeItem(oldGasKey)
+      const envKey = selectedEnvironment || 'default'
+      localStorage.removeItem(`energy_live_gas_samples_${envKey}`)
+      localStorage.removeItem(`energy_live_gas_samples_v2_${envKey}`)
     }
 
     try {
@@ -809,9 +808,16 @@ export default function Dashboard({
         return
       }
 
-      const cleaned = parsed.filter(
-        (sample) => typeof sample.timestamp === 'number' && typeof sample.gas === 'number',
-      )
+      const cleaned = parsed
+        .filter(
+          (sample) =>
+            typeof sample.timestamp === 'number' &&
+            typeof sample.gas === 'number' &&
+            Number.isFinite(sample.gas) &&
+            sample.gas >= 0 &&
+            sample.gas <= 20,
+        )
+        .sort((a, b) => a.timestamp - b.timestamp)
       setGasSamples(cleaned)
     } catch {
       setGasSamples([])
@@ -829,14 +835,15 @@ export default function Dashboard({
         console.log('[HA History] Starting fetch for environment:', selectedEnvironment)
 
         // Get last fetch timestamp from localStorage
-        const lastFetchKey = `ha_history_last_fetch_${selectedEnvironment}`
+        const lastFetchKey = `ha_history_last_fetch_v2_${selectedEnvironment}`
         const lastFetchStr = localStorage.getItem(lastFetchKey)
         const lastFetch = lastFetchStr ? new Date(lastFetchStr) : null
+        const hasStoredGasSamples = Boolean(localStorage.getItem(liveGasStorageKey))
         
         const now = new Date()
         let startTime: Date
         
-        if (lastFetch && (now.getTime() - lastFetch.getTime()) < 8 * 24 * 60 * 60 * 1000) {
+        if (lastFetch && hasStoredGasSamples && (now.getTime() - lastFetch.getTime()) < 8 * 24 * 60 * 60 * 1000) {
           // If we fetched recently (within 8 days), only get new data since then
           startTime = new Date(lastFetch.getTime() - 60000) // Start 1 minute before last fetch to avoid gaps
           console.log('[HA History] Incremental fetch from', startTime.toISOString())
@@ -963,11 +970,20 @@ export default function Dashboard({
           for (let i = 1; i < sortedHistory.length; i++) {
             const previousReading = parseFloat(sortedHistory[i - 1].value)
             const currentReading = parseFloat(sortedHistory[i].value)
+            const elapsedMs = sortedHistory[i].timestamp - sortedHistory[i - 1].timestamp
+            const elapsedHours = elapsedMs / (1000 * 60 * 60)
             const delta = currentReading - previousReading
+            const maxReasonableDelta = Math.max(0.2, elapsedHours * 5)
             
             // Only include positive deltas (consumption should increase)
             // Ignore negative values (meter resets) and unreasonably large jumps
-            if (delta > 0 && delta < 10) {
+            if (
+              Number.isFinite(delta) &&
+              Number.isFinite(elapsedHours) &&
+              elapsedHours > 0 &&
+              delta > 0 &&
+              delta <= maxReasonableDelta
+            ) {
               newGasSamples.push({
                 timestamp: sortedHistory[i].timestamp,
                 gas: parseFloat(delta.toFixed(3)),
@@ -998,7 +1014,7 @@ export default function Dashboard({
             return merged
           })
 
-          console.log('[HA History] Loaded', newGasSamples.length, 'gas samples (converted to consumption since baseline)')
+          console.log('[HA History] Loaded', newGasSamples.length, 'gas samples (interval consumption)')
         }
 
         // Save fetch timestamp for incremental updates
@@ -1030,23 +1046,12 @@ export default function Dashboard({
         localStorage.setItem(livePowerStorageKey, JSON.stringify(next))
         return next
       })
-
-      setGasSamples((prev) => {
-        const lastSample = prev[prev.length - 1]
-        if (lastSample && now - lastSample.timestamp < 8000) {
-          return prev
-        }
-
-        const next = [...prev, { timestamp: now, gas: latestGasRef.current }]
-        localStorage.setItem(liveGasStorageKey, JSON.stringify(next))
-        return next
-      })
     }
 
     captureSamples()
     const interval = window.setInterval(captureSamples, 10000)
     return () => window.clearInterval(interval)
-  }, [liveGasStorageKey, livePowerStorageKey, selectedEnvironment, visibleEnvironments.length])
+  }, [livePowerStorageKey, selectedEnvironment, visibleEnvironments.length])
 
   const selectedRange = useMemo(() => {
     const [year, month, day] = selectedChartDate.split('-').map(Number)
@@ -1146,7 +1151,12 @@ export default function Dashboard({
   const gasChartData = useMemo(() => {
     // Bucket gas consumption per hour for better readability
     const filtered = gasSamples.filter(
-      (sample) => sample.timestamp >= selectedRange.startMs && sample.timestamp <= selectedRange.endMs,
+      (sample) =>
+        sample.timestamp >= selectedRange.startMs &&
+        sample.timestamp <= selectedRange.endMs &&
+        Number.isFinite(sample.gas) &&
+        sample.gas >= 0 &&
+        sample.gas <= 20,
     )
 
     if (filtered.length === 0) {
