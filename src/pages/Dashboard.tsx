@@ -1468,41 +1468,44 @@ export default function Dashboard({
           </div>
         </div>
 
-        {/* Chart Section */}
-        <div className="glass-panel rounded-3xl shadow-2xl p-8">
-          <h2 className="text-2xl font-heavy text-dark-1 mb-6 flex items-center gap-2">
-            <Clock className="w-6 h-6 text-brand-2" />
-            Electricity Consumption Chart
-          </h2>
-          <EnergyChart
-            data={chartData}
-            timeRange={timeRange}
-            unit="kW"
-            seriesLabel="Electricity consumption"
-            rangeLabel={selectedRange.label}
-          />
-        </div>
-
-        {/* Gas Chart Section */}
-        <div className="glass-panel rounded-3xl shadow-2xl p-8 mt-8">
-          <div className="mb-6 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-            <h2 className="text-2xl font-heavy text-dark-1 flex items-center gap-2">
-              <Flame className="w-6 h-6 text-brand-2" />
-              Gas Consumption Chart
+        {/* Chart Section - Both charts side by side */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+          {/* Electricity Chart */}
+          <div className="glass-panel rounded-3xl shadow-2xl p-8">
+            <h2 className="text-2xl font-heavy text-dark-1 mb-6 flex items-center gap-2">
+              <Clock className="w-6 h-6 text-brand-2" />
+              Electricity Consumption Chart
             </h2>
-            <div className="glass-card rounded-xl px-4 py-3 md:min-w-[220px]">
-              <p className="text-light-1 text-xs font-medium uppercase">{gasSelectedPeriodLabel}</p>
-              <p className="text-2xl font-heavy text-light-2">{gasSelectedPeriodTotal.toFixed(2)} m³</p>
-            </div>
+            <EnergyChart
+              data={chartData}
+              timeRange={timeRange}
+              unit="kW"
+              seriesLabel="Electricity consumption"
+              rangeLabel={selectedRange.label}
+            />
           </div>
-          <EnergyChart
-            data={gasChartData}
-            timeRange={timeRange}
-            unit="m³"
-            seriesLabel="Gas consumption"
-            rangeLabel={selectedRange.label}
-            chartType="bar"
-          />
+
+          {/* Gas Chart */}
+          <div className="glass-panel rounded-3xl shadow-2xl p-8">
+            <div className="mb-6 flex flex-col gap-4">
+              <h2 className="text-2xl font-heavy text-dark-1 flex items-center gap-2">
+                <Flame className="w-6 h-6 text-brand-2" />
+                Gas Consumption Chart
+              </h2>
+              <div className="glass-card rounded-xl px-4 py-3">
+                <p className="text-light-1 text-xs font-medium uppercase">{gasSelectedPeriodLabel}</p>
+                <p className="text-2xl font-heavy text-light-2">{gasSelectedPeriodTotal.toFixed(2)} m³</p>
+              </div>
+            </div>
+            <EnergyChart
+              data={gasChartData}
+              timeRange={timeRange}
+              unit="m³"
+              seriesLabel="Gas consumption"
+              rangeLabel={selectedRange.label}
+              chartType="bar"
+            />
+          </div>
         </div>
 
         {/* Home Assistant Panel */}

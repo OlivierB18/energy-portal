@@ -78,10 +78,10 @@ export default function EnergyChart({
   }
 
   return (
-    <div className="w-full" style={{ height: '500px' }}>
+    <div className="w-full" style={{ height: '380px' }}>
       <ResponsiveContainer width="100%" height="100%">
         {chartType === 'bar' ? (
-          <BarChart data={data} margin={{ top: 5, right: 30, left: 0, bottom: 60 }}>
+          <BarChart data={data} margin={{ top: 5, right: 20, left: 0, bottom: 50 }}>
             <defs>
               <linearGradient id="colorGas" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor="rgb(234, 88, 12)" stopOpacity={0.8} />
@@ -95,7 +95,7 @@ export default function EnergyChart({
               tick={<CustomTick />}
               angle={-45}
               textAnchor="end"
-              height={80}
+              height={70}
             />
             <YAxis
               {...commonAxisProps}
@@ -110,7 +110,7 @@ export default function EnergyChart({
             />
           </BarChart>
         ) : (
-          <LineChart data={data} margin={{ top: 5, right: 30, left: 0, bottom: 60 }}>
+          <LineChart data={data} margin={{ top: 5, right: 20, left: 0, bottom: 50 }}>
             <defs>
               <linearGradient id="colorPower" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor="rgb(2, 125, 94)" stopOpacity={0.8} />
@@ -124,7 +124,7 @@ export default function EnergyChart({
               tick={<CustomTick />}
               angle={-45}
               textAnchor="end"
-              height={80}
+              height={70}
             />
             <YAxis
               {...commonAxisProps}
