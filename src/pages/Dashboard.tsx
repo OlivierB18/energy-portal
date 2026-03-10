@@ -943,32 +943,38 @@ export default function Dashboard({
           console.log('[HA History] Loaded', newPowerSamples.length, 'power samples')
         }
 
-        // Process gas data - convert cumulative meter to consumption per interval
+        // Process gas data - convert meter readings to interval consumption (delta between readings)
         const gasData = historyData.find((h: any) => h.entity_id === gasEntity?.entity_id)
         if (gasData?.history && gasData.history.length > 0) {
           // Sort by timestamp to ensure chronological order
           const sortedHistory = [...gasData.history].sort((a, b) => a.timestamp - b.timestamp)
           
-          // First value is the baseline meter reading
-          const baselineValue = parseFloat(sortedHistory[0].value)
-          console.log('[Gas Debug] Baseline meter reading:', baselineValue, 'm³')
+          console.log('[Gas Debug] First meter reading:', parseFloat(sortedHistory[0].value), 'm³')
           
-          // Convert cumulative meter readings to consumption since baseline
-          const newGasSamples: GasSample[] = sortedHistory.map((state: any) => {
-            const currentMeterReading = parseFloat(state.value)
-            const consumption = Math.max(0, currentMeterReading - baselineValue)
-            return {
-              timestamp: state.timestamp,
-              gas: consumption,
+          // Convert meter readings to interval consumption (delta between consecutive readings)
+          const newGasSamples: GasSample[] = []
+          
+          for (let i = 1; i < sortedHistory.length; i++) {
+            const previousReading = parseFloat(sortedHistory[i - 1].value)
+            const currentReading = parseFloat(sortedHistory[i].value)
+            const delta = currentReading - previousReading
+            
+            // Only include positive deltas (consumption should increase)
+            // Ignore negative values (meter resets) and unreasonably large jumps
+            if (delta > 0 && delta < 10) {
+              newGasSamples.push({
+                timestamp: sortedHistory[i].timestamp,
+                gas: parseFloat(delta.toFixed(3)),
+              })
             }
-          })
+          }
 
-          console.log('[Gas Debug] First 5 consumption values:', newGasSamples.slice(0, 5).map((s) => ({ 
-            ts: s.timestamp, 
+          console.log('[Gas Debug] First 5 interval consumptions:', newGasSamples.slice(0, 5).map((s) => ({ 
+            ts: new Date(s.timestamp).toLocaleTimeString(), 
             consumption: s.gas 
           })))
-          console.log('[Gas Debug] Last 5 consumption values:', newGasSamples.slice(-5).map((s) => ({ 
-            ts: s.timestamp, 
+          console.log('[Gas Debug] Last 5 interval consumptions:', newGasSamples.slice(-5).map((s) => ({ 
+            ts: new Date(s.timestamp).toLocaleTimeString(), 
             consumption: s.gas 
           })))
 
@@ -1132,11 +1138,40 @@ export default function Dashboard({
   }, [powerSamples, selectedRange.endMs, selectedRange.startMs, timeRange])
 
   const gasChartData = useMemo(() => {
-    return mapSamplesToChartPoints(
-      gasSamples.map((sample) => ({ timestamp: sample.timestamp, value: sample.gas })),
-      latestGasRef.current,
+    // Bucket gas consumption per hour for better readability
+    const filtered = gasSamples.filter(
+      (sample) => sample.timestamp >= selectedRange.startMs && sample.timestamp <= selectedRange.endMs,
     )
-  }, [gasSamples, selectedRange.endMs, selectedRange.startMs, timeRange])
+
+    if (filtered.length === 0) {
+      return [{
+        time: new Date(selectedRange.startMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        power: 0,
+      }]
+    }
+
+    // Group by hour
+    const hourlyBuckets = new Map<number, number>()
+    
+    filtered.forEach((sample) => {
+      const date = new Date(sample.timestamp)
+      date.setMinutes(0, 0, 0) // Round down to hour
+      const hourTimestamp = date.getTime()
+      
+      const currentTotal = hourlyBuckets.get(hourTimestamp) || 0
+      hourlyBuckets.set(hourTimestamp, currentTotal + sample.gas)
+    })
+
+    // Convert to chart points
+    const chartPoints = Array.from(hourlyBuckets.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([timestamp, consumption]) => ({
+        time: new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        power: parseFloat(consumption.toFixed(3)),
+      }))
+
+    return chartPoints
+  }, [gasSamples, selectedRange.endMs, selectedRange.startMs])
 
   // Show loading screen while checking permissions
   if (isCheckingPermissions) {
