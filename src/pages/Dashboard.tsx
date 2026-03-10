@@ -942,7 +942,7 @@ export default function Dashboard({
     fetchGasHourly()
     const interval = window.setInterval(fetchGasHourly, 5 * 60 * 1000) // Refresh every 5 min
     return () => window.clearInterval(interval)
-  }, [selectedEnvironment, isAuthenticated, getAuthToken, liveGasStorageKey])
+  }, [selectedEnvironment])
 
   // Fetch electricity history from Home Assistant
   useEffect(() => {
@@ -1497,8 +1497,8 @@ export default function Dashboard({
           </div>
         </div>
 
-        {/* Chart Section - Both charts side by side */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        {/* Chart Section - Electricity and Gas charts */}
+        <div className="space-y-8">
           {/* Electricity Chart */}
           <div className="glass-panel rounded-3xl shadow-2xl p-8">
             <h2 className="text-2xl font-heavy text-dark-1 mb-6 flex items-center gap-2">
