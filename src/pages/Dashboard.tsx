@@ -1039,6 +1039,17 @@ export default function Dashboard({
 
       const now = Date.now()
       setGasMeterReadings((prev) => {
+        // If we have no readings yet, initialize with current value as baseline at start of today
+        if (prev.length === 0) {
+          const today = new Date(now)
+          today.setHours(0, 0, 0, 0)
+          const baseline = { timestamp: today.getTime(), value: meterValue }
+          const current = { timestamp: now, value: meterValue }
+          const next = [baseline, current]
+          localStorage.setItem(liveGasMeterKey, JSON.stringify(next))
+          return next
+        }
+
         const last = prev[prev.length - 1]
         // Don't capture if value hasn't changed and was captured recently
         if (last && now - last.timestamp < 8000 && last.value === meterValue) {
