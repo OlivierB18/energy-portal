@@ -99,6 +99,26 @@ const findGasConsumptionEntity = (entities: HaEntity[]) => {
   })
 }
 
+// Format chart labels: time on top, date below (e.g. "14:00\n10-03")
+const formatChartAxisLabel = (timestamp: number, range: 'today' | 'week' | 'month'): string => {
+  const date = new Date(timestamp)
+  
+  if (range === 'today') {
+    // For today: show time on top line, date on bottom
+    const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    const dateStr = date.toLocaleDateString([], { day: '2-digit', month: '2-digit' })
+    return `${time}\n${dateStr}`
+  } else if (range === 'week') {
+    // For week: show date with weekday
+    const dateStr = date.toLocaleDateString([], { day: '2-digit', month: '2-digit' })
+    const dayStr = date.toLocaleDateString([], { weekday: 'short' })
+    return `${dayStr}\n${dateStr}`
+  } else {
+    // For month: just date
+    return date.toLocaleDateString([], { day: '2-digit', month: '2-digit' })
+  }
+}
+
 export default function Dashboard({
   isAdmin,
   selectedEnvironmentId,
@@ -855,7 +875,7 @@ export default function Dashboard({
     const fetchGasHourly = async () => {
       try {
         const token = await getAuthToken()
-        const url = `/.netlify/functions/get-gas-hourly?environmentId=${encodeURIComponent(selectedEnvironment)}&hoursBack=72`
+        const url = `/.netlify/functions/get-gas-hourly?environmentId=${encodeURIComponent(selectedEnvironment)}&hoursBack=200`
         
         const response = await fetch(url, {
           headers: { Authorization: `Bearer ${token}` },
@@ -1115,22 +1135,16 @@ export default function Dashboard({
     samples: Array<{ timestamp: number; value: number }>,
     fallbackValue: number,
   ) => {
-    const formatChartLabel = (timestamp: number) => (
-      timeRange === 'today'
-        ? new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        : new Date(timestamp).toLocaleDateString([], { day: '2-digit', month: '2-digit' })
-    )
-
     const filtered = samples.filter(
       (sample) => sample.timestamp >= selectedRange.startMs && sample.timestamp <= selectedRange.endMs,
     )
 
     if (filtered.length === 0) {
       return [{
-        time: formatChartLabel(selectedRange.startMs),
+        time: formatChartAxisLabel(selectedRange.startMs, timeRange),
         power: 0,
       }, {
-        time: formatChartLabel(selectedRange.endMs),
+        time: formatChartAxisLabel(selectedRange.endMs, timeRange),
         power: fallbackValue,
       }]
     }
@@ -1154,14 +1168,14 @@ export default function Dashboard({
     // Always add range start point first for daily/weekly views
     if (timeRange !== 'month') {
       chartPoints.push({
-        time: formatChartLabel(selectedRange.startMs),
+        time: formatChartAxisLabel(selectedRange.startMs, timeRange),
         power: shouldAddStart ? startValue : reduced[0]?.value ?? 0,
       })
     }
 
     // Add the reduced data points
     const dataPoints = reduced.map((sample) => ({
-      time: formatChartLabel(sample.timestamp),
+      time: formatChartAxisLabel(sample.timestamp, timeRange),
       power: sample.value,
     }))
     
@@ -1194,10 +1208,7 @@ export default function Dashboard({
     }
 
     return buckets.map((b) => {
-      const d = new Date(b.start)
-      const time = timeRange === 'today'
-        ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        : d.toLocaleDateString([], { day: '2-digit', month: '2-digit' })
+      const time = formatChartAxisLabel(b.start, timeRange)
       return { time, power: Math.max(0, b.change) }
     })
   }, [bucketGasReadings, selectedRange.startMs, selectedRange.endMs, timeRange])

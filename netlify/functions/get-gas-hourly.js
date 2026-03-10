@@ -52,7 +52,7 @@ export const handler = async (event) => {
 
     const environmentId = event.queryStringParameters?.environmentId || 'vacation'
     const entityId = event.queryStringParameters?.entityId || 'sensor.gas_meter_gas_consumption'
-    const hoursBack = parseInt(event.queryStringParameters?.hoursBack || '48', 10)
+    const hoursBack = parseInt(event.queryStringParameters?.hoursBack || '200', 10) // ~8 days back to March 3
 
     const { baseUrl, token } = getHaConfigDirect(environmentId)
 

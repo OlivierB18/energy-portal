@@ -10,6 +10,35 @@ import {
   ResponsiveContainer,
 } from 'recharts'
 
+// Custom tick component for multiline labels (handles "time\ndate" format)
+function CustomTick(props: any) {
+  const { x, y, payload } = props
+  const label = payload?.value || ''
+  
+  // Split on newline
+  const lines = label.split('\n')
+  
+  if (lines.length === 1) {
+    // Single line - use default rendering
+    return (
+      <text x={x} y={y} textAnchor="end" fill="rgb(234, 233, 229)" fontSize="0.875rem">
+        {label}
+      </text>
+    )
+  }
+  
+  // Multiple lines - render each on separate y position
+  return (
+    <text x={x} textAnchor="end" fill="rgb(234, 233, 229)" fontSize="0.875rem">
+      {lines.map((line: string, index: number) => (
+        <tspan key={index} x={x} dy={index === 0 ? 0 : '1.2em'}>
+          {line}
+        </tspan>
+      ))}
+    </text>
+  )
+}
+
 interface EnergyChartProps {
   data: Array<{
     time: string
@@ -49,10 +78,10 @@ export default function EnergyChart({
   }
 
   return (
-    <div className="w-full h-96">
+    <div className="w-full" style={{ height: '500px' }}>
       <ResponsiveContainer width="100%" height="100%">
         {chartType === 'bar' ? (
-          <BarChart data={data} margin={{ top: 5, right: 30, left: 0, bottom: 5 }}>
+          <BarChart data={data} margin={{ top: 5, right: 30, left: 0, bottom: 60 }}>
             <defs>
               <linearGradient id="colorGas" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor="rgb(234, 88, 12)" stopOpacity={0.8} />
@@ -63,9 +92,10 @@ export default function EnergyChart({
             <XAxis
               dataKey="time"
               {...commonAxisProps}
+              tick={<CustomTick />}
               angle={-45}
               textAnchor="end"
-              height={60}
+              height={80}
             />
             <YAxis
               {...commonAxisProps}
@@ -80,7 +110,7 @@ export default function EnergyChart({
             />
           </BarChart>
         ) : (
-          <LineChart data={data} margin={{ top: 5, right: 30, left: 0, bottom: 5 }}>
+          <LineChart data={data} margin={{ top: 5, right: 30, left: 0, bottom: 60 }}>
             <defs>
               <linearGradient id="colorPower" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor="rgb(2, 125, 94)" stopOpacity={0.8} />
@@ -91,9 +121,10 @@ export default function EnergyChart({
             <XAxis
               dataKey="time"
               {...commonAxisProps}
+              tick={<CustomTick />}
               angle={-45}
               textAnchor="end"
-              height={60}
+              height={80}
             />
             <YAxis
               {...commonAxisProps}
