@@ -192,13 +192,16 @@ const formatStatisticsPayload = (statisticsData, entityIdsList) => {
           row?.state ?? row?.sum ?? row?.mean ?? row?.max ?? row?.min,
         )
 
-        if (!Number.isFinite(timestamp) || !Number.isFinite(parsedValue)) {
+        const changeValue = parseNumericState(row?.change)
+
+        if (!Number.isFinite(timestamp) || (!Number.isFinite(parsedValue) && !Number.isFinite(changeValue))) {
           return null
         }
 
         return {
           timestamp,
-          value: parsedValue,
+          value: Number.isFinite(parsedValue) ? parsedValue : 0,
+          change: Number.isFinite(changeValue) ? changeValue : 0,
           state: String(row?.state ?? row?.sum ?? row?.mean ?? ''),
         }
       })
