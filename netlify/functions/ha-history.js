@@ -145,6 +145,74 @@ const parseNumericState = (rawValue) => {
   return Number.isFinite(value) ? value : NaN
 }
 
+const formatHistoryPayload = (historyData) => {
+  const safeHistory = Array.isArray(historyData) ? historyData : []
+
+  console.log('[HA History] Raw HA response:', safeHistory.length, 'entities',
+    safeHistory.map((h) => ({ entity_id: h?.[0]?.entity_id, states: Array.isArray(h) ? h.length : 0 })))
+
+  return safeHistory.map((entityHistory) => {
+    const validStates = (entityHistory || [])
+      .map((state) => {
+        const parsedValue = parseNumericState(state?.state)
+        if (!Number.isFinite(parsedValue)) {
+          return null
+        }
+
+        return {
+          ...state,
+          parsedValue,
+        }
+      })
+      .filter(Boolean)
+
+    console.log('[HA History] Entity', entityHistory?.[0]?.entity_id, 'has', validStates.length, 'valid states')
+
+    return {
+      entity_id: entityHistory?.[0]?.entity_id || 'unknown',
+      history: validStates.map((state) => ({
+        timestamp: new Date(state.last_changed || state.last_updated).getTime(),
+        value: state.parsedValue,
+        state: state.state,
+      })),
+    }
+  })
+}
+
+const formatStatisticsPayload = (statisticsData, entityIdsList) => {
+  const safeData = statisticsData && typeof statisticsData === 'object' ? statisticsData : {}
+
+  return entityIdsList.map((entityId) => {
+    const statsRows = Array.isArray(safeData[entityId]) ? safeData[entityId] : []
+    const mappedRows = statsRows
+      .map((row) => {
+        const timestampRaw = row?.start || row?.end || row?.last_reset
+        const timestamp = timestampRaw ? new Date(timestampRaw).getTime() : NaN
+        const parsedValue = parseNumericState(
+          row?.state ?? row?.sum ?? row?.mean ?? row?.max ?? row?.min,
+        )
+
+        if (!Number.isFinite(timestamp) || !Number.isFinite(parsedValue)) {
+          return null
+        }
+
+        return {
+          timestamp,
+          value: parsedValue,
+          state: String(row?.state ?? row?.sum ?? row?.mean ?? ''),
+        }
+      })
+      .filter(Boolean)
+
+    console.log('[HA History] Statistics entity', entityId, 'rows:', mappedRows.length)
+
+    return {
+      entity_id: entityId,
+      history: mappedRows,
+    }
+  })
+}
+
 export const handler = async (event) => {
   try {
     const authHeader = event.headers.authorization || event.headers.Authorization
@@ -163,6 +231,8 @@ export const handler = async (event) => {
     const startTime = event.queryStringParameters?.startTime
     const endTime = event.queryStringParameters?.endTime
     const entityIds = event.queryStringParameters?.entityIds
+    const mode = String(event.queryStringParameters?.mode || 'history').toLowerCase()
+    const statisticsPeriod = String(event.queryStringParameters?.period || 'hour').toLowerCase()
 
     if (!startTime || !endTime || !entityIds) {
       console.error('[HA History] Missing query parameters:', { startTime, endTime, entityIds })
@@ -194,6 +264,63 @@ export const handler = async (event) => {
 
     // Parse entity IDs
     const entityIdsList = entityIds.split(',').map((id) => id.trim())
+
+    if (mode === 'statistics') {
+      const statisticsUrl = new URL(baseUrl)
+      statisticsUrl.pathname = `/api/history/statistics_during_period/${startTime}`
+      entityIdsList.forEach((entityId) => {
+        statisticsUrl.searchParams.append('statistic_ids', entityId)
+      })
+      statisticsUrl.searchParams.append('period', statisticsPeriod === 'day' ? 'day' : 'hour')
+      if (endTime) {
+        statisticsUrl.searchParams.append('end_time', endTime)
+      }
+
+      console.log('[HA History] Statistics fetch URL:', statisticsUrl.toString())
+
+      let statisticsResponse
+      try {
+        statisticsResponse = await fetch(statisticsUrl.toString(), {
+          headers: {
+            Authorization: `Bearer ${haToken}`,
+            'Content-Type': 'application/json',
+          },
+        })
+      } catch (fetchErr) {
+        console.error('[HA History] Statistics network fetch failed:', fetchErr.message)
+        return {
+          statusCode: 503,
+          body: JSON.stringify({
+            error: 'Failed to connect to Home Assistant statistics API',
+            details: fetchErr instanceof Error ? fetchErr.message : String(fetchErr),
+          }),
+        }
+      }
+
+      if (!statisticsResponse.ok) {
+        const errorBody = await statisticsResponse.text()
+        console.error('[HA History] Statistics API error', statisticsResponse.status, errorBody)
+        return {
+          statusCode: statisticsResponse.status,
+          body: JSON.stringify({
+            error: `Home Assistant statistics API error: ${statisticsResponse.status}`,
+            details: errorBody,
+          }),
+        }
+      }
+
+      const statisticsData = await statisticsResponse.json()
+      const formatted = formatStatisticsPayload(statisticsData, entityIdsList)
+
+      return {
+        statusCode: 200,
+        body: JSON.stringify({
+          entities: formatted,
+          timestamp: new Date().toISOString(),
+          mode: 'statistics',
+        }),
+      }
+    }
 
     // Fetch history from Home Assistant
     // Format: /api/history/period/<start_time>?filter_entity_id=sensor.x&filter_entity_id=sensor.y&end_time=...
@@ -244,37 +371,7 @@ export const handler = async (event) => {
     }
 
     const historyData = await historyResponse.json()
-
-    console.log('[HA History] Raw HA response:', historyData.length, 'entities', 
-      historyData.map((h) => ({ entity_id: h[0]?.entity_id, states: h.length })))
-
-    // Convert HA history to our format: array of { entity_id, history: [...] }
-    const formatted = historyData.map((entityHistory) => {
-      const validStates = (entityHistory || [])
-        .map((state) => {
-          const parsedValue = parseNumericState(state?.state)
-          if (!Number.isFinite(parsedValue)) {
-            return null
-          }
-
-          return {
-            ...state,
-            parsedValue,
-          }
-        })
-        .filter(Boolean)
-      
-      console.log('[HA History] Entity', entityHistory[0]?.entity_id, 'has', validStates.length, 'valid states')
-      
-      return {
-        entity_id: entityHistory[0]?.entity_id || 'unknown',
-        history: validStates.map((state) => ({
-          timestamp: new Date(state.last_changed || state.last_updated).getTime(),
-          value: state.parsedValue,
-          state: state.state,
-        })),
-      }
-    })
+    const formatted = formatHistoryPayload(historyData)
 
     console.log('[HA History] Loaded', formatted.length, 'entity histories')
 
