@@ -818,7 +818,6 @@ export default function Dashboard({
   }, [haEntities, lastKnownHaEntities, pricingConfig, selectedEnvironment, gasRatePerM3, powerSamples])
 
   const livePowerStorageKey = `energy_live_power_samples_${selectedEnvironment || 'default'}`
-  const liveGasMeterKey = `energy_gas_meter_readings_${selectedEnvironment || 'default'}`
   const latestPowerRef = useRef(realTimeData.currentPower)
 
   useEffect(() => {
@@ -847,29 +846,54 @@ export default function Dashboard({
     }
   }, [livePowerStorageKey])
 
-  // Load stored gas meter readings from localStorage
+  // Fetch hourly gas consumption from HA
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem(liveGasMeterKey)
-      if (!stored) {
-        setGasMeterReadings([])
-        return
-      }
-      const parsed = JSON.parse(stored)
-      if (!Array.isArray(parsed)) {
-        setGasMeterReadings([])
-        return
-      }
-      const cleaned = parsed
-        .filter((r: { timestamp?: number; value?: number }) =>
-          typeof r?.timestamp === 'number' && typeof r?.value === 'number' &&
-          Number.isFinite(r.timestamp) && Number.isFinite(r.value))
-        .sort((a: { timestamp: number }, b: { timestamp: number }) => a.timestamp - b.timestamp)
-      setGasMeterReadings(cleaned)
-    } catch {
-      setGasMeterReadings([])
+    if (!selectedEnvironment || !isAuthenticated) {
+      return
     }
-  }, [liveGasMeterKey])
+
+    const fetchGasHourly = async () => {
+      try {
+        const token = await getAuthToken()
+        const url = `/.netlify/functions/get-gas-hourly?environmentId=${encodeURIComponent(selectedEnvironment)}&hoursBack=72`
+        
+        const response = await fetch(url, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+
+        if (!response.ok) {
+          console.error('[Gas Hourly] Fetch failed:', response.status)
+          return
+        }
+
+        const data = await response.json()
+        console.log('[Gas Hourly] Got', data.hourly?.length, 'hourly readings')
+
+        // Convert hourly deltas to meter readings (cumulative)
+        if (Array.isArray(data.hourly) && data.hourly.length > 0) {
+          const readings = []
+          let cumulativeValue = 0
+
+          for (const hour of data.hourly) {
+            const timestamp = new Date(hour.hour).getTime()
+            cumulativeValue += hour.delta
+            readings.push({ timestamp, value: cumulativeValue })
+          }
+
+          setGasMeterReadings(readings)
+        } else {
+          console.log('[Gas Hourly] No hourly data')
+          setGasMeterReadings([])
+        }
+      } catch (error) {
+        console.error('[Gas Hourly] Error:', error)
+      }
+    }
+
+    fetchGasHourly()
+    const interval = window.setInterval(fetchGasHourly, 5 * 60 * 1000) // Refresh every 5 min
+    return () => window.clearInterval(interval)
+  }, [selectedEnvironment, isAuthenticated, getAuthToken])
 
   // Fetch electricity history from Home Assistant
   useEffect(() => {
@@ -1018,57 +1042,6 @@ export default function Dashboard({
     return () => window.clearInterval(interval)
   }, [livePowerStorageKey, selectedEnvironment, visibleEnvironments.length])
 
-  // Capture gas meter readings locally (HA doesn't provide history for gas entity)
-  useEffect(() => {
-    if (!selectedEnvironment || visibleEnvironments.length === 0) {
-      return
-    }
-
-    const entities = haEntities.length > 0 ? haEntities : lastKnownHaEntities
-    const gasEntity = findGasConsumptionEntity(entities)
-
-    if (!gasEntity) {
-      return
-    }
-
-    const captureGasMeter = () => {
-      const meterValue = parseNumericValue(gasEntity.state)
-      if (!Number.isFinite(meterValue)) {
-        return
-      }
-
-      const now = Date.now()
-      setGasMeterReadings((prev) => {
-        // If we have no readings yet, initialize with current value as baseline at start of today
-        if (prev.length === 0) {
-          const today = new Date(now)
-          today.setHours(0, 0, 0, 0)
-          const baseline = { timestamp: today.getTime(), value: meterValue }
-          const current = { timestamp: now, value: meterValue }
-          const next = [baseline, current]
-          localStorage.setItem(liveGasMeterKey, JSON.stringify(next))
-          return next
-        }
-
-        const last = prev[prev.length - 1]
-        // Don't capture if value hasn't changed and was captured recently
-        if (last && now - last.timestamp < 8000 && last.value === meterValue) {
-          return prev
-        }
-
-        // Keep max 30 days of data (1 reading per 10 sec = ~260k/month, cap at 50k entries)
-        const cutoff = now - 30 * 24 * 60 * 60 * 1000
-        const trimmed = prev.filter((r) => r.timestamp > cutoff)
-        const next = [...trimmed, { timestamp: now, value: meterValue }]
-        localStorage.setItem(liveGasMeterKey, JSON.stringify(next))
-        return next
-      })
-    }
-
-    captureGasMeter()
-    const interval = window.setInterval(captureGasMeter, 10000)
-    return () => window.clearInterval(interval)
-  }, [haEntities, lastKnownHaEntities, liveGasMeterKey, selectedEnvironment, visibleEnvironments.length])
 
   const selectedRange = useMemo(() => {
     const [year, month, day] = selectedChartDate.split('-').map(Number)
