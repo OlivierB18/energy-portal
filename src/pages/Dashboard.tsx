@@ -838,6 +838,7 @@ export default function Dashboard({
   }, [haEntities, lastKnownHaEntities, pricingConfig, selectedEnvironment, gasRatePerM3, powerSamples])
 
   const livePowerStorageKey = `energy_live_power_samples_${selectedEnvironment || 'default'}`
+  const liveGasStorageKey = `energy_gas_hourly_data_${selectedEnvironment || 'default'}`
   const latestPowerRef = useRef(realTimeData.currentPower)
 
   useEffect(() => {
@@ -865,6 +866,32 @@ export default function Dashboard({
       setPowerSamples([])
     }
   }, [livePowerStorageKey])
+
+  // Load stored gas data from localStorage immediately (before async fetch)
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(liveGasStorageKey)
+      if (!stored) {
+        setGasMeterReadings([])
+        return
+      }
+
+      const parsed = JSON.parse(stored)
+      if (!Array.isArray(parsed)) {
+        setGasMeterReadings([])
+        return
+      }
+
+      const cleaned = parsed
+        .filter((r: { timestamp?: number; value?: number }) =>
+          typeof r?.timestamp === 'number' && typeof r?.value === 'number' &&
+          Number.isFinite(r.timestamp) && Number.isFinite(r.value))
+        .sort((a: { timestamp: number }, b: { timestamp: number }) => a.timestamp - b.timestamp)
+      setGasMeterReadings(cleaned)
+    } catch {
+      setGasMeterReadings([])
+    }
+  }, [liveGasStorageKey])
 
   // Fetch hourly gas consumption from HA
   useEffect(() => {
@@ -901,6 +928,8 @@ export default function Dashboard({
           }
 
           setGasMeterReadings(readings)
+          // Cache in localStorage for instant display on next load
+          localStorage.setItem(liveGasStorageKey, JSON.stringify(readings))
         } else {
           console.log('[Gas Hourly] No hourly data')
           setGasMeterReadings([])
@@ -913,7 +942,7 @@ export default function Dashboard({
     fetchGasHourly()
     const interval = window.setInterval(fetchGasHourly, 5 * 60 * 1000) // Refresh every 5 min
     return () => window.clearInterval(interval)
-  }, [selectedEnvironment, isAuthenticated, getAuthToken])
+  }, [selectedEnvironment, isAuthenticated, getAuthToken, liveGasStorageKey])
 
   // Fetch electricity history from Home Assistant
   useEffect(() => {
