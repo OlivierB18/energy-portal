@@ -759,7 +759,7 @@ export default function Dashboard({
   }, [haEntities, lastKnownHaEntities, pricingConfig, selectedEnvironment, gasRatePerM3, powerSamples])
 
   const livePowerStorageKey = `energy_live_power_samples_${selectedEnvironment || 'default'}`
-  const liveGasStorageKey = `energy_live_gas_interval_samples_v3_${selectedEnvironment || 'default'}`
+  const liveGasStorageKey = `energy_live_gas_interval_samples_v4_${selectedEnvironment || 'default'}`
   const latestPowerRef = useRef(realTimeData.currentPower)
 
   useEffect(() => {
@@ -1031,7 +1031,7 @@ export default function Dashboard({
             ) {
               newGasSamples.push({
                 timestamp: sampleTimestamp,
-                gas: parseFloat(delta.toFixed(3)),
+                gas: delta,
               })
             }
           }
@@ -1046,20 +1046,11 @@ export default function Dashboard({
             consumption: s.gas 
           })))
 
-          setGasSamples((prev) => {
-            const combined = [...prev, ...newGasSamples]
-            const uniqueMap = new Map()
-            combined.forEach((sample) => {
-              const key = Math.floor(sample.timestamp / 10000) * 10000
-              if (!uniqueMap.has(key) || sample.timestamp > uniqueMap.get(key).timestamp) {
-                uniqueMap.set(key, sample)
-              }
-            })
-            const merged = Array.from(uniqueMap.values()).sort((a, b) => a.timestamp - b.timestamp)
-            console.log('[Gas Debug] Storing', merged.length, 'merged samples to localStorage')
-            localStorage.setItem(liveGasStorageKey, JSON.stringify(merged))
-            return merged
-          })
+          const normalizedGasSamples = [...newGasSamples]
+            .sort((a, b) => a.timestamp - b.timestamp)
+          console.log('[Gas Debug] Storing', normalizedGasSamples.length, 'fresh gas samples to localStorage')
+          localStorage.setItem(liveGasStorageKey, JSON.stringify(normalizedGasSamples))
+          setGasSamples(normalizedGasSamples)
 
           console.log('[HA History] Loaded', newGasSamples.length, 'gas samples (interval consumption)')
         } else {
