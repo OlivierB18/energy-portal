@@ -815,7 +815,7 @@ export default function Dashboard({
             typeof sample.gas === 'number' &&
             Number.isFinite(sample.gas) &&
             sample.gas >= 0 &&
-            sample.gas <= 20,
+            sample.gas <= 100, // Allow up to 100 m³/hour (unrealistic but no premature filtering)
         )
         .sort((a, b) => a.timestamp - b.timestamp)
       setGasSamples(cleaned)
@@ -835,7 +835,7 @@ export default function Dashboard({
         console.log('[HA History] Starting fetch for environment:', selectedEnvironment)
 
         // Get last fetch timestamp from localStorage
-        const lastFetchKey = `ha_history_last_fetch_v2_${selectedEnvironment}`
+        const lastFetchKey = `ha_history_last_fetch_v3_${selectedEnvironment}`
         const lastFetchStr = localStorage.getItem(lastFetchKey)
         const lastFetch = lastFetchStr ? new Date(lastFetchStr) : null
         const hasStoredGasSamples = Boolean(localStorage.getItem(liveGasStorageKey))
@@ -843,12 +843,13 @@ export default function Dashboard({
         const now = new Date()
         let startTime: Date
         
+        // Always do full fetch on first time (v3 key is new) 
         if (lastFetch && hasStoredGasSamples && (now.getTime() - lastFetch.getTime()) < 8 * 24 * 60 * 60 * 1000) {
           // If we fetched recently (within 8 days), only get new data since then
           startTime = new Date(lastFetch.getTime() - 60000) // Start 1 minute before last fetch to avoid gaps
           console.log('[HA History] Incremental fetch from', startTime.toISOString())
         } else {
-          // First time or stale data: fetch last 7 days
+          // First time or stale data: fetch last 7 days (forces data population on v3 migration)
           startTime = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
           console.log('[HA History] Full fetch (7 days) from', startTime.toISOString())
         }
@@ -982,7 +983,7 @@ export default function Dashboard({
               Number.isFinite(elapsedHours) &&
               elapsedHours > 0 &&
               delta > 0 &&
-              delta <= maxReasonableDelta
+              delta <= Math.max(maxReasonableDelta, 2) // Allow up to 2 m³ per hour
             ) {
               newGasSamples.push({
                 timestamp: sortedHistory[i].timestamp,
@@ -1156,7 +1157,7 @@ export default function Dashboard({
         sample.timestamp <= selectedRange.endMs &&
         Number.isFinite(sample.gas) &&
         sample.gas >= 0 &&
-        sample.gas <= 20,
+        sample.gas <= 100, // Allow realistic consumption values
     )
 
     if (filtered.length === 0) {
