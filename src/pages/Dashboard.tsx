@@ -1375,7 +1375,7 @@ export default function Dashboard({
     }))
     console.log('GAS DEBUG 4 - Final chart data:', chartData)
     return chartData
-  }, [gasSamples, selectedRange.startMs, selectedRange.endMs, timeRange])
+    }, [gasSamples, selectedRange.startMs, selectedRange.endMs, timeRange, realTimeData.gasDailyUsage, realTimeData.gasMonthlyUsage])
 
   const gasSelectedPeriodTotal = useMemo(() => {
     const total = gasChartData.reduce((sum, item) => sum + Math.max(0, item.power), 0)
