@@ -72,6 +72,8 @@ export default function Dashboard({
   const [showPriceModal, setShowPriceModal] = useState(false)
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false)
   const [pricingConfig, setPricingConfig] = useState<EnergyPricingConfig | null>(null)
+  const gasSummaryEntityIdRef = useRef<string | null>(null)
+  const gasHistoryEntityIdRef = useRef<string | null>(null)
   // Home Assistant connection status: 'connecting' | 'connected' | 'error'
   const [_haConnectionStatus, setHaConnectionStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   const { isAuthenticated, getIdTokenClaims, getAccessTokenSilently } = useAuth0()
@@ -646,6 +648,16 @@ export default function Dashboard({
       'gas_m3',
       'gas_consumption_total',
     ])
+
+    const gasSummaryEntityId =
+      gasMeterEntity?.entity_id ||
+      gasDailyEntity?.entity_id ||
+      gasMonthlyEntity?.entity_id ||
+      gasFlowEntity?.entity_id ||
+      null
+
+    gasSummaryEntityIdRef.current = gasSummaryEntityId
+    console.log('GAS DEBUG A - Summary card entity_id:', gasSummaryEntityId)
     
     // Use sensor data if available, otherwise track locally
     let dailyUsage: number
@@ -849,6 +861,7 @@ export default function Dashboard({
         
         const now = new Date()
         let startTime: Date
+        const summaryGasEntityId = gasSummaryEntityIdRef.current
         
         // Only fetch incrementally when we already have gas samples stored.
         if (lastFetch && hasStoredGasSamples && (now.getTime() - lastFetch.getTime()) < 8 * 24 * 60 * 60 * 1000) {
@@ -881,7 +894,11 @@ export default function Dashboard({
           }
         )
         
-        const gasEntity = haEntities.find((e) => {
+        const gasEntityFromSummary = summaryGasEntityId
+          ? haEntities.find((e) => e.entity_id === summaryGasEntityId)
+          : undefined
+
+        const gasEntity = gasEntityFromSummary || haEntities.find((e) => {
           const id = e.entity_id.toLowerCase()
           const friendlyName = (e.friendly_name || '').toLowerCase()
           return (
@@ -918,6 +935,12 @@ export default function Dashboard({
         console.log('[HA History] Found power entity:', powerEntity?.entity_id)
         console.log('[HA History] Found gas entity:', gasEntity?.entity_id)
         console.log('[HA History] All gas entities available:', allGasEntities.map((e) => e.entity_id).join(', '))
+        gasHistoryEntityIdRef.current = gasEntity?.entity_id || null
+        console.log('GAS DEBUG A - Entity compare (summary vs history):', {
+          summaryEntityId: summaryGasEntityId,
+          historyEntityId: gasEntity?.entity_id || null,
+          isSameEntity: Boolean(summaryGasEntityId && gasEntity?.entity_id && summaryGasEntityId === gasEntity.entity_id),
+        })
 
         if (!powerEntity && !gasEntity && allGasEntities.length === 0) {
           console.error('[HA History] No power or gas entities found from', haEntities.length, 'entities')
@@ -951,6 +974,12 @@ export default function Dashboard({
           },
         })
 
+        console.log('GAS DEBUG C - History fetch response status:', {
+          ok: response.ok,
+          status: response.status,
+          statusText: response.statusText,
+        })
+
         if (!response.ok) {
           const errorText = await response.text()
           console.error('[HA History] Failed to fetch:', response.status, errorText)
@@ -959,6 +988,12 @@ export default function Dashboard({
 
         const result = await response.json()
         const historyData = result.entities || []
+        const rawGasData = historyData.filter((entry: any) => {
+          const entityId = String(entry?.entity_id || '').toLowerCase()
+          return entityId.includes('gas')
+        })
+
+        console.log('GAS DEBUG 1 - Raw API response:', rawGasData)
 
         console.log('[HA History] Retrieved data for', historyData.length, 'entities:', JSON.stringify(historyData.map((e: any) => ({ entity_id: e.entity_id, samples: e.history?.length || 0 }))))
 
@@ -1039,56 +1074,84 @@ export default function Dashboard({
         console.log('[Gas Debug] Found gasData?', !!gasData, 'with', gasData?.history?.length || 0, 'samples')
         
         if (gasData?.history && gasData.history.length > 0) {
-          // Sort by timestamp to ensure chronological order
-          const sortedHistory = [...gasData.history].sort((a, b) => a.timestamp - b.timestamp)
+          // Parse and normalize history records (timestamp + cumulative value)
+          const parsedHistory = (gasData.history || [])
+            .map((item: any) => {
+              const rawTimestamp = Number(item?.timestamp)
+              const normalizedTimestamp = Number.isFinite(rawTimestamp)
+                ? (rawTimestamp < 1_000_000_000_000 ? rawTimestamp * 1000 : rawTimestamp)
+                : NaN
+              const cumulativeValue = Number(item?.value)
+
+              return {
+                timestamp: normalizedTimestamp,
+                value: cumulativeValue,
+                state: item?.state,
+              }
+            })
+            .filter((item: any) => Number.isFinite(item.timestamp) && Number.isFinite(item.value))
+            .sort((a: any, b: any) => a.timestamp - b.timestamp)
+
+          console.log('GAS DEBUG 2 - Parsed history array:', parsedHistory)
           
-          console.log('[Gas Debug] First meter reading:', Number(sortedHistory[0].value), 'm³')
-          console.log('[Gas Debug] Total history entries:', sortedHistory.length)
+          if (parsedHistory.length < 2) {
+            console.warn('[Gas Debug] Parsed history has fewer than 2 points, cannot compute deltas')
+            localStorage.setItem(liveGasStorageKey, JSON.stringify([]))
+            setGasSamples([])
+            return
+          }
+
+          console.log('[Gas Debug] First meter reading:', Number(parsedHistory[0].value), 'm³')
+          console.log('[Gas Debug] Total history entries:', parsedHistory.length)
           
           // Convert meter readings to interval consumption (delta between consecutive readings)
-          const newGasSamples: GasSample[] = []
+          const deltaValues: GasSample[] = []
           
-          for (let i = 1; i < sortedHistory.length; i++) {
-            const previousReading = Number(sortedHistory[i - 1].value)
-            const currentReading = Number(sortedHistory[i].value)
-            const elapsedMs = sortedHistory[i].timestamp - sortedHistory[i - 1].timestamp
+          for (let i = 1; i < parsedHistory.length; i++) {
+            const previousReading = Number(parsedHistory[i - 1].value)
+            const currentReading = Number(parsedHistory[i].value)
+            const elapsedMs = parsedHistory[i].timestamp - parsedHistory[i - 1].timestamp
             const elapsedHours = elapsedMs / (1000 * 60 * 60)
             const delta = currentReading - previousReading
-            const rawTimestamp = Number(sortedHistory[i].timestamp)
+            const rawTimestamp = Number(parsedHistory[i].timestamp)
             const sampleTimestamp = rawTimestamp < 1_000_000_000_000 ? rawTimestamp * 1000 : rawTimestamp
             
             // Only include positive finite deltas (consumption should increase)
+            // and skip anomalies/resets.
             if (
               Number.isFinite(delta) &&
               Number.isFinite(elapsedHours) &&
               elapsedHours > 0 &&
-              delta > 0 &&
+              delta >= 0 &&
+              delta < 10 &&
               Number.isFinite(sampleTimestamp)
             ) {
-              newGasSamples.push({
+              deltaValues.push({
                 timestamp: sampleTimestamp,
                 gas: delta,
               })
             }
           }
 
-          console.log('[Gas Debug] Converted to', newGasSamples.length, 'interval samples')
-          console.log('[Gas Debug] First 5 interval consumptions:', newGasSamples.slice(0, 5).map((s) => ({ 
+          console.log('GAS DEBUG 3 - After delta calculation:', deltaValues)
+
+          console.log('[Gas Debug] Converted to', deltaValues.length, 'interval samples')
+          console.log('[Gas Debug] First 5 interval consumptions:', deltaValues.slice(0, 5).map((s) => ({ 
             ts: new Date(s.timestamp).toLocaleTimeString(), 
             consumption: s.gas 
           })))
-          console.log('[Gas Debug] Last 5 interval consumptions:', newGasSamples.slice(-5).map((s) => ({ 
+          console.log('[Gas Debug] Last 5 interval consumptions:', deltaValues.slice(-5).map((s) => ({ 
             ts: new Date(s.timestamp).toLocaleTimeString(), 
             consumption: s.gas 
           })))
 
-          const normalizedGasSamples = [...newGasSamples]
+          const normalizedGasSamples = [...deltaValues]
             .sort((a, b) => a.timestamp - b.timestamp)
           console.log('[Gas Debug] Storing', normalizedGasSamples.length, 'fresh gas samples to localStorage')
           localStorage.setItem(liveGasStorageKey, JSON.stringify(normalizedGasSamples))
           setGasSamples(normalizedGasSamples)
 
-          console.log('[HA History] Loaded', newGasSamples.length, 'gas samples (interval consumption)')
+          console.log('[HA History] Loaded', deltaValues.length, 'gas samples (interval consumption)')
         } else {
           console.warn('[Gas Debug] No gas data found - gasEntity:', gasEntity?.entity_id, 'or no history')
         }
@@ -1256,6 +1319,17 @@ export default function Dashboard({
       }))
       .filter((sample) => sample.timestamp >= selectedRange.startMs && sample.timestamp <= selectedRange.endMs)
 
+    console.log('[Gas Debug] samplesInRange:', {
+      totalSamples: gasSamples.length,
+      rangeSamples: samplesInRange.length,
+      selectedRangeStart: new Date(selectedRange.startMs).toISOString(),
+      selectedRangeEnd: new Date(selectedRange.endMs).toISOString(),
+      selectedDate: selectedChartDate,
+      timeRange,
+      gasHistoryEntityId: gasHistoryEntityIdRef.current,
+      gasSummaryEntityId: gasSummaryEntityIdRef.current,
+    })
+
     const bucketTotals = new Map<number, number>()
     samplesInRange.forEach((sample) => {
       const bucketStart = toBucketStart(sample.timestamp)
@@ -1287,16 +1361,20 @@ export default function Dashboard({
 
     if (buckets.length === 0) {
       const fallbackBucket = toBucketStart(selectedRange.startMs)
-      return [{
+      const chartData = [{
         time: formatBucketLabel(fallbackBucket),
         power: 0,
       }]
+      console.log('GAS DEBUG 4 - Final chart data:', chartData)
+      return chartData
     }
 
-    return buckets.map((bucketStart) => ({
+    const chartData = buckets.map((bucketStart) => ({
       time: formatBucketLabel(bucketStart),
       power: parseFloat((bucketTotals.get(bucketStart) || 0).toFixed(2)),
     }))
+    console.log('GAS DEBUG 4 - Final chart data:', chartData)
+    return chartData
   }, [gasSamples, selectedRange.startMs, selectedRange.endMs, timeRange])
 
   const gasSelectedPeriodTotal = useMemo(() => {
