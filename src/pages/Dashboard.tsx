@@ -1277,134 +1277,36 @@ export default function Dashboard({
   }, [powerSamples, selectedRange.endMs, selectedRange.startMs, timeRange])
 
   const gasChartData = useMemo(() => {
-    const isDayView = timeRange === 'today'
-    const bucketSizeMs = isDayView ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000
-
-    const toBucketStart = (timestamp: number) => {
-      const date = new Date(timestamp)
-      if (isDayView) {
-        date.setMinutes(0, 0, 0)
-      } else {
-        date.setHours(0, 0, 0, 0)
-      }
-      return date.getTime()
-    }
-
-    const formatBucketLabel = (timestamp: number) => {
-      if (isDayView) {
-        return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      }
-
-      return new Date(timestamp).toLocaleDateString([], { day: '2-digit', month: 'short' })
-    }
-
-    const normalizedReadings = gasReadings
+    const sortedReadings = [...gasReadings]
       .filter((reading) => Number.isFinite(reading.timestamp) && Number.isFinite(reading.value))
       .sort((a, b) => a.timestamp - b.timestamp)
 
-    const getMeterValueAtOrBefore = (timestamp: number) => {
-      let latestValue: number | null = null
+    const intervalSamples = sortedReadings
+      .slice(1)
+      .map((currentReading, index) => {
+        const previousReading = sortedReadings[index]
+        const delta = currentReading.value - previousReading.value
 
-      for (const reading of normalizedReadings) {
-        if (reading.timestamp > timestamp) {
-          break
+        if (!Number.isFinite(delta) || delta < 0 || delta > 10) {
+          return null
         }
 
-        latestValue = reading.value
-      }
-
-      return latestValue
-    }
-
-    const getMeterValueAtOrAfter = (timestamp: number) => {
-      for (const reading of normalizedReadings) {
-        if (reading.timestamp >= timestamp) {
-          return reading.value
+        return {
+          timestamp: currentReading.timestamp,
+          value: parseFloat(delta.toFixed(3)),
         }
-      }
+      })
+      .filter((sample): sample is { timestamp: number; value: number } => sample !== null)
+      .filter((sample) => sample.timestamp >= selectedRange.startMs && sample.timestamp <= selectedRange.endMs)
 
-      return null
-    }
+    const fallbackValue = timeRange === 'today'
+      ? Math.max(0, realTimeData.gasDailyUsage)
+      : Math.max(0, realTimeData.gasMonthlyUsage)
 
-    const buckets: number[] = []
-    const cursor = new Date(selectedRange.startMs)
-    const end = new Date(selectedRange.endMs)
-
-    if (isDayView) {
-      cursor.setMinutes(0, 0, 0)
-      end.setMinutes(0, 0, 0)
-
-      while (cursor.getTime() <= end.getTime()) {
-        buckets.push(cursor.getTime())
-        cursor.setHours(cursor.getHours() + 1)
-      }
-    } else {
-      cursor.setHours(0, 0, 0, 0)
-      end.setHours(0, 0, 0, 0)
-
-      while (cursor.getTime() <= end.getTime()) {
-        buckets.push(cursor.getTime())
-        cursor.setDate(cursor.getDate() + 1)
-      }
-    }
-
-    if (buckets.length === 0) {
-      const fallbackBucket = toBucketStart(selectedRange.startMs)
-      return [{
-        time: formatBucketLabel(fallbackBucket),
-        power: 0,
-      }]
-    }
-
-    const chartData = buckets.map((bucketStart) => {
-      const bucketEnd = Math.min(bucketStart + bucketSizeMs, selectedRange.endMs + 1)
-      const startValue = getMeterValueAtOrBefore(bucketStart)
-      const endValue = getMeterValueAtOrBefore(bucketEnd)
-      const usage = startValue !== null && endValue !== null
-        ? Math.max(0, endValue - startValue)
-        : 0
-
-      return {
-        time: formatBucketLabel(bucketStart),
-        power: parseFloat(usage.toFixed(2)),
-      }
-    })
-
-    const hasVisibleUsage = chartData.some((item) => item.power > 0)
-    if (hasVisibleUsage) {
-      return chartData
-    }
-
-    const resolvedRangeStart = getMeterValueAtOrBefore(selectedRange.startMs) ?? getMeterValueAtOrAfter(selectedRange.startMs)
-    const resolvedRangeEnd = getMeterValueAtOrBefore(selectedRange.endMs) ?? getMeterValueAtOrAfter(selectedRange.endMs)
-    const rangeUsageFromReadings = resolvedRangeStart !== null && resolvedRangeEnd !== null
-      ? Math.max(0, resolvedRangeEnd - resolvedRangeStart)
-      : 0
-
-    const fallbackTotal = timeRange === 'today'
-      ? Math.max(0, realTimeData.gasDailyUsage, rangeUsageFromReadings)
-      : Math.max(0, realTimeData.gasMonthlyUsage, rangeUsageFromReadings)
-
-    if (fallbackTotal <= 0) {
-      return chartData
-    }
-
-    const fallbackIndex = (() => {
-      if (timeRange !== 'today') {
-        return Math.max(0, chartData.length - 1)
-      }
-
-      const nowMs = Date.now()
-      const index = buckets.findIndex((bucketStart) => nowMs >= bucketStart && nowMs < (bucketStart + bucketSizeMs))
-      return index >= 0 ? index : Math.max(0, chartData.length - 1)
-    })()
-
-    return chartData.map((item, index) => ({
-      ...item,
-      power: index === fallbackIndex ? parseFloat(fallbackTotal.toFixed(2)) : 0,
-    }))
+    return mapSamplesToChartPoints(intervalSamples, fallbackValue)
   }, [
     gasReadings,
+    mapSamplesToChartPoints,
     realTimeData.gasDailyUsage,
     realTimeData.gasMonthlyUsage,
     selectedRange.endMs,
