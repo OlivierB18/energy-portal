@@ -1065,16 +1065,117 @@ export default function Dashboard({
         const entityData = Array.isArray(result?.entities)
           ? result.entities.find((e: { entity_id?: string }) => e.entity_id === gasEntity.entity_id)
           : null
-        const history: Array<{ timestamp?: number; change?: number }> = entityData?.history || []
+        const history: Array<{ timestamp?: number; value?: number; change?: number }> = entityData?.history || []
 
-        const stats = history
-          .map((row) => ({
-            start: Number(row?.timestamp),
-            change: typeof row?.change === 'number' ? row.change : 0,
-          }))
-          .filter((r) => Number.isFinite(r.start))
+        console.log('[Gas Chart] Raw statistics history:', history.length, 'rows')
+        if (history.length > 0) {
+          console.log('[Gas Chart] First row:', JSON.stringify(history[0]))
+          console.log('[Gas Chart] Sample change values:', history.slice(0, 5).map((r) => r.change))
+          console.log('[Gas Chart] Sample state values:', history.slice(0, 5).map((r) => r.value))
+        }
 
-        console.log('[Gas Chart] Got', stats.length, 'statistics rows')
+        // Check if change values are usable (at least one non-zero)
+        const hasUsableChange = history.some((r) => typeof r.change === 'number' && r.change > 0)
+
+        let stats: Array<{ start: number; change: number }>
+
+        if (hasUsableChange) {
+          // Use change values directly (ideal case - like HA energy dashboard)
+          console.log('[Gas Chart] Using change values from statistics')
+          stats = history
+            .map((row) => ({
+              start: Number(row?.timestamp),
+              change: typeof row?.change === 'number' ? Math.max(0, row.change) : 0,
+            }))
+            .filter((r) => Number.isFinite(r.start))
+        } else {
+          // Fallback: compute deltas from cumulative state/value
+          console.log('[Gas Chart] No usable change values, computing deltas from cumulative values')
+          const sorted = history
+            .map((row) => ({
+              start: Number(row?.timestamp),
+              value: typeof row?.value === 'number' ? row.value : NaN,
+            }))
+            .filter((r) => Number.isFinite(r.start) && Number.isFinite(r.value))
+            .sort((a, b) => a.start - b.start)
+
+          stats = sorted.slice(1).map((current, i) => {
+            const prev = sorted[i]
+            const delta = current.value - prev.value
+            return {
+              start: current.start,
+              change: Number.isFinite(delta) && delta >= 0 && delta < 50 ? delta : 0,
+            }
+          })
+        }
+
+        console.log('[Gas Chart] Final stats:', stats.length, 'rows, total:', stats.reduce((s, r) => s + r.change, 0).toFixed(3))
+
+        // If statistics returned nothing useful, try regular history API as final fallback
+        if (stats.length === 0 || stats.every((s) => s.change === 0)) {
+          console.log('[Gas Chart] Statistics empty/zero, trying regular history API fallback')
+          const historyUrl = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(startIso)}&endTime=${encodeURIComponent(endIso)}&entityIds=${encodeURIComponent(gasEntity.entity_id)}`
+          const histResponse = await fetch(historyUrl, {
+            headers: { Authorization: `Bearer ${token}` },
+          })
+
+          if (histResponse.ok) {
+            const histResult = await histResponse.json()
+            const histEntity = Array.isArray(histResult?.entities)
+              ? histResult.entities.find((e: { entity_id?: string }) => e.entity_id === gasEntity.entity_id)
+              : null
+            const histRows: Array<{ timestamp?: number; value?: number }> = histEntity?.history || []
+
+            console.log('[Gas Chart] History API fallback:', histRows.length, 'readings')
+
+            if (histRows.length >= 2) {
+              // These are cumulative readings - bucket them by hour (day view) or by day (week/month)
+              const sorted = histRows
+                .map((r) => ({
+                  ts: Number(r?.timestamp),
+                  val: typeof r?.value === 'number' ? r.value : NaN,
+                }))
+                .filter((r) => Number.isFinite(r.ts) && Number.isFinite(r.val))
+                .sort((a, b) => a.ts - b.ts)
+
+              if (sorted.length >= 2) {
+                // Determine bucket size based on period
+                const bucketMs = period === 'hour' ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000
+                const bucketStart = Math.floor(sorted[0].ts / bucketMs) * bucketMs
+                const bucketEnd = Math.ceil(sorted[sorted.length - 1].ts / bucketMs) * bucketMs
+
+                const buckets: Array<{ start: number; change: number }> = []
+                for (let t = bucketStart; t < bucketEnd; t += bucketMs) {
+                  const nextT = t + bucketMs
+                  // Find first reading at or before bucket start and last reading at or before bucket end
+                  const readingsInBucket = sorted.filter((r) => r.ts >= t && r.ts < nextT)
+                  const readingBefore = sorted.filter((r) => r.ts <= t).pop()
+                  const readingAtEnd = sorted.filter((r) => r.ts <= nextT).pop()
+
+                  if (readingBefore && readingAtEnd && readingAtEnd.val > readingBefore.val) {
+                    buckets.push({ start: t, change: readingAtEnd.val - readingBefore.val })
+                  } else if (readingsInBucket.length >= 2) {
+                    const first = readingsInBucket[0]
+                    const last = readingsInBucket[readingsInBucket.length - 1]
+                    const delta = last.val - first.val
+                    if (delta > 0 && delta < 50) {
+                      buckets.push({ start: t, change: delta })
+                    } else {
+                      buckets.push({ start: t, change: 0 })
+                    }
+                  } else {
+                    buckets.push({ start: t, change: 0 })
+                  }
+                }
+
+                if (buckets.some((b) => b.change > 0)) {
+                  stats = buckets
+                  console.log('[Gas Chart] History fallback produced', stats.length, 'buckets, total:', stats.reduce((s, r) => s + r.change, 0).toFixed(3))
+                }
+              }
+            }
+          }
+        }
 
         if (!isCancelled) {
           setGasChartStats(stats)
@@ -1118,16 +1219,38 @@ export default function Dashboard({
 
     let isCancelled = false
 
-    const parseStatsResponse = (result: { entities?: Array<{ entity_id?: string; history?: Array<{ timestamp?: number; change?: number }> }> }) => {
+    const parseStatsResponse = (result: { entities?: Array<{ entity_id?: string; history?: Array<{ timestamp?: number; value?: number; change?: number }> }> }) => {
       const entityData = Array.isArray(result?.entities)
         ? result.entities.find((e) => e.entity_id === gasEntity.entity_id)
         : null
-      return (entityData?.history || [])
+      const rows = entityData?.history || []
+      const hasChange = rows.some((r) => typeof r?.change === 'number' && r.change > 0)
+
+      if (hasChange) {
+        return rows
+          .map((row) => ({
+            start: Number(row?.timestamp),
+            change: typeof row?.change === 'number' ? Math.max(0, row.change) : 0,
+          }))
+          .filter((r) => Number.isFinite(r.start))
+      }
+
+      // Fallback: compute deltas from cumulative values
+      const sorted = rows
         .map((row) => ({
           start: Number(row?.timestamp),
-          change: typeof row?.change === 'number' ? row.change : 0,
+          value: typeof row?.value === 'number' ? row.value : NaN,
         }))
-        .filter((r) => Number.isFinite(r.start))
+        .filter((r) => Number.isFinite(r.start) && Number.isFinite(r.value))
+        .sort((a, b) => a.start - b.start)
+
+      return sorted.slice(1).map((current, i) => {
+        const delta = current.value - sorted[i].value
+        return {
+          start: current.start,
+          change: Number.isFinite(delta) && delta >= 0 && delta < 50 ? delta : 0,
+        }
+      })
     }
 
     const fetchCardStats = async () => {

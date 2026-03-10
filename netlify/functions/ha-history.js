@@ -313,6 +313,20 @@ export const handler = async (event) => {
       }
 
       const statisticsData = await statisticsResponse.json()
+
+      // Log raw HA statistics response for debugging
+      entityIdsList.forEach((entityId) => {
+        const rawRows = Array.isArray(statisticsData?.[entityId]) ? statisticsData[entityId] : []
+        console.log('[HA History] Raw statistics for', entityId, ':', rawRows.length, 'rows')
+        if (rawRows.length > 0) {
+          console.log('[HA History] First raw row keys:', Object.keys(rawRows[0]))
+          console.log('[HA History] First raw row:', JSON.stringify(rawRows[0]))
+          if (rawRows.length > 1) {
+            console.log('[HA History] Second raw row:', JSON.stringify(rawRows[1]))
+          }
+        }
+      })
+
       const formatted = formatStatisticsPayload(statisticsData, entityIdsList)
 
       return {
