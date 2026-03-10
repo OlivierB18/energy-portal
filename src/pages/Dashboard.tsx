@@ -759,7 +759,7 @@ export default function Dashboard({
   }, [haEntities, lastKnownHaEntities, pricingConfig, selectedEnvironment, gasRatePerM3, powerSamples])
 
   const livePowerStorageKey = `energy_live_power_samples_${selectedEnvironment || 'default'}`
-  const liveGasStorageKey = `energy_live_gas_samples_${selectedEnvironment || 'default'}`
+  const liveGasStorageKey = `energy_live_gas_samples_v2_${selectedEnvironment || 'default'}`
   const latestPowerRef = useRef(realTimeData.currentPower)
   const latestGasRef = useRef(realTimeData.gasChartValue)
 
@@ -791,6 +791,12 @@ export default function Dashboard({
   }, [livePowerStorageKey])
 
   useEffect(() => {
+    // Clear old gas storage key with cumulative data
+    if (selectedEnvironment) {
+      const oldGasKey = `energy_live_gas_samples_${selectedEnvironment}`
+      localStorage.removeItem(oldGasKey)
+    }
+
     try {
       const stored = localStorage.getItem(liveGasStorageKey)
       if (!stored) {
@@ -810,7 +816,7 @@ export default function Dashboard({
     } catch {
       setGasSamples([])
     }
-  }, [liveGasStorageKey])
+  }, [liveGasStorageKey, selectedEnvironment])
 
   // Fetch historical data from Home Assistant
   useEffect(() => {
