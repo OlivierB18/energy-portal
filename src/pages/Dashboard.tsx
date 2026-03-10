@@ -1048,74 +1048,58 @@ export default function Dashboard({
         const startIso = new Date(selectedRange.startMs).toISOString()
         const endIso = new Date(selectedRange.endMs).toISOString()
 
-        console.log('[Gas Chart] Fetching statistics:', { period, start: startIso, end: endIso })
+        let stats: Array<{ start: number; change: number }> = []
 
-        const url = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(startIso)}&endTime=${encodeURIComponent(endIso)}&entityIds=${encodeURIComponent(gasEntity.entity_id)}&mode=statistics&period=${period}`
-        const response = await fetch(url, {
+        // --- Attempt 1: HA statistics API (has hourly/daily change values) ---
+        console.log('[Gas Chart] Attempt 1: Statistics API', { period, start: startIso, end: endIso })
+        const statsUrl = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(startIso)}&endTime=${encodeURIComponent(endIso)}&entityIds=${encodeURIComponent(gasEntity.entity_id)}&mode=statistics&period=${period}`
+        const statsResponse = await fetch(statsUrl, {
           headers: { Authorization: `Bearer ${token}` },
         })
 
-        if (!response.ok) {
-          console.error('[Gas Chart] Statistics fetch failed:', response.status)
-          if (!isCancelled) setGasChartStats([])
-          return
-        }
+        if (statsResponse.ok) {
+          const result = await statsResponse.json()
+          const entityData = Array.isArray(result?.entities)
+            ? result.entities.find((e: { entity_id?: string }) => e.entity_id === gasEntity.entity_id)
+            : null
+          const history: Array<{ timestamp?: number; value?: number; change?: number }> = entityData?.history || []
 
-        const result = await response.json()
-        const entityData = Array.isArray(result?.entities)
-          ? result.entities.find((e: { entity_id?: string }) => e.entity_id === gasEntity.entity_id)
-          : null
-        const history: Array<{ timestamp?: number; value?: number; change?: number }> = entityData?.history || []
+          console.log('[Gas Chart] Statistics returned', history.length, 'rows')
+          if (history.length > 0) {
+            console.log('[Gas Chart] First row:', JSON.stringify(history[0]))
+          }
 
-        console.log('[Gas Chart] Raw statistics history:', history.length, 'rows')
-        if (history.length > 0) {
-          console.log('[Gas Chart] First row:', JSON.stringify(history[0]))
-          console.log('[Gas Chart] Sample change values:', history.slice(0, 5).map((r) => r.change))
-          console.log('[Gas Chart] Sample state values:', history.slice(0, 5).map((r) => r.value))
-        }
+          const hasChange = history.some((r) => typeof r.change === 'number' && r.change > 0)
 
-        // Check if change values are usable (at least one non-zero)
-        const hasUsableChange = history.some((r) => typeof r.change === 'number' && r.change > 0)
+          if (hasChange) {
+            console.log('[Gas Chart] Using change values')
+            stats = history
+              .map((row) => ({
+                start: Number(row?.timestamp),
+                change: typeof row?.change === 'number' ? Math.max(0, row.change) : 0,
+              }))
+              .filter((r) => Number.isFinite(r.start))
+          } else if (history.length >= 2) {
+            console.log('[Gas Chart] Computing deltas from cumulative values')
+            const sorted = history
+              .map((row) => ({ start: Number(row?.timestamp), value: typeof row?.value === 'number' ? row.value : NaN }))
+              .filter((r) => Number.isFinite(r.start) && Number.isFinite(r.value))
+              .sort((a, b) => a.start - b.start)
 
-        let stats: Array<{ start: number; change: number }>
-
-        if (hasUsableChange) {
-          // Use change values directly (ideal case - like HA energy dashboard)
-          console.log('[Gas Chart] Using change values from statistics')
-          stats = history
-            .map((row) => ({
-              start: Number(row?.timestamp),
-              change: typeof row?.change === 'number' ? Math.max(0, row.change) : 0,
-            }))
-            .filter((r) => Number.isFinite(r.start))
+            stats = sorted.slice(1).map((cur, i) => {
+              const delta = cur.value - sorted[i].value
+              return { start: cur.start, change: Number.isFinite(delta) && delta >= 0 && delta < 50 ? delta : 0 }
+            })
+          }
         } else {
-          // Fallback: compute deltas from cumulative state/value
-          console.log('[Gas Chart] No usable change values, computing deltas from cumulative values')
-          const sorted = history
-            .map((row) => ({
-              start: Number(row?.timestamp),
-              value: typeof row?.value === 'number' ? row.value : NaN,
-            }))
-            .filter((r) => Number.isFinite(r.start) && Number.isFinite(r.value))
-            .sort((a, b) => a.start - b.start)
-
-          stats = sorted.slice(1).map((current, i) => {
-            const prev = sorted[i]
-            const delta = current.value - prev.value
-            return {
-              start: current.start,
-              change: Number.isFinite(delta) && delta >= 0 && delta < 50 ? delta : 0,
-            }
-          })
+          console.warn('[Gas Chart] Statistics API returned', statsResponse.status, '- skipping to fallback')
         }
 
-        console.log('[Gas Chart] Final stats:', stats.length, 'rows, total:', stats.reduce((s, r) => s + r.change, 0).toFixed(3))
-
-        // If statistics returned nothing useful, try regular history API as final fallback
+        // --- Attempt 2: Regular history API (cumulative meter readings → bucket into hours/days) ---
         if (stats.length === 0 || stats.every((s) => s.change === 0)) {
-          console.log('[Gas Chart] Statistics empty/zero, trying regular history API fallback')
-          const historyUrl = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(startIso)}&endTime=${encodeURIComponent(endIso)}&entityIds=${encodeURIComponent(gasEntity.entity_id)}`
-          const histResponse = await fetch(historyUrl, {
+          console.log('[Gas Chart] Attempt 2: Regular history API')
+          const histUrl = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(startIso)}&endTime=${encodeURIComponent(endIso)}&entityIds=${encodeURIComponent(gasEntity.entity_id)}`
+          const histResponse = await fetch(histUrl, {
             headers: { Authorization: `Bearer ${token}` },
           })
 
@@ -1126,43 +1110,26 @@ export default function Dashboard({
               : null
             const histRows: Array<{ timestamp?: number; value?: number }> = histEntity?.history || []
 
-            console.log('[Gas Chart] History API fallback:', histRows.length, 'readings')
+            console.log('[Gas Chart] Regular history returned', histRows.length, 'readings')
 
             if (histRows.length >= 2) {
-              // These are cumulative readings - bucket them by hour (day view) or by day (week/month)
               const sorted = histRows
-                .map((r) => ({
-                  ts: Number(r?.timestamp),
-                  val: typeof r?.value === 'number' ? r.value : NaN,
-                }))
+                .map((r) => ({ ts: Number(r?.timestamp), val: typeof r?.value === 'number' ? r.value : NaN }))
                 .filter((r) => Number.isFinite(r.ts) && Number.isFinite(r.val))
                 .sort((a, b) => a.ts - b.ts)
 
               if (sorted.length >= 2) {
-                // Determine bucket size based on period
-                const bucketMs = period === 'hour' ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000
+                const bucketMs = period === 'hour' ? 3_600_000 : 86_400_000
                 const bucketStart = Math.floor(sorted[0].ts / bucketMs) * bucketMs
                 const bucketEnd = Math.ceil(sorted[sorted.length - 1].ts / bucketMs) * bucketMs
 
                 const buckets: Array<{ start: number; change: number }> = []
                 for (let t = bucketStart; t < bucketEnd; t += bucketMs) {
-                  const nextT = t + bucketMs
-                  // Find first reading at or before bucket start and last reading at or before bucket end
-                  const readingsInBucket = sorted.filter((r) => r.ts >= t && r.ts < nextT)
                   const readingBefore = sorted.filter((r) => r.ts <= t).pop()
-                  const readingAtEnd = sorted.filter((r) => r.ts <= nextT).pop()
+                  const readingAtEnd = sorted.filter((r) => r.ts <= t + bucketMs).pop()
 
                   if (readingBefore && readingAtEnd && readingAtEnd.val > readingBefore.val) {
-                    buckets.push({ start: t, change: readingAtEnd.val - readingBefore.val })
-                  } else if (readingsInBucket.length >= 2) {
-                    const first = readingsInBucket[0]
-                    const last = readingsInBucket[readingsInBucket.length - 1]
-                    const delta = last.val - first.val
-                    if (delta > 0 && delta < 50) {
-                      buckets.push({ start: t, change: delta })
-                    } else {
-                      buckets.push({ start: t, change: 0 })
-                    }
+                    buckets.push({ start: t, change: parseFloat((readingAtEnd.val - readingBefore.val).toFixed(3)) })
                   } else {
                     buckets.push({ start: t, change: 0 })
                   }
@@ -1170,18 +1137,22 @@ export default function Dashboard({
 
                 if (buckets.some((b) => b.change > 0)) {
                   stats = buckets
-                  console.log('[Gas Chart] History fallback produced', stats.length, 'buckets, total:', stats.reduce((s, r) => s + r.change, 0).toFixed(3))
+                  console.log('[Gas Chart] History fallback produced', stats.length, 'buckets')
                 }
               }
             }
+          } else {
+            console.warn('[Gas Chart] Regular history API returned', histResponse.status)
           }
         }
+
+        console.log('[Gas Chart] Final result:', stats.length, 'bars, total:', stats.reduce((s, r) => s + r.change, 0).toFixed(3), 'm³')
 
         if (!isCancelled) {
           setGasChartStats(stats)
         }
       } catch (error) {
-        console.error('[Gas Chart] Error fetching statistics:', error)
+        console.error('[Gas Chart] Error:', error)
         if (!isCancelled) setGasChartStats([])
       }
     }
@@ -1253,6 +1224,46 @@ export default function Dashboard({
       })
     }
 
+    const fetchStatsOrHistory = async (
+      token: string,
+      startIso: string,
+      endIso: string,
+      period: 'hour' | 'day',
+    ): Promise<Array<{ start: number; change: number }>> => {
+      // Try statistics API first
+      const statsUrl = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(startIso)}&endTime=${encodeURIComponent(endIso)}&entityIds=${encodeURIComponent(gasEntity.entity_id)}&mode=statistics&period=${period}`
+      const statsResp = await fetch(statsUrl, { headers: { Authorization: `Bearer ${token}` } })
+
+      if (statsResp.ok) {
+        const parsed = parseStatsResponse(await statsResp.json())
+        if (parsed.length > 0 && parsed.some((s) => s.change > 0)) {
+          return parsed
+        }
+      }
+
+      // Fallback: regular history API → bucket into intervals
+      const histUrl = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(startIso)}&endTime=${encodeURIComponent(endIso)}&entityIds=${encodeURIComponent(gasEntity.entity_id)}`
+      const histResp = await fetch(histUrl, { headers: { Authorization: `Bearer ${token}` } })
+
+      if (!histResp.ok) return []
+
+      const histResult = await histResp.json()
+      const histEntity = Array.isArray(histResult?.entities)
+        ? histResult.entities.find((e: { entity_id?: string }) => e.entity_id === gasEntity.entity_id)
+        : null
+      const rows: Array<{ timestamp?: number; value?: number }> = histEntity?.history || []
+      const sorted = rows
+        .map((r) => ({ ts: Number(r?.timestamp), val: typeof r?.value === 'number' ? r.value : NaN }))
+        .filter((r) => Number.isFinite(r.ts) && Number.isFinite(r.val))
+        .sort((a, b) => a.ts - b.ts)
+
+      if (sorted.length < 2) return []
+
+      // Simple total: last value minus first value
+      const total = Math.max(0, sorted[sorted.length - 1].val - sorted[0].val)
+      return [{ start: sorted[0].ts, change: total }]
+    }
+
     const fetchCardStats = async () => {
       try {
         const token = await getAuthToken()
@@ -1260,22 +1271,14 @@ export default function Dashboard({
         const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0)
         const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0)
 
-        // Fetch hourly stats for today
-        const dayUrl = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(startOfToday.toISOString())}&endTime=${encodeURIComponent(now.toISOString())}&entityIds=${encodeURIComponent(gasEntity.entity_id)}&mode=statistics&period=hour`
-        const dayResponse = await fetch(dayUrl, {
-          headers: { Authorization: `Bearer ${token}` },
-        })
-        if (dayResponse.ok && !isCancelled) {
-          setGasDayStats(parseStatsResponse(await dayResponse.json()))
-        }
+        const [dayStats, monthStats] = await Promise.all([
+          fetchStatsOrHistory(token, startOfToday.toISOString(), now.toISOString(), 'hour'),
+          fetchStatsOrHistory(token, startOfMonth.toISOString(), now.toISOString(), 'day'),
+        ])
 
-        // Fetch daily stats for this month
-        const monthUrl = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(startOfMonth.toISOString())}&endTime=${encodeURIComponent(now.toISOString())}&entityIds=${encodeURIComponent(gasEntity.entity_id)}&mode=statistics&period=day`
-        const monthResponse = await fetch(monthUrl, {
-          headers: { Authorization: `Bearer ${token}` },
-        })
-        if (monthResponse.ok && !isCancelled) {
-          setGasMonthStats(parseStatsResponse(await monthResponse.json()))
+        if (!isCancelled) {
+          setGasDayStats(dayStats)
+          setGasMonthStats(monthStats)
         }
       } catch (error) {
         console.error('[Gas Cards] Error fetching statistics:', error)
