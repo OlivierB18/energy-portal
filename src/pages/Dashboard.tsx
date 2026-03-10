@@ -799,9 +799,12 @@ export default function Dashboard({
 
       const parsed: GasSample[] = JSON.parse(stored)
       if (Array.isArray(parsed)) {
-        const cleaned = parsed.filter(
-          (sample) => typeof sample.timestamp === 'number' && typeof sample.gas === 'number',
-        )
+        const cleaned = parsed
+          .filter((sample) => typeof sample.timestamp === 'number' && typeof sample.gas === 'number')
+          .map((sample) => ({
+            timestamp: sample.timestamp < 1_000_000_000_000 ? sample.timestamp * 1000 : sample.timestamp,
+            gas: sample.gas,
+          }))
         const sorted = cleaned.sort((a, b) => a.timestamp - b.timestamp)
         console.log('[Gas Load] Loaded', sorted.length, 'gas samples from localStorage')
         if (sorted.length > 0) {
@@ -833,15 +836,27 @@ export default function Dashboard({
         const lastFetchKey = `ha_history_last_fetch_${selectedEnvironment}`
         const lastFetchStr = localStorage.getItem(lastFetchKey)
         const lastFetch = lastFetchStr ? new Date(lastFetchStr) : null
+        const storedGasRaw = localStorage.getItem(liveGasStorageKey)
+        let hasStoredGasSamples = false
+        if (storedGasRaw) {
+          try {
+            const parsedStoredGas = JSON.parse(storedGasRaw)
+            hasStoredGasSamples = Array.isArray(parsedStoredGas) && parsedStoredGas.length > 0
+          } catch {
+            hasStoredGasSamples = false
+          }
+        }
         
         const now = new Date()
         let startTime: Date
         
-        // Simple: if we have recent data, fetch incrementally. Otherwise full 7-day fetch.
-        if (lastFetch && (now.getTime() - lastFetch.getTime()) < 8 * 24 * 60 * 60 * 1000) {
+        // Only fetch incrementally when we already have gas samples stored.
+        if (lastFetch && hasStoredGasSamples && (now.getTime() - lastFetch.getTime()) < 8 * 24 * 60 * 60 * 1000) {
           startTime = new Date(lastFetch.getTime() - 60000)
+          console.log('[HA History] Incremental fetch from', startTime.toISOString())
         } else {
           startTime = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+          console.log('[HA History] Full 7-day fetch from', startTime.toISOString(), 'hasStoredGasSamples:', hasStoredGasSamples)
         }
 
         // Find power and gas entities - prioritize specific meter entities
@@ -1003,16 +1018,19 @@ export default function Dashboard({
             const elapsedMs = sortedHistory[i].timestamp - sortedHistory[i - 1].timestamp
             const elapsedHours = elapsedMs / (1000 * 60 * 60)
             const delta = currentReading - previousReading
+            const rawTimestamp = Number(sortedHistory[i].timestamp)
+            const sampleTimestamp = rawTimestamp < 1_000_000_000_000 ? rawTimestamp * 1000 : rawTimestamp
             
             // Only include positive finite deltas (consumption should increase)
             if (
               Number.isFinite(delta) &&
               Number.isFinite(elapsedHours) &&
               elapsedHours > 0 &&
-              delta > 0
+              delta > 0 &&
+              Number.isFinite(sampleTimestamp)
             ) {
               newGasSamples.push({
-                timestamp: sortedHistory[i].timestamp,
+                timestamp: sampleTimestamp,
                 gas: parseFloat(delta.toFixed(3)),
               })
             }
