@@ -799,7 +799,10 @@ export default function Dashboard({
 
       const parsed: GasSample[] = JSON.parse(stored)
       if (Array.isArray(parsed)) {
-        const sorted = parsed.sort((a, b) => a.timestamp - b.timestamp)
+        const cleaned = parsed.filter(
+          (sample) => typeof sample.timestamp === 'number' && typeof sample.gas === 'number',
+        )
+        const sorted = cleaned.sort((a, b) => a.timestamp - b.timestamp)
         console.log('[Gas Load] Loaded', sorted.length, 'gas samples from localStorage')
         if (sorted.length > 0) {
           console.log('[Gas Load] First sample:', new Date(sorted[0].timestamp).toISOString(), sorted[0].gas, 'm³')
@@ -883,27 +886,36 @@ export default function Dashboard({
           }
         )
 
+        // Collect ALL gas-related entities for fetch (as fallback)
+        const allGasEntities = haEntities.filter((e) => {
+          const id = e.entity_id.toLowerCase()
+          return !id.startsWith('binary_sensor') && id.includes('gas')
+        })
+
         console.log('[HA History] Available entities:', haEntities.map((e) => e.entity_id).join(', '))
         console.log('[HA History] Found power entity:', powerEntity?.entity_id)
         console.log('[HA History] Found gas entity:', gasEntity?.entity_id)
-        
-        // Debug: log which entities match gas pattern
-        const gasMatches = haEntities.filter((e) => {
-          const id = e.entity_id.toLowerCase()
-          return id.includes('gas')
-        }).map((e) => e.entity_id)
-        console.log('[HA History] Debug - Entities containing "gas":', gasMatches)
+        console.log('[HA History] All gas entities available:', allGasEntities.map((e) => e.entity_id).join(', '))
 
-        if (!powerEntity && !gasEntity) {
+        if (!powerEntity && !gasEntity && allGasEntities.length === 0) {
           console.error('[HA History] No power or gas entities found from', haEntities.length, 'entities')
           return
         }
 
         // Build entity list
-        const entityIds = []
+        const entityIds: string[] = []
         if (powerEntity) entityIds.push(powerEntity.entity_id)
-        if (gasEntity) entityIds.push(gasEntity.entity_id)
+        if (gasEntity && !entityIds.includes(gasEntity.entity_id)) {
+          entityIds.push(gasEntity.entity_id)
+        }
+        // Always include all gas entities, similar robust retrieval strategy as power history retrieval.
+        allGasEntities.forEach((e) => {
+          if (!entityIds.includes(e.entity_id)) {
+            entityIds.push(e.entity_id)
+          }
+        })
 
+        console.log('[HA History] Fetching entities:', entityIds.join(', '))
         console.log('[HA History] Fetching from', startTime.toISOString(), 'to', now.toISOString())
 
         const token = await getAuthToken()
@@ -954,7 +966,23 @@ export default function Dashboard({
         }
 
         // Process gas data - convert meter readings to interval consumption (delta between readings)
-        const gasData = historyData.find((h: any) => h.entity_id === gasEntity?.entity_id)
+        // Prefer matched gas entity, then fallback to any gas-like entity with history.
+        const gasHistoryCandidates = historyData.filter((h: any) => {
+          const id = String(h?.entity_id || '').toLowerCase()
+          return id.includes('gas') && Array.isArray(h?.history) && h.history.length > 1
+        })
+
+        let gasData = historyData.find((h: any) => {
+          return h.entity_id === gasEntity?.entity_id && Array.isArray(h?.history) && h.history.length > 1
+        })
+
+        if (!gasData && gasHistoryCandidates.length > 0) {
+          gasData = [...gasHistoryCandidates].sort((a: any, b: any) => {
+            return (b.history?.length || 0) - (a.history?.length || 0)
+          })[0]
+          console.log('[Gas Debug] Using fallback gas entity:', gasData?.entity_id)
+        }
+        
         console.log('[Gas Debug] Looking for gas entity:', gasEntity?.entity_id)
         console.log('[Gas Debug] Available entities in history:', historyData.map((h: any) => h.entity_id))
         console.log('[Gas Debug] Found gasData?', !!gasData, 'with', gasData?.history?.length || 0, 'samples')
@@ -963,28 +991,25 @@ export default function Dashboard({
           // Sort by timestamp to ensure chronological order
           const sortedHistory = [...gasData.history].sort((a, b) => a.timestamp - b.timestamp)
           
-          console.log('[Gas Debug] First meter reading:', parseFloat(sortedHistory[0].value), 'm³')
+          console.log('[Gas Debug] First meter reading:', Number(sortedHistory[0].value), 'm³')
           console.log('[Gas Debug] Total history entries:', sortedHistory.length)
           
           // Convert meter readings to interval consumption (delta between consecutive readings)
           const newGasSamples: GasSample[] = []
           
           for (let i = 1; i < sortedHistory.length; i++) {
-            const previousReading = parseFloat(sortedHistory[i - 1].value)
-            const currentReading = parseFloat(sortedHistory[i].value)
+            const previousReading = Number(sortedHistory[i - 1].value)
+            const currentReading = Number(sortedHistory[i].value)
             const elapsedMs = sortedHistory[i].timestamp - sortedHistory[i - 1].timestamp
             const elapsedHours = elapsedMs / (1000 * 60 * 60)
             const delta = currentReading - previousReading
-            const maxReasonableDelta = Math.max(0.2, elapsedHours * 5)
             
-            // Only include positive deltas (consumption should increase)
-            // Ignore negative values (meter resets) and unreasonably large jumps
+            // Only include positive finite deltas (consumption should increase)
             if (
               Number.isFinite(delta) &&
               Number.isFinite(elapsedHours) &&
               elapsedHours > 0 &&
-              delta > 0 &&
-              delta <= Math.max(maxReasonableDelta, 2) // Allow up to 2 m³ per hour
+              delta > 0
             ) {
               newGasSamples.push({
                 timestamp: sortedHistory[i].timestamp,

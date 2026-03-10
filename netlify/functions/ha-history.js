@@ -118,6 +118,48 @@ const verifyAuth0Token = async (token) => {
   return verified.payload
 }
 
+const parseNumericState = (rawValue) => {
+  if (typeof rawValue === 'number') {
+    return Number.isFinite(rawValue) ? rawValue : NaN
+  }
+
+  if (rawValue === null || rawValue === undefined) {
+    return NaN
+  }
+
+  const source = String(rawValue).trim()
+  if (!source) {
+    return NaN
+  }
+
+  let normalized = source.replace(/\s/g, '')
+
+  const hasComma = normalized.includes(',')
+  const hasDot = normalized.includes('.')
+
+  if (hasComma && hasDot) {
+    const lastComma = normalized.lastIndexOf(',')
+    const lastDot = normalized.lastIndexOf('.')
+
+    if (lastComma > lastDot) {
+      // Example: 16.410,123 -> 16410.123
+      normalized = normalized.replace(/\./g, '').replace(',', '.')
+    } else {
+      // Example: 16,410.123 -> 16410.123
+      normalized = normalized.replace(/,/g, '')
+    }
+  } else if (hasComma && !hasDot) {
+    // Example: 16410,123 -> 16410.123
+    normalized = normalized.replace(',', '.')
+  }
+
+  // Keep only numeric characters and decimal/sign symbols after normalization.
+  normalized = normalized.replace(/[^0-9+\-.]/g, '')
+
+  const value = Number(normalized)
+  return Number.isFinite(value) ? value : NaN
+}
+
 export const handler = async (event) => {
   try {
     const authHeader = event.headers.authorization
@@ -234,7 +276,18 @@ export const handler = async (event) => {
     // Convert HA history to our format: array of { entity_id, history: [...] }
     const formatted = historyData.map((entityHistory) => {
       const validStates = (entityHistory || [])
-        .filter((state) => state.state && !Number.isNaN(parseFloat(state.state)))
+        .map((state) => {
+          const parsedValue = parseNumericState(state?.state)
+          if (!Number.isFinite(parsedValue)) {
+            return null
+          }
+
+          return {
+            ...state,
+            parsedValue,
+          }
+        })
+        .filter(Boolean)
       
       console.log('[HA History] Entity', entityHistory[0]?.entity_id, 'has', validStates.length, 'valid states')
       
@@ -242,7 +295,7 @@ export const handler = async (event) => {
         entity_id: entityHistory[0]?.entity_id || 'unknown',
         history: validStates.map((state) => ({
           timestamp: new Date(state.last_changed).getTime(),
-          value: parseFloat(state.state),
+          value: state.parsedValue,
           state: state.state,
         })),
       }
