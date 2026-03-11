@@ -143,8 +143,6 @@ const normalizePricingConfig = (input: unknown): EnergyPricingConfig | null => {
   }
 }
 
-const sanitizeCacheSegment = (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, '_')
-
 export default function Dashboard({
   isAdmin,
   selectedEnvironmentId,
@@ -184,7 +182,7 @@ export default function Dashboard({
   const [pricingConfig, setPricingConfig] = useState<EnergyPricingConfig | null>(null)
   // Sensor connection status: 'connecting' | 'connected' | 'error'
   const [_haConnectionStatus, setHaConnectionStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
-  const { isAuthenticated, getIdTokenClaims, getAccessTokenSilently, user } = useAuth0()
+  const { isAuthenticated, getIdTokenClaims, getAccessTokenSilently } = useAuth0()
 
   const getAuthToken = useCallback(async () => {
     const audience = import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined
@@ -193,13 +191,8 @@ export default function Dashboard({
     })
   }, [getAccessTokenSilently])
 
-  const userCacheScope = useMemo(() => {
-    const rawScope = String(user?.sub || user?.email || 'anonymous')
-    return sanitizeCacheSegment(rawScope)
-  }, [user?.email, user?.sub])
-
   const haEnvironmentsCacheKey = 'ha_environments_cache_v1'
-  const haEntitiesCacheKey = `ha_entities_cache_${userCacheScope}_${selectedEnvironment || 'default'}`
+  const haEntitiesCacheKey = `ha_entities_cache_${selectedEnvironment || 'default'}`
 
   useEffect(() => {
     const loadEnvironments = async () => {
@@ -973,8 +966,8 @@ export default function Dashboard({
     }
   }, [haEntities, lastKnownHaEntities, pricingConfig, selectedEnvironment, gasRatePerM3, powerSamples])
 
-  const livePowerStorageKey = `energy_live_power_samples_${userCacheScope}_${selectedEnvironment || 'default'}`
-  const liveGasStorageKey = `energy_gas_hourly_data_${userCacheScope}_${selectedEnvironment || 'default'}`
+  const livePowerStorageKey = `energy_live_power_samples_${selectedEnvironment || 'default'}`
+  const liveGasStorageKey = `energy_gas_hourly_data_${selectedEnvironment || 'default'}`
   const latestPowerRef = useRef(realTimeData.currentPower)
 
   useEffect(() => {
@@ -1091,7 +1084,7 @@ export default function Dashboard({
         console.log('[HA History] Starting fetch for environment:', selectedEnvironment)
 
         // Get last fetch timestamp from localStorage
-        const lastFetchKey = `ha_history_last_fetch_${userCacheScope}_${selectedEnvironment}`
+        const lastFetchKey = `ha_history_last_fetch_${selectedEnvironment}`
         const lastFetchStr = localStorage.getItem(lastFetchKey)
         const lastFetch = lastFetchStr ? new Date(lastFetchStr) : null
 
@@ -1200,8 +1193,7 @@ export default function Dashboard({
     }
 
     void fetchHistoricalData()
-  }, [selectedEnvironment, isAuthenticated, haEntities, livePowerStorageKey, getAuthToken, userCacheScope])
-
+  }, [selectedEnvironment, isAuthenticated, haEntities, livePowerStorageKey, getAuthToken])
   useEffect(() => {
     if (!selectedEnvironment || visibleEnvironments.length === 0) {
       return
