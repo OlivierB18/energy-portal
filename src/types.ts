@@ -24,6 +24,8 @@ export interface HaEntity {
   domain: string
   friendly_name?: string
   unit_of_measurement?: string
+  device_class?: string
+  state_class?: string
 }
 
 export type EnergyPricingType = 'fixed' | 'dynamic'

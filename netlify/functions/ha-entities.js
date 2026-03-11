@@ -347,6 +347,8 @@ export const handler = async (event) => {
           domain: String(entity.entity_id || '').split('.')[0] || 'unknown',
           friendly_name: entity.attributes?.friendly_name || entity.entity_id,
           unit_of_measurement: entity.attributes?.unit_of_measurement,
+          device_class: entity.attributes?.device_class,
+          state_class: entity.attributes?.state_class,
         }))
       : []
 

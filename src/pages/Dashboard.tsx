@@ -428,6 +428,8 @@ export default function Dashboard({
           domain: entity.domain,
           friendly_name: entity.friendly_name,
           unit_of_measurement: entity.unit_of_measurement,
+          device_class: entity.device_class,
+          state_class: entity.state_class,
         }))
 
       if (normalized.length > 0) {
@@ -630,6 +632,18 @@ export default function Dashboard({
       })
     }
 
+    const isPowerUnit = (unit: string | undefined) => {
+      const normalizedUnit = String(unit || '').trim().toLowerCase()
+      return (
+        normalizedUnit === 'w' ||
+        normalizedUnit === 'kw' ||
+        normalizedUnit === 'watt' ||
+        normalizedUnit === 'kilowatt' ||
+        normalizedUnit === 'va' ||
+        normalizedUnit === 'kva'
+      )
+    }
+
     const findPowerEntity = (): HaEntity | undefined => {
       const powerKeywords = [
         'current_power',
@@ -648,7 +662,6 @@ export default function Dashboard({
       const excludedKeywords = [
         'today',
         'daily',
-        'day',
         'month',
         'monthly',
         'total',
@@ -669,17 +682,31 @@ export default function Dashboard({
         return !excludedKeywords.some((keyword) => searchable.includes(keyword))
       })
 
+      const deviceClassMatch = candidates.find((entity) => {
+        const deviceClass = String(entity.device_class || '').toLowerCase()
+        return deviceClass === 'power' && Number.isFinite(parseNumericValue(entity.state))
+      })
+      if (deviceClassMatch) {
+        return deviceClassMatch
+      }
+
       const keywordMatch = candidates.find((entity) => {
         const searchable = toSearchable(entity)
-        return powerKeywords.some((keyword) => searchable.includes(keyword))
+        return (
+          powerKeywords.some((keyword) => searchable.includes(keyword)) &&
+          Number.isFinite(parseNumericValue(entity.state))
+        )
       })
       if (keywordMatch) {
         return keywordMatch
       }
 
-      return candidates.find((entity) => {
-        const unit = String(entity.unit_of_measurement || '').trim().toLowerCase()
-        return unit === 'w' || unit === 'kw' || unit === 'watt' || unit === 'kilowatt'
+      return entities.find((entity) => {
+        if (entity.domain !== 'sensor') {
+          return false
+        }
+
+        return isPowerUnit(entity.unit_of_measurement) && Number.isFinite(parseNumericValue(entity.state))
       })
     }
 
@@ -693,6 +720,39 @@ export default function Dashboard({
       }
       // Backward-compatible fallback for sensors without units.
       return rawValue > 100 ? rawValue / 1000 : rawValue
+    }
+
+    const derivePowerFromEnergyMeter = (meterTotalKwh: number): number => {
+      if (!Number.isFinite(meterTotalKwh)) {
+        return 0
+      }
+
+      const keys = {
+        total: `energy_meter_last_total_${environmentKey}`,
+        ts: `energy_meter_last_ts_${environmentKey}`,
+      }
+
+      const now = Date.now()
+      const previousTotal = parseFloat(localStorage.getItem(keys.total) || '')
+      const previousTs = parseInt(localStorage.getItem(keys.ts) || '', 10)
+
+      localStorage.setItem(keys.total, meterTotalKwh.toString())
+      localStorage.setItem(keys.ts, now.toString())
+
+      if (!Number.isFinite(previousTotal) || !Number.isFinite(previousTs)) {
+        return 0
+      }
+
+      const deltaKwh = meterTotalKwh - previousTotal
+      const deltaMs = now - previousTs
+
+      if (deltaKwh <= 0 || deltaMs <= 0 || deltaMs > 30 * 60 * 1000) {
+        return 0
+      }
+
+      const hours = deltaMs / (1000 * 60 * 60)
+      const derivedKw = deltaKwh / hours
+      return Number.isFinite(derivedKw) && derivedKw > 0 ? derivedKw : 0
     }
 
     // Helper function to track energy usage locally when no sensor available
@@ -893,6 +953,10 @@ export default function Dashboard({
       ['energy_total', 'total_energy', 'total_consumption', 'kwh_total', 'consumption_total'],
       ['gas', 'price', 'cost', 'tariff'],
     )
+
+    if (currentPower <= 0 && totalEnergyEntity) {
+      currentPower = derivePowerFromEnergyMeter(parseValue(totalEnergyEntity.state))
+    }
 
     // eslint-disable-next-line no-console
     console.log(
