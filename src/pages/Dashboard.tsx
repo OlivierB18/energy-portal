@@ -182,7 +182,7 @@ export default function Dashboard({
   const [pricingConfig, setPricingConfig] = useState<EnergyPricingConfig | null>(null)
   // Sensor connection status: 'connecting' | 'connected' | 'error'
   const [_haConnectionStatus, setHaConnectionStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
-  const { isAuthenticated, getIdTokenClaims, getAccessTokenSilently } = useAuth0()
+  const { isAuthenticated, getIdTokenClaims, getAccessTokenSilently, user } = useAuth0()
 
   const getAuthToken = useCallback(async () => {
     const audience = import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined
@@ -192,7 +192,11 @@ export default function Dashboard({
   }, [getAccessTokenSilently])
 
   const haEnvironmentsCacheKey = 'ha_environments_cache_v1'
-  const haEntitiesCacheKey = `ha_entities_cache_${selectedEnvironment || 'default'}`
+  const userCacheScope = useMemo(() => {
+    const source = user?.sub || user?.email || 'anonymous'
+    return String(source).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80)
+  }, [user?.email, user?.sub])
+  const haEntitiesCacheKey = `ha_entities_cache_${selectedEnvironment || 'default'}_${userCacheScope}`
 
   useEffect(() => {
     const loadEnvironments = async () => {

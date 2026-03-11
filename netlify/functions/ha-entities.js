@@ -162,20 +162,24 @@ const getUserInfoEmail = async (domain, token) => {
 }
 
 const getUserEmailFromManagement = async (domain, token, userId) => {
-  const response = await fetch(
-    `https://${domain}/api/v2/users/${encodeURIComponent(userId)}?fields=email&include_fields=true`,
-    { headers: { Authorization: `Bearer ${token}` } },
-  )
-          console.log('[HA-ENTITIES] Failed to fetch user metadata, status:', response.status);
+  try {
+    const response = await fetch(
+      `https://${domain}/api/v2/users/${encodeURIComponent(userId)}?fields=email&include_fields=true`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    )
 
-  if (!response.ok) {
+    if (!response.ok) {
+      console.log('[HA-ENTITIES] Failed to fetch user email from management, status:', response.status)
+      return ''
+    }
+
+    const data = await response.json()
+    return typeof data.email === 'string' ? data.email.toLowerCase() : ''
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    console.log('[HA-ENTITIES] Error fetching user email from management:', message)
     return ''
-        console.log('[HA-ENTITIES] Fetched user metadata, user_metadata exists:', !!userData.user_metadata);
   }
-
-        console.log('[HA-ENTITIES] Error fetching user metadata:', error.message);
-  const data = await response.json()
-  return typeof data.email === 'string' ? data.email.toLowerCase() : ''
 }
 
 const getAdminAllowlist = () =>
@@ -302,6 +306,9 @@ export const handler = async (event) => {
           if (userResponse.ok) {
             const userData = await userResponse.json()
             userMetadata = userData.user_metadata || null
+            console.log('[HA-ENTITIES] Fetched user metadata, has user_metadata:', !!userMetadata)
+          } else {
+            console.log('[HA-ENTITIES] Failed to fetch user metadata, status:', userResponse.status)
           }
         } catch (userMetadataError) {
           console.warn('Failed to fetch user metadata:', userMetadataError instanceof Error ? userMetadataError.message : userMetadataError)
@@ -358,19 +365,19 @@ export const handler = async (event) => {
     if (!isAdmin) {
       // Check for user-specific sensor visibility only
       const userVisibleIds = getUserVisibleEntityIds(userMetadata, environmentId)
-        console.log('[HA-ENTITIES] Non-admin user, userVisibleIds:', userVisibleIds ? userVisibleIds.length : 'null')
+      console.log('[HA-ENTITIES] Non-admin user, userVisibleIds:', userVisibleIds ? userVisibleIds.length : 'null')
       
       if (userVisibleIds !== null && userVisibleIds.length > 0) {
         // User has user-specific sensor config - use it
         const allowedSet = new Set(userVisibleIds.map((entityId) => String(entityId)))
         const beforeFilterCount = entities.length
         entities = entities.filter((entity) => allowedSet.has(entity.entity_id))
-          console.log('[HA-ENTITIES] Applied user-specific visibility filter:', entities.length, 'of', beforeFilterCount, 'entities')
+        console.log('[HA-ENTITIES] Applied user-specific visibility filter:', entities.length, 'of', beforeFilterCount, 'entities')
       } else {
         // No user-specific config OR empty list - hide all entities by default
         const beforeFilterCount = entities.length
         entities = []
-          console.log('[HA-ENTITIES] No user-specific sensor config - hiding all entities. Was', beforeFilterCount, 'entities')
+        console.log('[HA-ENTITIES] No user-specific sensor config - hiding all entities. Was', beforeFilterCount, 'entities')
       }
     }
 

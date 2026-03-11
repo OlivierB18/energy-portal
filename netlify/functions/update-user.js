@@ -27,11 +27,9 @@ export const handler = async (event) => {
     const { payload } = await jwtVerify(token, jwks, {
       issuer: `https://${domain}/`,
     })
-    const fallbackEmail = getEmailFromPayload(payload)
-      ? ''
-      : await getUserInfoEmail(domain, token)
 
-    if (!isAdminFromClaims(payload, rolesClaim, fallbackEmail)) {
+    const isAdmin = await verifyAdmin(domain, token, payload, rolesClaim)
+    if (!isAdmin) {
       return { statusCode: 403, body: JSON.stringify({ error: 'Admin only' }) }
     }
 
@@ -127,20 +125,87 @@ const getUserInfoEmail = async (domain, token) => {
   return typeof data.email === 'string' ? data.email.toLowerCase() : ''
 }
 
-const isAdminFromClaims = (payload, rolesClaim, fallbackEmail = '') => {
+const getUserEmailFromManagement = async (domain, token, userId) => {
+  if (!userId) {
+    return ''
+  }
+
+  const response = await fetch(
+    `https://${domain}/api/v2/users/${encodeURIComponent(userId)}?fields=email&include_fields=true`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  )
+
+  if (!response.ok) {
+    return ''
+  }
+
+  const data = await response.json()
+  return typeof data.email === 'string' ? data.email.toLowerCase() : ''
+}
+
+const getAdminAllowlist = () =>
+  (process.env.ADMIN_EMAILS || process.env.VITE_ADMIN_EMAILS || 'olivier@inside-out.tech')
+    .split(',')
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean)
+
+const getForceEmail = () => (process.env.ADMIN_FORCE_EMAIL || '').trim().toLowerCase()
+
+const isEmailAllowed = (email, allowlist, forceEmail) => {
+  if (!email) {
+    return false
+  }
+
+  if (forceEmail && email === forceEmail) {
+    return true
+  }
+
+  return allowlist.includes(email)
+}
+
+const isAdminFromClaims = (payload, rolesClaim) => {
   const rolesValue = payload[rolesClaim]
   const roles = Array.isArray(rolesValue)
     ? rolesValue
     : typeof rolesValue === 'string'
       ? [rolesValue]
       : []
-  const allowlist = (process.env.ADMIN_EMAILS || process.env.VITE_ADMIN_EMAILS || 'olivier@inside-out.tech')
-    .split(',')
-    .map((email) => email.trim().toLowerCase())
-    .filter(Boolean)
-  const email = getEmailFromPayload(payload) || fallbackEmail
-  const isAllowedEmail = email.length > 0 && allowlist.includes(email)
-  return roles.includes('admin') || isAllowedEmail
+  return roles.includes('admin')
+}
+
+const verifyAdmin = async (domain, token, payload, rolesClaim) => {
+  const allowlist = getAdminAllowlist()
+  const forceEmail = getForceEmail()
+
+  const emailFromPayload = getEmailFromPayload(payload)
+  if (isEmailAllowed(emailFromPayload, allowlist, forceEmail)) {
+    return true
+  }
+
+  const emailFromUserInfo = emailFromPayload ? '' : await getUserInfoEmail(domain, token)
+  if (isEmailAllowed(emailFromUserInfo, allowlist, forceEmail)) {
+    return true
+  }
+
+  if (isAdminFromClaims(payload, rolesClaim)) {
+    return true
+  }
+
+  try {
+    const managementToken = await getManagementToken(domain)
+    const emailFromManagement = await getUserEmailFromManagement(domain, managementToken, payload.sub)
+    if (isEmailAllowed(emailFromManagement, allowlist, forceEmail)) {
+      return true
+    }
+  } catch {
+    // Ignore management fallback errors and continue normal deny path.
+  }
+
+  if ((process.env.ADMIN_FAIL_OPEN || '').toLowerCase() === 'true') {
+    return true
+  }
+
+  return false
 }
 
 const managementTokenCache = { token: null, expiresAt: 0 }

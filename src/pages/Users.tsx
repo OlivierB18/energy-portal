@@ -35,7 +35,6 @@ export default function Users({ isAdmin, onOpenOverview, onOpenDashboard, onLogo
   const [inviteEnvironments, setInviteEnvironments] = useState<string[]>([])
   const [inviteLink, setInviteLink] = useState<string | null>(null)
   const [isInviting, setIsInviting] = useState(false)
-  const [savingUserId, setSavingUserId] = useState<string | null>(null)
   const [resettingUserId, setResettingUserId] = useState<string | null>(null)
   const [environmentOptions, setEnvironmentOptions] = useState<EnvironmentOption[]>([])
   const [envError, setEnvError] = useState<string | null>(null)
@@ -64,7 +63,8 @@ export default function Users({ isAdmin, onOpenOverview, onOpenDashboard, onLogo
         })
 
         if (!response.ok) {
-          throw new Error('Unable to load users')
+          const data = await response.json().catch(() => null)
+          throw new Error(data?.error || `Unable to load users (${response.status})`)
         }
 
         const data = await response.json()
@@ -170,43 +170,6 @@ export default function Users({ isAdmin, onOpenOverview, onOpenDashboard, onLogo
       setError(err instanceof Error ? err.message : 'Unable to create user')
     } finally {
       setIsInviting(false)
-    }
-  }
-
-  const updateUserEnvironments = async (userId: string, environmentIds: string[]) => {
-    setError(null)
-    setSavingUserId(userId)
-
-    try {
-      const token = await getAuthToken()
-      const response = await fetch('/.netlify/functions/update-user', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ userId, environmentIds }),
-      })
-
-      if (!response.ok) {
-        const data = await response.json().catch(() => null)
-        throw new Error(data?.error || 'Unable to update user environments')
-      }
-
-      const data = await response.json()
-      const updatedEnvIds = Array.isArray(data?.user?.environmentIds)
-        ? data.user.environmentIds
-        : environmentIds
-
-      setUsers((prev) =>
-        prev.map((user) =>
-          user.user_id === userId ? { ...user, environmentIds: updatedEnvIds } : user,
-        ),
-      )
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to update user environments')
-    } finally {
-      setSavingUserId(null)
     }
   }
 
@@ -517,7 +480,8 @@ export default function Users({ isAdmin, onOpenOverview, onOpenDashboard, onLogo
                 })
 
                 if (!response.ok) {
-                  throw new Error('Unable to load users')
+                  const data = await response.json().catch(() => null)
+                  throw new Error(data?.error || `Unable to load users (${response.status})`)
                 }
 
                 const data = await response.json()
