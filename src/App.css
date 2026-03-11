@@ -1,6 +1,19 @@
 #root {
-  max-width: 1280px;
+  width: min(100%, 1280px);
   margin: 0 auto;
-  padding: 2rem;
-  text-align: center;
+  padding: clamp(0.75rem, 2.5vw, 1.25rem);
+  text-align: left;
+  overflow-x: hidden;
+}
+
+@media (min-width: 600px) {
+  #root {
+    padding: clamp(1rem, 2vw, 1.75rem);
+  }
+}
+
+@media (min-width: 980px) {
+  #root {
+    padding: 2rem;
+  }
 }

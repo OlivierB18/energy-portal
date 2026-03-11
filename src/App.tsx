@@ -251,7 +251,7 @@ function App() {
       {isAdmin && currentView === 'users' && <Users isAdmin={isAdmin} />}
 
       {isAuthenticated && (
-        <div className="fixed bottom-6 left-6 z-40 bg-light-2 bg-opacity-30 text-light-2 rounded-xl px-4 py-3 backdrop-blur-sm shadow-lg max-w-xs">
+        <div className="user-session-badge fixed bottom-6 left-6 z-40 bg-light-2 bg-opacity-30 text-light-2 rounded-xl px-4 py-3 backdrop-blur-sm shadow-lg max-w-xs">
           <div className="text-xs uppercase tracking-wide opacity-80">Logged in as</div>
           <div className="text-sm font-medium truncate">{user?.name || user?.email || 'Unknown user'}</div>
           <div className="mt-3 text-xs uppercase tracking-wide opacity-80">Environments</div>
@@ -278,7 +278,7 @@ function App() {
       )}
 
       {/* Simple Navigation */}
-      <div className="fixed bottom-6 right-6 flex gap-2">
+      <div className="app-floating-nav fixed bottom-6 right-6 flex gap-2">
         {isAdmin && (
           <button
             onClick={() => setCurrentView('overview')}

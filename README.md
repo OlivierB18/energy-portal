@@ -38,6 +38,13 @@ npm install
 npm run dev
 ```
 
+This starts Netlify Dev (frontend + `/.netlify/functions/*`).
+
+If you only need the Vite UI server, use:
+```bash
+npm run dev:vite
+```
+
 3. Open your browser and go to `http://localhost:5173`
 
 ### Building for Production
