@@ -196,19 +196,6 @@ const isEmailAllowed = (email, allowlist, forceEmail) => {
   return allowlist.includes(email)
 }
 
-const isAdminFromClaims = (payload, rolesClaim, email = '') => {
-  const rolesValue = payload[rolesClaim]
-  const roles = Array.isArray(rolesValue)
-    ? rolesValue
-    : typeof rolesValue === 'string'
-      ? [rolesValue]
-      : []
-  const allowlist = getAdminAllowlist()
-  const forceEmail = getForceEmail()
-  const isAllowedEmail = email.length > 0 && allowlist.includes(email)
-  return roles.includes('admin') || isAllowedEmail
-}
-
 const verifyAuth = async (event) => {
   const authHeader = event.headers.authorization || event.headers.Authorization
   if (!authHeader?.startsWith('Bearer ')) {
@@ -217,7 +204,6 @@ const verifyAuth = async (event) => {
 
   const token = authHeader.replace('Bearer ', '')
   const domain = getEnv('AUTH0_DOMAIN')
-  const rolesClaim = process.env.AUTH0_ROLES_CLAIM || 'https://brouwer-ems/roles'
 
   const jwks = createRemoteJWKSet(new URL(`https://${domain}/.well-known/jwks.json`))
   const { payload } = await jwtVerify(token, jwks, { issuer: `https://${domain}/` })
@@ -227,51 +213,51 @@ const verifyAuth = async (event) => {
   const debugMode = (process.env.DEBUG_ADMIN || '').toLowerCase() === 'true'
   const debug = []
 
-  const emailFromPayload = getEmailFromPayload(payload)
-  if (emailFromPayload) debug.push({ source: 'id_token', email: emailFromPayload })
-  if (isEmailAllowed(emailFromPayload, allowlist, forceEmail)) {
-    if (debugMode) debug.push({ result: 'allowed_by_id_token', allowlist, forceEmail })
-    return { payload, isAdmin: true, debug: debugMode ? debug : undefined }
+  let resolvedEmail = getEmailFromPayload(payload)
+  if (resolvedEmail) {
+    debug.push({ source: 'id_token', email: resolvedEmail })
   }
 
-  const emailFromUserInfo = emailFromPayload ? '' : await getUserInfoEmail(domain, token)
-  if (emailFromUserInfo) debug.push({ source: 'userinfo', email: emailFromUserInfo })
-  if (isEmailAllowed(emailFromUserInfo, allowlist, forceEmail)) {
-    if (debugMode) debug.push({ result: 'allowed_by_userinfo', allowlist, forceEmail })
-    return { payload, isAdmin: true, debug: debugMode ? debug : undefined }
-  }
-
-  const initialEmail = emailFromPayload || emailFromUserInfo
-  const initialAdmin = isAdminFromClaims(payload, rolesClaim, initialEmail)
-  if (initialAdmin) {
-    if (debugMode) debug.push({ result: 'allowed_by_roles', roles: payload[rolesClaim] })
-    return { payload, isAdmin: true, debug: debugMode ? debug : undefined }
-  }
-
-  try {
-    const managementToken = await getManagementToken(domain)
-    const emailFromManagement = await getUserEmailFromManagement(domain, managementToken, payload.sub)
-    if (emailFromManagement) debug.push({ source: 'management', email: emailFromManagement })
-    if (isEmailAllowed(emailFromManagement, allowlist, forceEmail)) {
-      if (debugMode) debug.push({ result: 'allowed_by_management', allowlist, forceEmail })
-      return { payload, isAdmin: true, debug: debugMode ? debug : undefined }
+  if (!resolvedEmail) {
+    const emailFromUserInfo = await getUserInfoEmail(domain, token)
+    if (emailFromUserInfo) {
+      resolvedEmail = emailFromUserInfo
+      debug.push({ source: 'userinfo', email: emailFromUserInfo })
     }
-    const isAdmin = isAdminFromClaims(payload, rolesClaim, emailFromManagement)
-    if (isAdmin) {
-      if (debugMode) debug.push({ result: 'allowed_by_management_roles', roles: payload[rolesClaim] })
-      return { payload, isAdmin: true, debug: debugMode ? debug : undefined }
+  }
+
+  if (!resolvedEmail) {
+    try {
+      const managementToken = await getManagementToken(domain)
+      const emailFromManagement = await getUserEmailFromManagement(domain, managementToken, payload.sub)
+      if (emailFromManagement) {
+        resolvedEmail = emailFromManagement
+        debug.push({ source: 'management', email: emailFromManagement })
+      }
+    } catch (error) {
+      if (debugMode) {
+        debug.push({ result: 'management_fetch_failed', message: error?.message })
+      }
     }
-  } catch (error) {
-    if (debugMode) debug.push({ result: 'management_fetch_failed', message: error?.message })
   }
 
-  if ((process.env.ADMIN_FAIL_OPEN || '').toLowerCase() === 'true') {
-    if (debugMode) debug.push({ result: 'fail_open' })
-    return { payload, isAdmin: true, debug: debugMode ? debug : undefined }
+  const isAdmin = isEmailAllowed(resolvedEmail, allowlist, forceEmail)
+
+  if (debugMode) {
+    debug.push({
+      result: isAdmin ? 'allowed_by_email_allowlist' : 'denied',
+      resolvedEmail,
+      allowlist,
+      forceEmail,
+    })
   }
 
-  if (debugMode) debug.push({ result: 'denied', allowlist, forceEmail, roles: payload[rolesClaim] })
-  return { payload, isAdmin: false, debug: debugMode ? debug : undefined }
+  return {
+    payload,
+    isAdmin,
+    resolvedEmail,
+    debug: debugMode ? debug : undefined,
+  }
 }
 
 export const handler = async (event) => {
@@ -286,7 +272,8 @@ export const handler = async (event) => {
       return { statusCode: 400, body: JSON.stringify({ error: 'Missing environmentId' }) }
     }
 
-    const { isAdmin, payload } = await verifyAuth(event)
+    const { isAdmin, payload, resolvedEmail } = await verifyAuth(event)
+    console.log('[HA-ENTITIES] Auth resolved. isAdmin:', isAdmin, 'email:', resolvedEmail || 'unknown')
 
     const domain = getEnv('AUTH0_DOMAIN')
 
