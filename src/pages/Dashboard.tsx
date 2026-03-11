@@ -1423,7 +1423,7 @@ export default function Dashboard({
 
   return (
     <div className="app-shell min-h-screen p-4 md:p-8">
-      <div className="max-w-6xl mx-auto">
+      <div className="max-w-7xl mx-auto">
         {/* Header with Environment Selector */}
         <div className="mb-8">
           <div className="flex items-center justify-between mb-4">
@@ -1436,28 +1436,6 @@ export default function Dashboard({
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <Settings className="w-5 h-5 text-light-2" />
-              <select
-                value={selectedEnvironment}
-                onChange={(e) => {
-                  const nextId = e.target.value
-                  setSelectedEnvironment(nextId)
-                  onEnvironmentChange?.(nextId)
-                }}
-                disabled={visibleEnvironments.length === 0}
-                className="bg-light-2 bg-opacity-20 text-light-2 border border-light-2 border-opacity-30 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-brand-2"
-              >
-                {visibleEnvironments.length === 0 && (
-                  <option value="" className="bg-dark-1 text-light-2">
-                    No environments
-                  </option>
-                )}
-                {visibleEnvironments.map((env) => (
-                  <option key={env.id} value={env.id} className="bg-dark-1 text-light-2">
-                    {env.name}
-                  </option>
-                ))}
-              </select>
               <div className="relative settings-dropdown-container">
                 <button
                   onClick={() => setShowSettingsDropdown(!showSettingsDropdown)}
@@ -1467,7 +1445,31 @@ export default function Dashboard({
                   <Settings className="w-5 h-5" />
                 </button>
                 {showSettingsDropdown && (
-                  <div className="absolute right-0 mt-2 w-56 bg-dark-1 border border-light-2 border-opacity-30 rounded-lg shadow-xl z-50">
+                  <div className="absolute right-0 mt-2 w-72 bg-dark-1 border border-light-2 border-opacity-30 rounded-lg shadow-xl z-50">
+                    <div className="px-4 pt-3 pb-2 border-b border-light-2 border-opacity-10">
+                      <label className="block text-xs font-medium uppercase tracking-wide text-light-1">Environment</label>
+                      <select
+                        value={selectedEnvironment}
+                        onChange={(e) => {
+                          const nextId = e.target.value
+                          setSelectedEnvironment(nextId)
+                          onEnvironmentChange?.(nextId)
+                        }}
+                        disabled={visibleEnvironments.length === 0}
+                        className="mt-2 w-full bg-light-2 bg-opacity-20 text-light-2 border border-light-2 border-opacity-30 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-2"
+                      >
+                        {visibleEnvironments.length === 0 && (
+                          <option value="" className="bg-dark-1 text-light-2">
+                            No environments
+                          </option>
+                        )}
+                        {visibleEnvironments.map((env) => (
+                          <option key={env.id} value={env.id} className="bg-dark-1 text-light-2">
+                            {env.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                     <div className="py-1">
                       {isAdmin && onOpenOverview && (
                         <button
@@ -1676,26 +1678,26 @@ export default function Dashboard({
         {/* Chart Section - Electricity and Gas charts */}
         <div className="space-y-8">
           {/* Electricity Chart */}
-          <div className="glass-panel rounded-3xl shadow-2xl p-8">
+          <div className="glass-panel rounded-3xl shadow-2xl p-4 sm:p-6 md:p-8">
             <h2 className="text-2xl font-heavy text-dark-1 mb-6 flex items-center gap-2">
               <Clock className="w-6 h-6 text-brand-2" />
-              Electricity Consumption Chart
+              Electricity Chart
             </h2>
             <EnergyChart
               data={chartData}
               timeRange={timeRange}
               unit="kW"
-              seriesLabel="Electricity consumption"
+              seriesLabel="Electricity chart"
               rangeLabel={selectedRange.label}
             />
           </div>
 
           {/* Gas Chart */}
-          <div className="glass-panel rounded-3xl shadow-2xl p-8">
+          <div className="glass-panel rounded-3xl shadow-2xl p-4 sm:p-6 md:p-8">
             <div className="mb-6 flex flex-col gap-4">
               <h2 className="text-2xl font-heavy text-dark-1 flex items-center gap-2">
                 <Flame className="w-6 h-6 text-brand-2" />
-                Gas Consumption Chart
+                Gas Chart
               </h2>
               <div className="glass-card rounded-xl px-4 py-3">
                 <p className="text-light-1 text-xs font-medium uppercase">{gasSelectedPeriodLabel}</p>
@@ -1706,7 +1708,7 @@ export default function Dashboard({
               data={gasChartData}
               timeRange={timeRange}
               unit="m³"
-              seriesLabel="Gas consumption"
+              seriesLabel="Gas chart"
               rangeLabel={selectedRange.label}
               chartType="bar"
             />

@@ -9,29 +9,52 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from 'recharts'
+import { useEffect, useMemo, useState } from 'react'
+
+const sampleChartData = <T,>(points: T[], maxPoints: number): T[] => {
+  if (points.length <= maxPoints || maxPoints < 2) {
+    return points
+  }
+
+  const result: T[] = []
+  const step = (points.length - 1) / (maxPoints - 1)
+  let previousIndex = -1
+
+  for (let i = 0; i < maxPoints; i += 1) {
+    const index = Math.round(i * step)
+    if (index !== previousIndex && points[index] !== undefined) {
+      result.push(points[index])
+      previousIndex = index
+    }
+  }
+
+  const lastPoint = points[points.length - 1]
+  if (result[result.length - 1] !== lastPoint) {
+    result.push(lastPoint)
+  }
+
+  return result
+}
 
 // Custom tick component for multiline labels (handles "time\ndate" format)
 function CustomTick(props: any) {
   const { x, y, payload } = props
   const label = payload?.value || ''
-  
-  // Split on newline
-  const lines = label.split('\n')
+  const lines = String(label).split('\n').slice(0, 2)
+  const tickY = typeof y === 'number' ? y + 8 : y
   
   if (lines.length === 1) {
-    // Single line - use default rendering
     return (
-      <text x={x} y={y} textAnchor="end" fill="rgb(234, 233, 229)" fontSize="0.875rem">
+      <text x={x} y={tickY} textAnchor="middle" fill="rgb(234, 233, 229)" fontSize="0.78rem">
         {label}
       </text>
     )
   }
-  
-  // Multiple lines - render each on separate y position
+
   return (
-    <text x={x} textAnchor="end" fill="rgb(234, 233, 229)" fontSize="0.875rem">
+    <text x={x} y={tickY} textAnchor="middle" fill="rgb(234, 233, 229)" fontSize="0.76rem">
       {lines.map((line: string, index: number) => (
-        <tspan key={index} x={x} dy={index === 0 ? 0 : '1.2em'}>
+        <tspan key={index} x={x} dy={index === 0 ? 0 : '1.1em'}>
           {line}
         </tspan>
       ))}
@@ -59,11 +82,60 @@ export default function EnergyChart({
   rangeLabel,
   chartType = 'line',
 }: EnergyChartProps) {
+  const [isMobile, setIsMobile] = useState(() =>
+    typeof window !== 'undefined' ? window.innerWidth < 640 : false,
+  )
+
+  useEffect(() => {
+    const updateViewport = () => {
+      setIsMobile(window.innerWidth < 640)
+    }
+
+    updateViewport()
+    window.addEventListener('resize', updateViewport)
+    return () => window.removeEventListener('resize', updateViewport)
+  }, [])
+
   const decimals = 2
+  const targetPointCount = useMemo(() => {
+    if (chartType === 'bar') {
+      if (timeRange === 'month') {
+        return isMobile ? 24 : 36
+      }
+      if (timeRange === 'week') {
+        return isMobile ? 20 : 30
+      }
+      return isMobile ? 16 : 24
+    }
+
+    if (timeRange === 'month') {
+      return isMobile ? 32 : 52
+    }
+    if (timeRange === 'week') {
+      return isMobile ? 28 : 44
+    }
+    return isMobile ? 24 : 36
+  }, [chartType, isMobile, timeRange])
+
+  const displayData = useMemo(
+    () => sampleChartData(data, targetPointCount),
+    [data, targetPointCount],
+  )
+
+  const xTickInterval = useMemo(() => {
+    if (displayData.length <= 7) {
+      return 0
+    }
+
+    const targetTickCount = isMobile ? 3 : 6
+    return Math.max(1, Math.floor(displayData.length / targetTickCount))
+  }, [displayData.length, isMobile])
+
+  const chartHeight = isMobile ? 360 : 430
 
   const commonAxisProps = {
-    stroke: "rgb(234, 233, 229)",
-    style: { fontSize: '0.875rem' },
+    stroke: 'rgb(234, 233, 229)',
+    style: { fontSize: isMobile ? '0.72rem' : '0.84rem' },
   }
 
   const commonTooltipProps = {
@@ -78,10 +150,14 @@ export default function EnergyChart({
   }
 
   return (
-    <div className="w-full" style={{ height: '380px' }}>
+    <div className="w-full" style={{ height: `${chartHeight}px` }}>
       <ResponsiveContainer width="100%" height="100%">
         {chartType === 'bar' ? (
-          <BarChart data={data} margin={{ top: 5, right: 20, left: 0, bottom: 50 }}>
+          <BarChart
+            data={displayData}
+            margin={{ top: 8, right: isMobile ? 2 : 14, left: isMobile ? -8 : 4, bottom: 56 }}
+            barCategoryGap={isMobile ? '28%' : '20%'}
+          >
             <defs>
               <linearGradient id="colorGas" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor="rgb(234, 88, 12)" stopOpacity={0.8} />
@@ -93,24 +169,27 @@ export default function EnergyChart({
               dataKey="time"
               {...commonAxisProps}
               tick={<CustomTick />}
-              angle={-45}
-              textAnchor="end"
-              height={70}
+              interval={xTickInterval}
+              minTickGap={isMobile ? 26 : 18}
+              tickMargin={9}
+              height={62}
             />
             <YAxis
               {...commonAxisProps}
-              label={{ value: unit, angle: -90, position: 'insideLeft' }}
+              width={isMobile ? 36 : 44}
+              label={isMobile ? undefined : { value: unit, angle: -90, position: 'insideLeft' }}
             />
             <Tooltip {...commonTooltipProps} />
             <Bar
               dataKey="power"
               fill="url(#colorGas)"
+              maxBarSize={isMobile ? 14 : 20}
               radius={[8, 8, 0, 0]}
               isAnimationActive={false}
             />
           </BarChart>
         ) : (
-          <LineChart data={data} margin={{ top: 5, right: 20, left: 0, bottom: 50 }}>
+          <LineChart data={displayData} margin={{ top: 8, right: isMobile ? 2 : 14, left: isMobile ? -8 : 4, bottom: 56 }}>
             <defs>
               <linearGradient id="colorPower" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor="rgb(2, 125, 94)" stopOpacity={0.8} />
@@ -122,22 +201,24 @@ export default function EnergyChart({
               dataKey="time"
               {...commonAxisProps}
               tick={<CustomTick />}
-              angle={-45}
-              textAnchor="end"
-              height={70}
+              interval={xTickInterval}
+              minTickGap={isMobile ? 26 : 18}
+              tickMargin={9}
+              height={62}
             />
             <YAxis
               {...commonAxisProps}
-              label={{ value: unit, angle: -90, position: 'insideLeft' }}
+              width={isMobile ? 36 : 44}
+              label={isMobile ? undefined : { value: unit, angle: -90, position: 'insideLeft' }}
             />
             <Tooltip {...commonTooltipProps} />
             <Line
               type="monotone"
               dataKey="power"
               stroke="rgb(2, 125, 94)"
-              strokeWidth={3}
-              dot={{ fill: 'rgb(2, 125, 94)', r: 5 }}
-              activeDot={{ r: 7 }}
+              strokeWidth={isMobile ? 2.8 : 3.2}
+              dot={false}
+              activeDot={{ r: isMobile ? 4.5 : 6.5 }}
               fillOpacity={1}
               fill="url(#colorPower)"
               isAnimationActive={false}

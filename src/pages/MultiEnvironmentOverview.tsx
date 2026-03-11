@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Home, Zap, Activity, Wifi, WifiOff, Settings, LayoutDashboard, Users as UsersIcon, LogOut } from 'lucide-react'
 import EnvironmentConfig from '../components/EnvironmentConfig'
-import EnvironmentDetails from '../components/EnvironmentDetails'
 import { Environment } from '../types'
 import { useAuth0 } from '@auth0/auth0-react'
 
@@ -25,13 +24,6 @@ interface HaEnvironmentPayload {
   }
 }
 
-interface UserSummary {
-  user_id: string
-  name?: string
-  email?: string
-  environmentIds?: string[]
-}
-
 export default function MultiEnvironmentOverview({
   isAdmin,
   onManageUsers,
@@ -44,10 +36,6 @@ export default function MultiEnvironmentOverview({
   const [allowedEnvironmentIds, setAllowedEnvironmentIds] = useState<string[] | null>(null)
   const [envLoading, setEnvLoading] = useState(false)
   const [envError, setEnvError] = useState<string | null>(null)
-  const [detailEnvironment, setDetailEnvironment] = useState<Environment | null>(null)
-  const [detailUsers, setDetailUsers] = useState<UserSummary[]>([])
-  const [detailLoading, setDetailLoading] = useState(false)
-  const [detailError, setDetailError] = useState<string | null>(null)
   const { isAuthenticated, getIdTokenClaims, getAccessTokenSilently } = useAuth0()
   const [environments, setEnvironments] = useState<Environment[]>([])
 
@@ -272,48 +260,6 @@ export default function MultiEnvironmentOverview({
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [showActionsDropdown])
 
-  const loadEnvironmentUsers = async (environmentId: string) => {
-    if (!isAdmin) {
-      setDetailUsers([])
-      return
-    }
-
-    setDetailLoading(true)
-    setDetailError(null)
-
-    try {
-      const token = await getAuthToken()
-      const response = await fetch('/.netlify/functions/list-users', {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-
-      if (!response.ok) {
-        throw new Error('Unable to load users')
-      }
-
-      const data = await response.json()
-      const users = Array.isArray(data?.users) ? data.users : []
-      const filtered = users.filter((user: UserSummary) =>
-        Array.isArray(user.environmentIds)
-          ? user.environmentIds.includes(environmentId)
-          : false,
-      )
-      setDetailUsers(filtered)
-    } catch (error) {
-      setDetailError(error instanceof Error ? error.message : 'Unable to load users')
-      setDetailUsers([])
-    } finally {
-      setDetailLoading(false)
-    }
-  }
-
-  const openDetails = (env: Environment) => {
-    setDetailEnvironment(env)
-    setDetailUsers([])
-    setDetailError(null)
-    void loadEnvironmentUsers(env.id)
-  }
-
   const visibleEnvironments = allowedEnvironmentIds
     ? environments.filter((env) => allowedEnvironmentIds.includes(env.id))
     : environments
@@ -407,7 +353,7 @@ export default function MultiEnvironmentOverview({
                       className="w-full flex items-center gap-3 px-4 py-3 text-light-2 hover:bg-light-2 hover:bg-opacity-10 transition-all text-left"
                     >
                       <LayoutDashboard className="w-5 h-5" />
-                      <span className="font-medium">Environment</span>
+                      <span className="font-medium">Open Dashboard</span>
                     </button>
 
                     {isAdmin && (
@@ -477,6 +423,15 @@ export default function MultiEnvironmentOverview({
             <div
               key={env.id}
               className="glass-card rounded-2xl p-6 shadow-xl hover:shadow-2xl transition-all cursor-pointer"
+              onClick={() => onOpenEnvironment(env.id)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  onOpenEnvironment(env.id)
+                }
+              }}
             >
               {/* Environment Header */}
               <div className="flex items-center justify-between mb-4">
@@ -516,9 +471,12 @@ export default function MultiEnvironmentOverview({
               {/* Action Button */}
               <button
                 className="w-full mt-4 glass-button py-2 px-4 rounded-lg font-medium transition-all"
-                onClick={() => openDetails(env)}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  onOpenEnvironment(env.id)
+                }}
               >
-                View Details
+                Open Dashboard
               </button>
             </div>
           ))}
@@ -555,20 +513,6 @@ export default function MultiEnvironmentOverview({
             environments={environments}
             onSave={handleSaveEnvironments}
             onClose={() => setShowConfig(false)}
-          />
-        )}
-
-        {detailEnvironment && (
-          <EnvironmentDetails
-            environment={detailEnvironment}
-            users={detailUsers}
-            isLoading={detailLoading}
-            error={detailError}
-            onClose={() => setDetailEnvironment(null)}
-            onOpenDashboard={() => {
-              onOpenEnvironment(detailEnvironment.id)
-              setDetailEnvironment(null)
-            }}
           />
         )}
       </div>

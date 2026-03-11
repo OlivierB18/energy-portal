@@ -290,7 +290,7 @@ export default function Users({ isAdmin, onOpenOverview, onOpenDashboard, onLogo
                     className="w-full flex items-center gap-3 px-4 py-3 text-light-2 hover:bg-light-2 hover:bg-opacity-10 transition-all text-left"
                   >
                     <Zap className="w-5 h-5" />
-                    <span className="font-medium">Environment</span>
+                    <span className="font-medium">Open Dashboard</span>
                   </button>
 
                   <button
