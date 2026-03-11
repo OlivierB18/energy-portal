@@ -6,28 +6,12 @@ import Users from './pages/Users'
 import './App.css'
 
 // Automatic deployment test - v1.1
-interface HaEnvironmentPayload {
-  id: string
-  name?: string
-}
-
 function App() {
   const [currentView, setCurrentView] = useState<'overview' | 'dashboard' | 'users'>('overview')
   const [isAdmin, setIsAdmin] = useState(false)
-  const [assignedEnvironmentIds, setAssignedEnvironmentIds] = useState<string[] | null>(null)
-  const [environmentLabelMap, setEnvironmentLabelMap] = useState<Record<string, string>>({})
   const [selectedEnvironmentId, setSelectedEnvironmentId] = useState<string>('')
-    const mapEnvironmentsById = (environments: HaEnvironmentPayload[]) =>
-      environments.reduce((acc: Record<string, string>, env: HaEnvironmentPayload) => {
-        const id = String(env.id)
-        const label = String(env.name || env.id)
-        if (id) {
-          acc[id] = label
-        }
-        return acc
-      }, {})
 
-  const { isAuthenticated, isLoading, loginWithRedirect, logout, getIdTokenClaims, getAccessTokenSilently, user } = useAuth0()
+  const { isAuthenticated, isLoading, loginWithRedirect, logout, getIdTokenClaims, getAccessTokenSilently } = useAuth0()
 
   const decodeJwtPayload = (token: string) => {
     try {
@@ -102,7 +86,7 @@ function App() {
           .map((email) => email.trim().toLowerCase())
           .filter(Boolean)
         const claimEmail = getEmailFromClaims(claims)
-        const email = (user?.email || claimEmail).toLowerCase()
+        const email = claimEmail.toLowerCase()
         const isAllowedEmail = email.length > 0 && allowlist.includes(email)
 
         const nextIsAdmin = roles.includes('admin') || isAllowedEmail
@@ -115,89 +99,17 @@ function App() {
     }
 
     void loadRoles()
-  }, [getAccessTokenSilently, getIdTokenClaims, isAuthenticated, user?.email])
+  }, [getAccessTokenSilently, getIdTokenClaims, isAuthenticated])
 
   useEffect(() => {
-    const getAuthToken = async () => {
-      const audience = import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined
-      return getAccessTokenSilently({
-        authorizationParams: { audience },
-      })
+    if (!isAuthenticated) {
+      setCurrentView('overview')
     }
+  }, [isAuthenticated])
 
-    const loadAssignments = async () => {
-      if (!isAuthenticated) {
-        setAssignedEnvironmentIds(null)
-        return
-      }
-
-      if (isAdmin) {
-        setAssignedEnvironmentIds(null)
-        return
-      }
-
-      try {
-        const claims = await getIdTokenClaims()
-        const envClaim = 'https://brouwer-ems/environments'
-        const envs = (claims?.[envClaim] as string[] | undefined) ?? null
-
-        if (envs && envs.length > 0) {
-          setAssignedEnvironmentIds(envs)
-          return
-        }
-
-        const token = await getAuthToken()
-        const response = await fetch('/.netlify/functions/get-user-environments', {
-          headers: { Authorization: `Bearer ${token}` },
-        })
-
-        if (!response.ok) {
-          throw new Error('Unable to load user environments')
-        }
-
-        const data = await response.json()
-        const ids = Array.isArray(data?.environmentIds) ? data.environmentIds : []
-        setAssignedEnvironmentIds(ids)
-      } catch {
-        setAssignedEnvironmentIds([])
-      }
-    }
-
-    void loadAssignments()
-  }, [getAccessTokenSilently, getIdTokenClaims, isAuthenticated, isAdmin])
-
-  useEffect(() => {
-    const loadEnvironmentLabels = async () => {
-      if (!isAuthenticated) {
-        setEnvironmentLabelMap({})
-        return
-      }
-
-      try {
-        const audience = import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined
-        const token = await getAccessTokenSilently({
-          authorizationParams: { audience },
-        })
-        const response = await fetch('/.netlify/functions/get-ha-environments', {
-          headers: { Authorization: `Bearer ${token}` },
-        })
-
-        if (!response.ok) {
-          throw new Error('Unable to load environments')
-        }
-
-        const data = await response.json()
-        const loaded: HaEnvironmentPayload[] = Array.isArray(data?.environments)
-          ? data.environments
-          : []
-        setEnvironmentLabelMap(mapEnvironmentsById(loaded))
-      } catch {
-        setEnvironmentLabelMap({})
-      }
-    }
-
-    void loadEnvironmentLabels()
-  }, [getAccessTokenSilently, isAuthenticated])
+  const handleLogout = () => {
+    void logout({ logoutParams: { returnTo: window.location.origin } })
+  }
 
   if (isLoading) {
     return (
@@ -235,10 +147,12 @@ function App() {
         <MultiEnvironmentOverview
           isAdmin={isAdmin}
           onManageUsers={() => setCurrentView('users')}
+          onOpenDashboard={() => setCurrentView('dashboard')}
           onOpenEnvironment={(environmentId) => {
             setSelectedEnvironmentId(environmentId)
             setCurrentView('dashboard')
           }}
+          onLogout={handleLogout}
         />
       )}
       {currentView === 'dashboard' && (
@@ -246,80 +160,19 @@ function App() {
           isAdmin={isAdmin}
           selectedEnvironmentId={selectedEnvironmentId}
           onEnvironmentChange={setSelectedEnvironmentId}
+          onOpenOverview={isAdmin ? () => setCurrentView('overview') : undefined}
+          onManageUsers={isAdmin ? () => setCurrentView('users') : undefined}
+          onLogout={handleLogout}
         />
       )}
-      {isAdmin && currentView === 'users' && <Users isAdmin={isAdmin} />}
-
-      {isAuthenticated && (
-        <div className="user-session-badge fixed bottom-6 left-6 z-40 bg-light-2 bg-opacity-30 text-light-2 rounded-xl px-4 py-3 backdrop-blur-sm shadow-lg max-w-xs">
-          <div className="text-xs uppercase tracking-wide opacity-80">Logged in as</div>
-          <div className="text-sm font-medium truncate">{user?.name || user?.email || 'Unknown user'}</div>
-          <div className="mt-3 text-xs uppercase tracking-wide opacity-80">Environments</div>
-          <div className="mt-2 flex flex-wrap gap-2">
-            {(assignedEnvironmentIds === null
-              ? Object.keys(environmentLabelMap)
-              : assignedEnvironmentIds
-            )
-              .map((envId) => environmentLabelMap[envId])
-              .filter(Boolean)
-              .map((label) => (
-                <span
-                  key={label}
-                  className="px-2 py-1 rounded-full bg-light-2 bg-opacity-20 text-xs text-light-2"
-                >
-                  {label}
-                </span>
-              ))}
-            {assignedEnvironmentIds && assignedEnvironmentIds.length === 0 && (
-              <span className="text-xs text-light-1 opacity-80">No environments assigned</span>
-            )}
-          </div>
-        </div>
+      {isAdmin && currentView === 'users' && (
+        <Users
+          isAdmin={isAdmin}
+          onOpenOverview={() => setCurrentView('overview')}
+          onOpenDashboard={() => setCurrentView('dashboard')}
+          onLogout={handleLogout}
+        />
       )}
-
-      {/* Simple Navigation */}
-      <div className="app-floating-nav fixed bottom-6 right-6 flex gap-2">
-        {isAdmin && (
-          <button
-            onClick={() => setCurrentView('overview')}
-            className={`px-4 py-2 rounded-lg font-medium transition-all ${
-              currentView === 'overview'
-                ? 'bg-brand-2 text-light-2 shadow-lg'
-                : 'bg-light-2 bg-opacity-20 text-light-2 hover:bg-opacity-30 backdrop-blur-sm'
-            }`}
-          >
-            Overview
-          </button>
-        )}
-        <button
-          onClick={() => setCurrentView('dashboard')}
-          className={`px-4 py-2 rounded-lg font-medium transition-all ${
-            currentView === 'dashboard'
-              ? 'bg-brand-2 text-light-2 shadow-lg'
-              : 'bg-light-2 bg-opacity-20 text-light-2 hover:bg-opacity-30 backdrop-blur-sm'
-          }`}
-        >
-          Environment
-        </button>
-        {isAdmin && (
-          <button
-            onClick={() => setCurrentView('users')}
-            className={`px-4 py-2 rounded-lg font-medium transition-all ${
-              currentView === 'users'
-                ? 'bg-brand-2 text-light-2 shadow-lg'
-                : 'bg-light-2 bg-opacity-20 text-light-2 hover:bg-opacity-30 backdrop-blur-sm'
-            }`}
-          >
-            Users
-          </button>
-        )}
-        <button
-          onClick={() => logout({ logoutParams: { returnTo: window.location.origin } })}
-          className="px-4 py-2 rounded-lg font-medium transition-all bg-red-500 bg-opacity-20 text-red-100 hover:bg-opacity-30 backdrop-blur-sm"
-        >
-          Logout
-        </button>
-      </div>
     </div>
   )
 }

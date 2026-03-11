@@ -3,7 +3,7 @@ import EnergyCard from '../components/EnergyCard'
 import EnergyChart from '../components/EnergyChart'
 import HomeAssistantConfig from '../components/HomeAssistantConfig'
 import EnergyPriceModal from '../components/EnergyPriceModal'
-import { Zap, Clock, Home, Settings, DollarSign, ChevronDown, Flame } from 'lucide-react'
+import { Zap, Clock, Home, Settings, DollarSign, Flame, Users as UsersIcon, LogOut } from 'lucide-react'
 import { useAuth0 } from '@auth0/auth0-react'
 import { HaEntity, EnergyPricingConfig } from '../types'
 
@@ -26,6 +26,9 @@ interface DashboardProps {
   isAdmin: boolean
   selectedEnvironmentId?: string
   onEnvironmentChange?: (environmentId: string) => void
+  onOpenOverview?: () => void
+  onManageUsers?: () => void
+  onLogout?: () => void
 }
 
 interface PowerSample {
@@ -144,6 +147,9 @@ export default function Dashboard({
   isAdmin,
   selectedEnvironmentId,
   onEnvironmentChange,
+  onOpenOverview,
+  onManageUsers,
+  onLogout,
 }: DashboardProps) {
   const formatDateForInput = (date: Date) => {
     const year = date.getFullYear()
@@ -1455,22 +1461,68 @@ export default function Dashboard({
               <div className="relative settings-dropdown-container">
                 <button
                   onClick={() => setShowSettingsDropdown(!showSettingsDropdown)}
-                  disabled={!selectedEnvironment}
-                  className="flex items-center gap-2 px-3 py-2 bg-light-2 bg-opacity-20 text-light-2 border border-light-2 border-opacity-30 rounded-lg hover:bg-opacity-30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                  title="Environment Settings"
+                  className="p-2 bg-light-2 bg-opacity-20 text-light-2 border border-light-2 border-opacity-30 rounded-lg hover:bg-opacity-30 transition-all"
+                  title="Open settings"
                 >
                   <Settings className="w-5 h-5" />
-                  <span className="text-sm font-medium">Settings</span>
-                  <ChevronDown className="w-4 h-4" />
                 </button>
-                {showSettingsDropdown && selectedEnvironment && (
+                {showSettingsDropdown && (
                   <div className="absolute right-0 mt-2 w-56 bg-dark-1 border border-light-2 border-opacity-30 rounded-lg shadow-xl z-50">
                     <div className="py-1">
+                      {isAdmin && onOpenOverview && (
+                        <button
+                          onClick={() => {
+                            onOpenOverview()
+                            setShowSettingsDropdown(false)
+                          }}
+                          className="w-full flex items-center gap-3 px-4 py-3 text-light-2 hover:bg-light-2 hover:bg-opacity-10 transition-all text-left"
+                        >
+                          <Home className="w-5 h-5" />
+                          <div>
+                            <div className="font-medium">Overview</div>
+                            <div className="text-xs text-light-1">Back to environments</div>
+                          </div>
+                        </button>
+                      )}
+
+                      {isAdmin && onManageUsers && (
+                        <button
+                          onClick={() => {
+                            onManageUsers()
+                            setShowSettingsDropdown(false)
+                          }}
+                          className="w-full flex items-center gap-3 px-4 py-3 text-light-2 hover:bg-light-2 hover:bg-opacity-10 transition-all text-left"
+                        >
+                          <UsersIcon className="w-5 h-5" />
+                          <div>
+                            <div className="font-medium">Users</div>
+                            <div className="text-xs text-light-1">Manage access</div>
+                          </div>
+                        </button>
+                      )}
+
+                      {onLogout && (
+                        <button
+                          onClick={() => {
+                            onLogout()
+                            setShowSettingsDropdown(false)
+                          }}
+                          className="w-full flex items-center gap-3 px-4 py-3 text-red-200 hover:bg-red-500 hover:bg-opacity-20 transition-all text-left border-t border-light-2 border-opacity-10"
+                        >
+                          <LogOut className="w-5 h-5" />
+                          <div>
+                            <div className="font-medium">Logout</div>
+                            <div className="text-xs text-red-200 opacity-80">Sign out</div>
+                          </div>
+                        </button>
+                      )}
+
                       <button
                         onClick={() => {
                           setShowPriceModal(true)
                           setShowSettingsDropdown(false)
                         }}
+                        disabled={!selectedEnvironment}
                         className="w-full flex items-center gap-3 px-4 py-3 text-light-2 hover:bg-light-2 hover:bg-opacity-10 transition-all text-left"
                       >
                         <DollarSign className="w-5 h-5" />
@@ -1485,6 +1537,7 @@ export default function Dashboard({
                             setShowHaConfig(true)
                             setShowSettingsDropdown(false)
                           }}
+                          disabled={!selectedEnvironment}
                           className="w-full flex items-center gap-3 px-4 py-3 text-light-2 hover:bg-light-2 hover:bg-opacity-10 transition-all text-left border-t border-light-2 border-opacity-10"
                         >
                           <Settings className="w-5 h-5" />

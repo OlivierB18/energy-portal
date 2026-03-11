@@ -1,9 +1,12 @@
 import { useEffect, useState } from 'react'
 import { useAuth0 } from '@auth0/auth0-react'
-import { Users as UsersIcon, ShieldAlert } from 'lucide-react'
+import { Users as UsersIcon, ShieldAlert, Settings, Home, Zap, LogOut } from 'lucide-react'
 
 interface UsersProps {
   isAdmin: boolean
+  onOpenOverview: () => void
+  onOpenDashboard: () => void
+  onLogout: () => void
 }
 
 interface UserRow {
@@ -21,7 +24,7 @@ interface EnvironmentOption {
   type?: string
 }
 
-export default function Users({ isAdmin }: UsersProps) {
+export default function Users({ isAdmin, onOpenOverview, onOpenDashboard, onLogout }: UsersProps) {
   const { getAccessTokenSilently, getIdTokenClaims } = useAuth0()
   const [users, setUsers] = useState<UserRow[]>([])
   const [isLoading, setIsLoading] = useState(true)
@@ -35,6 +38,7 @@ export default function Users({ isAdmin }: UsersProps) {
   const [resettingUserId, setResettingUserId] = useState<string | null>(null)
   const [environmentOptions, setEnvironmentOptions] = useState<EnvironmentOption[]>([])
   const [envError, setEnvError] = useState<string | null>(null)
+  const [showSettingsDropdown, setShowSettingsDropdown] = useState(false)
 
   const adminEmailAllowlist = ((import.meta.env.VITE_ADMIN_EMAILS as string | undefined) ?? 'olivier@inside-out.tech')
     .split(',')
@@ -103,6 +107,18 @@ export default function Users({ isAdmin }: UsersProps) {
 
     void loadEnvironments()
   }, [isAdmin])
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as HTMLElement
+      if (showSettingsDropdown && !target.closest('.users-settings-dropdown')) {
+        setShowSettingsDropdown(false)
+      }
+    }
+
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [showSettingsDropdown])
 
   const getAuthToken = async () => {
     const audience = import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined
@@ -234,11 +250,62 @@ export default function Users({ isAdmin }: UsersProps) {
   return (
     <div className="app-shell min-h-screen p-4 md:p-8">
       <div className="max-w-5xl mx-auto">
-        <div className="flex items-center gap-3 mb-6">
-          <UsersIcon className="w-8 h-8 text-brand-2" />
-          <div>
-            <h1 className="text-3xl md:text-4xl font-heavy text-light-2">Users</h1>
-            <p className="text-light-1">Manage and review portal accounts</p>
+        <div className="flex items-start justify-between gap-4 mb-6">
+          <div className="flex items-center gap-3">
+            <UsersIcon className="w-8 h-8 text-brand-2" />
+            <div>
+              <h1 className="text-3xl md:text-4xl font-heavy text-light-2">Users</h1>
+              <p className="text-light-1">Manage and review portal accounts</p>
+            </div>
+          </div>
+
+          <div className="relative users-settings-dropdown shrink-0">
+            <button
+              onClick={() => setShowSettingsDropdown((prev) => !prev)}
+              className="p-2 bg-light-2 bg-opacity-20 text-light-2 border border-light-2 border-opacity-30 rounded-lg hover:bg-opacity-30 transition-all backdrop-blur-sm"
+              aria-label="Open settings"
+            >
+              <Settings className="w-5 h-5" />
+            </button>
+
+            {showSettingsDropdown && (
+              <div className="absolute right-0 mt-2 w-56 bg-dark-1 border border-light-2 border-opacity-30 rounded-lg shadow-xl z-50">
+                <div className="py-1">
+                  <button
+                    onClick={() => {
+                      onOpenOverview()
+                      setShowSettingsDropdown(false)
+                    }}
+                    className="w-full flex items-center gap-3 px-4 py-3 text-light-2 hover:bg-light-2 hover:bg-opacity-10 transition-all text-left"
+                  >
+                    <Home className="w-5 h-5" />
+                    <span className="font-medium">Overview</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      onOpenDashboard()
+                      setShowSettingsDropdown(false)
+                    }}
+                    className="w-full flex items-center gap-3 px-4 py-3 text-light-2 hover:bg-light-2 hover:bg-opacity-10 transition-all text-left"
+                  >
+                    <Zap className="w-5 h-5" />
+                    <span className="font-medium">Environment</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      onLogout()
+                      setShowSettingsDropdown(false)
+                    }}
+                    className="w-full flex items-center gap-3 px-4 py-3 text-red-200 hover:bg-red-500 hover:bg-opacity-20 transition-all text-left border-t border-light-2 border-opacity-10"
+                  >
+                    <LogOut className="w-5 h-5" />
+                    <span className="font-medium">Logout</span>
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 

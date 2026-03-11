@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Home, Zap, Activity, Wifi, WifiOff, Settings } from 'lucide-react'
+import { Home, Zap, Activity, Wifi, WifiOff, Settings, LayoutDashboard, Users as UsersIcon, LogOut } from 'lucide-react'
 import EnvironmentConfig from '../components/EnvironmentConfig'
 import EnvironmentDetails from '../components/EnvironmentDetails'
 import { Environment } from '../types'
@@ -8,7 +8,9 @@ import { useAuth0 } from '@auth0/auth0-react'
 interface MultiEnvironmentOverviewProps {
   isAdmin: boolean
   onManageUsers: () => void
+  onOpenDashboard: () => void
   onOpenEnvironment: (environmentId: string) => void
+  onLogout: () => void
 }
 
 interface HaEnvironmentPayload {
@@ -33,9 +35,12 @@ interface UserSummary {
 export default function MultiEnvironmentOverview({
   isAdmin,
   onManageUsers,
+  onOpenDashboard,
   onOpenEnvironment,
+  onLogout,
 }: MultiEnvironmentOverviewProps) {
   const [showConfig, setShowConfig] = useState(false)
+  const [showActionsDropdown, setShowActionsDropdown] = useState(false)
   const [allowedEnvironmentIds, setAllowedEnvironmentIds] = useState<string[] | null>(null)
   const [envLoading, setEnvLoading] = useState(false)
   const [envError, setEnvError] = useState<string | null>(null)
@@ -255,6 +260,18 @@ export default function MultiEnvironmentOverview({
     return () => clearInterval(interval)
   }, [environmentIdsSignature, getAccessTokenSilently, isAuthenticated])
 
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as HTMLElement
+      if (showActionsDropdown && !target.closest('.overview-settings-dropdown')) {
+        setShowActionsDropdown(false)
+      }
+    }
+
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [showActionsDropdown])
+
   const loadEnvironmentUsers = async (environmentId: string) => {
     if (!isAdmin) {
       setDetailUsers([])
@@ -361,44 +378,89 @@ export default function MultiEnvironmentOverview({
       <div className="max-w-6xl mx-auto">
         {/* Header */}
         <div className="mb-8">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-4">
+          <div className="flex items-start justify-between gap-4 mb-4">
+            <div className="flex items-center gap-4 min-w-0">
               <Home className="w-8 h-8 text-brand-2" />
-              <div>
-                <h1 className="text-4xl md:text-5xl font-heavy text-light-2 mb-2">
-                  Multi-Environment Overview
+              <div className="min-w-0">
+                <h1 className="text-3xl md:text-5xl font-heavy text-light-2 leading-tight">
+                  Inside-Out Foxtrot
                 </h1>
-                <p className="text-light-1 text-lg">Monitor all your Home Assistant environments in one place</p>
-                <p className="text-light-1 text-sm opacity-80">Developer: Olivier Brouwer</p>
               </div>
             </div>
-            <div className="flex items-center gap-2">
-              {isAdmin && (
-                <button
-                  onClick={onManageUsers}
-                  className="flex items-center gap-2 px-4 py-2 bg-light-2 bg-opacity-20 text-light-2 rounded-lg hover:bg-opacity-30 transition-all backdrop-blur-sm"
-                >
-                  <Settings className="w-5 h-5" />
-                  Users
-                </button>
-              )}
-              {isAdmin && (
-                <button
-                  onClick={() => setShowConfig(true)}
-                  className="flex items-center gap-2 px-4 py-2 bg-brand-2 text-light-2 rounded-lg hover:bg-brand-3 transition-all"
-                >
-                  <Settings className="w-5 h-5" />
-                  Add environment
-                </button>
-              )}
-              {isAdmin && (
-                <button
-                  onClick={() => setShowConfig(true)}
-                  className="flex items-center gap-2 px-4 py-2 bg-light-2 bg-opacity-20 text-light-2 rounded-lg hover:bg-opacity-30 transition-all backdrop-blur-sm"
-                >
-                  <Settings className="w-5 h-5" />
-                  Configure
-                </button>
+            <div className="relative overview-settings-dropdown shrink-0">
+              <button
+                onClick={() => setShowActionsDropdown((prev) => !prev)}
+                className="p-2 bg-light-2 bg-opacity-20 text-light-2 border border-light-2 border-opacity-30 rounded-lg hover:bg-opacity-30 transition-all backdrop-blur-sm"
+                aria-label="Open settings"
+              >
+                <Settings className="w-5 h-5" />
+              </button>
+
+              {showActionsDropdown && (
+                <div className="absolute right-0 mt-2 w-64 bg-dark-1 border border-light-2 border-opacity-30 rounded-lg shadow-xl z-50">
+                  <div className="py-1">
+                    <button
+                      onClick={() => {
+                        onOpenDashboard()
+                        setShowActionsDropdown(false)
+                      }}
+                      className="w-full flex items-center gap-3 px-4 py-3 text-light-2 hover:bg-light-2 hover:bg-opacity-10 transition-all text-left"
+                    >
+                      <LayoutDashboard className="w-5 h-5" />
+                      <span className="font-medium">Environment</span>
+                    </button>
+
+                    {isAdmin && (
+                      <button
+                        onClick={() => {
+                          onManageUsers()
+                          setShowActionsDropdown(false)
+                        }}
+                        className="w-full flex items-center gap-3 px-4 py-3 text-light-2 hover:bg-light-2 hover:bg-opacity-10 transition-all text-left"
+                      >
+                        <UsersIcon className="w-5 h-5" />
+                        <span className="font-medium">Users</span>
+                      </button>
+                    )}
+
+                    {isAdmin && (
+                      <button
+                        onClick={() => {
+                          setShowConfig(true)
+                          setShowActionsDropdown(false)
+                        }}
+                        className="w-full flex items-center gap-3 px-4 py-3 text-light-2 hover:bg-light-2 hover:bg-opacity-10 transition-all text-left"
+                      >
+                        <Settings className="w-5 h-5" />
+                        <span className="font-medium">Add Environment</span>
+                      </button>
+                    )}
+
+                    {isAdmin && (
+                      <button
+                        onClick={() => {
+                          setShowConfig(true)
+                          setShowActionsDropdown(false)
+                        }}
+                        className="w-full flex items-center gap-3 px-4 py-3 text-light-2 hover:bg-light-2 hover:bg-opacity-10 transition-all text-left"
+                      >
+                        <Settings className="w-5 h-5" />
+                        <span className="font-medium">Configure</span>
+                      </button>
+                    )}
+
+                    <button
+                      onClick={() => {
+                        onLogout()
+                        setShowActionsDropdown(false)
+                      }}
+                      className="w-full flex items-center gap-3 px-4 py-3 text-red-200 hover:bg-red-500 hover:bg-opacity-20 transition-all text-left border-t border-light-2 border-opacity-10"
+                    >
+                      <LogOut className="w-5 h-5" />
+                      <span className="font-medium">Logout</span>
+                    </button>
+                  </div>
+                </div>
               )}
             </div>
           </div>

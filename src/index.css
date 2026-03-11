@@ -320,50 +320,10 @@ table {
   }
 }
 
-.user-session-badge,
-.app-floating-nav {
-  z-index: 30;
-}
-
 @media (max-width: 599px) {
   .app-shell {
     padding-top: calc(1rem + env(safe-area-inset-top));
     padding-bottom: calc(1rem + env(safe-area-inset-bottom));
-  }
-
-  .user-session-badge {
-    left: 0.75rem;
-    right: 0.75rem;
-    bottom: calc(5.8rem + env(safe-area-inset-bottom));
-    max-width: none;
-    padding: 0.65rem 0.75rem;
-  }
-
-  .user-session-badge .truncate {
-    white-space: normal;
-    overflow-wrap: anywhere;
-  }
-
-  .app-floating-nav {
-    left: 0.75rem;
-    right: 0.75rem;
-    bottom: calc(0.5rem + env(safe-area-inset-bottom));
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0.45rem;
-    padding: 0.45rem;
-    border-radius: 0.85rem;
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    background: rgba(8, 8, 8, 0.8);
-    backdrop-filter: blur(12px);
-  }
-
-  .app-floating-nav > button {
-    width: 100%;
-    min-height: 44px;
-    padding: 0.65rem 0.55rem;
-    font-size: 0.82rem;
-    line-height: 1.15;
   }
 
   .fixed.inset-0.bg-black.bg-opacity-60,
