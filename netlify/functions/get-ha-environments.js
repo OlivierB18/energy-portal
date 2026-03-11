@@ -1,4 +1,10 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose'
+import {
+  getFallbackEnvironments as getFallbackEnvironmentsFromConfig,
+  mapLegacyHaEnvironments as mapLegacyHaEnvironmentsFromConfig,
+  mapMetadataEnvironments as mapMetadataEnvironmentsFromConfig,
+  mergeEnvironments as mergeEnvironmentsFromConfig,
+} from './_ha-config.js'
 
 const getEnv = (key) => {
   const value = process.env[key]
@@ -77,6 +83,7 @@ const mapLegacyHaEnvironments = (metadata) => {
 }
 
 const managementTokenCache = { token: null, expiresAt: 0 }
+const metadataCache = { value: null, expiresAt: 0 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -133,6 +140,18 @@ const getClientMetadata = async (domain, token) => {
 
   const client = await response.json()
   return client.client_metadata || {}
+}
+
+const getCachedClientMetadata = async (domain, token) => {
+  const now = Date.now()
+  if (metadataCache.value && now < metadataCache.expiresAt) {
+    return metadataCache.value
+  }
+
+  const metadata = await getClientMetadata(domain, token)
+  metadataCache.value = metadata
+  metadataCache.expiresAt = now + 60_000
+  return metadata
 }
 
 const getEmailFromPayload = (payload) => {
@@ -233,36 +252,65 @@ const verifyAuth = async (event) => {
 }
 
 export const handler = async (event) => {
-  console.log('get-ha-environments handler - SIMPLIFIED MODE');
+  console.log('get-ha-environments handler - METADATA MODE')
   try {
     if (event.httpMethod !== 'GET') {
       return { statusCode: 405, body: JSON.stringify({ error: 'Method not allowed' }) }
     }
 
-    // SIMPLIFIED: Skip Auth0 verification, just check token exists
-    const authHeader = event.headers.authorization || event.headers.Authorization
-    if (!authHeader?.startsWith('Bearer ')) {
-      return { statusCode: 401, body: JSON.stringify({ error: 'Missing authorization' }) }
+    await verifyAuth(event)
+
+    const domain = getEnv('AUTH0_DOMAIN')
+
+    let metadata = {}
+    let metadataWarning = null
+
+    try {
+      const managementToken = await getManagementToken(domain)
+      metadata = await getCachedClientMetadata(domain, managementToken)
+    } catch (error) {
+      metadataWarning = error instanceof Error ? error.message : 'Unable to load metadata'
+      console.warn('get-ha-environments metadata warning:', metadataWarning)
     }
 
-    // SIMPLIFIED: Just return fallback environments
-    const fallbackEnvironments = getFallbackEnvironments()
-    console.log('Returning fallback environments:', fallbackEnvironments.length);
+    const metadataEnvironments = mapMetadataEnvironmentsFromConfig(metadata)
+    const legacyEnvironments = mapLegacyHaEnvironmentsFromConfig(metadata)
+    const fallbackEnvironments = getFallbackEnvironmentsFromConfig(getOptionalEnv)
+
+    const environments = mergeEnvironmentsFromConfig(
+      metadataEnvironments,
+      legacyEnvironments,
+      fallbackEnvironments,
+    )
+
+    if (environments.length === 0) {
+      throw new Error('No environments configured')
+    }
+
+    console.log('Returning environments:', environments.length)
 
     return {
       statusCode: 200,
-      body: JSON.stringify({ environments: fallbackEnvironments }),
+      body: JSON.stringify({
+        environments,
+        source: metadataEnvironments.length > 0 || legacyEnvironments.length > 0
+          ? 'metadata'
+          : 'fallback',
+        ...(metadataWarning ? { warning: metadataWarning } : {}),
+      }),
     }
   } catch (error) {
-    console.error('get-ha-environments error:', error);
+    console.error('get-ha-environments error:', error)
     const message = error instanceof Error ? error.message : 'Server error'
+    const statusCode = message === 'Missing token' ? 401 : 500
     return {
-      statusCode: 500,
-      body: JSON.stringify({ 
+      statusCode,
+      body: JSON.stringify({
         error: message,
-        details: 'Check env vars: HA_BROUWER_TEST_URL, HA_BROUWER_TEST_TOKEN'
+        details: 'Check Auth0 metadata and HA_* environment variables',
       }),
     }
   }
 }
+
 

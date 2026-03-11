@@ -15,6 +15,34 @@ export default function EnergyPriceModal({
   onSave,
   getAuthToken,
 }: EnergyPriceModalProps) {
+  const normalizePricingConfig = (input: unknown): EnergyPricingConfig | null => {
+    if (!input || typeof input !== 'object') {
+      return null
+    }
+
+    const value = input as Record<string, unknown>
+    const parseNumber = (raw: unknown, fallback: number) => {
+      const parsed = Number(raw)
+      return Number.isFinite(parsed) ? parsed : fallback
+    }
+
+    return {
+      type: value.type === 'dynamic' ? 'dynamic' : 'fixed',
+      consumerPrice: parseNumber(value.consumerPrice, 0.30),
+      producerPrice: parseNumber(value.producerPrice, 0.10),
+      consumerMargin: parseNumber(value.consumerMargin, 0.05),
+      producerMargin: parseNumber(value.producerMargin, 0.02),
+    }
+  }
+
+  const applyPricingConfig = (config: EnergyPricingConfig) => {
+    setPricingType(config.type || 'fixed')
+    setConsumerPrice((config.consumerPrice || 0.30).toString())
+    setProducerPrice((config.producerPrice || 0.10).toString())
+    setConsumerMargin((config.consumerMargin || 0.05).toString())
+    setProducerMargin((config.producerMargin || 0.02).toString())
+  }
+
   const [pricingType, setPricingType] = useState<EnergyPricingType>('fixed')
   const [consumerPrice, setConsumerPrice] = useState<string>('0.30')
   const [producerPrice, setProducerPrice] = useState<string>('0.10')
@@ -25,25 +53,59 @@ export default function EnergyPriceModal({
   const [entsoeLoading, setEntsoeLoading] = useState(false)
 
   useEffect(() => {
+    let isMounted = true
+
     const loadSavedPricing = () => {
       try {
         const key = `energy_pricing_${environmentId}`
         const saved = localStorage.getItem(key)
         if (saved) {
-          const config: EnergyPricingConfig = JSON.parse(saved)
-          setPricingType(config.type || 'fixed')
-          setConsumerPrice((config.consumerPrice || 0.30).toString())
-          setProducerPrice((config.producerPrice || 0.10).toString())
-          setConsumerMargin((config.consumerMargin || 0.05).toString())
-          setProducerMargin((config.producerMargin || 0.02).toString())
+          const config = normalizePricingConfig(JSON.parse(saved))
+          if (config && isMounted) {
+            applyPricingConfig(config)
+          }
         }
       } catch {
         setError('Failed to load saved pricing')
       }
     }
 
-    void loadSavedPricing()
-  }, [environmentId])
+    const loadServerPricing = async () => {
+      if (!getAuthToken) {
+        return
+      }
+
+      try {
+        const token = await getAuthToken()
+        const response = await fetch(`/.netlify/functions/get-energy-pricing?environmentId=${encodeURIComponent(environmentId)}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+
+        if (!response.ok) {
+          return
+        }
+
+        const data = await response.json()
+        const config = normalizePricingConfig(data?.config)
+        if (!config || !isMounted) {
+          return
+        }
+
+        applyPricingConfig(config)
+        const key = `energy_pricing_${environmentId}`
+        localStorage.setItem(key, JSON.stringify(config))
+      } catch {
+        // Keep local fallback when server config cannot be loaded.
+      }
+    }
+
+    loadSavedPricing()
+    void loadServerPricing()
+
+    return () => {
+      isMounted = false
+    }
+  }, [environmentId, getAuthToken])
 
   const handleFetchENTSOE = async () => {
     if (!getAuthToken) {
@@ -99,6 +161,26 @@ export default function EnergyPriceModal({
 
       const key = `energy_pricing_${environmentId}`
       localStorage.setItem(key, JSON.stringify(config))
+
+      if (getAuthToken) {
+        const token = await getAuthToken()
+        const response = await fetch('/.netlify/functions/save-energy-pricing', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            environmentId,
+            config,
+          }),
+        })
+
+        if (!response.ok) {
+          const data = await response.json().catch(() => null)
+          throw new Error(data?.error || 'Failed to save pricing to server')
+        }
+      }
 
       // eslint-disable-next-line no-console
       console.log('[EnergyPrice] Saved pricing config:', config)

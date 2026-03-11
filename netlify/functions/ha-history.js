@@ -21,32 +21,8 @@ const HA_ENVIRONMENTS = {
   },
 }
 
-const getHaConfigDirect = (environmentId) => {
-  // Try exact match first
-  let fallback = HA_ENVIRONMENTS[environmentId]
-  
-  // Try case-insensitive match
-  if (!fallback) {
-    const key = Object.keys(HA_ENVIRONMENTS).find(k => k.toLowerCase() === environmentId.toLowerCase())
-    if (key) {
-      fallback = HA_ENVIRONMENTS[key]
-    }
-  }
-  
-  if (!fallback) {
-    throw new Error(`Unknown environment: ${environmentId}. Available: ${Object.keys(HA_ENVIRONMENTS).join(', ')}`)
-  }
-
-  try {
-    const baseUrl = getEnv(fallback.urlEnv)
-    const token = getEnv(fallback.tokenEnv)
-    return { baseUrl, token }
-  } catch (err) {
-    throw new Error(`Missing environment variables for ${fallback.urlEnv} or ${fallback.tokenEnv}: ${err.message}`)
-  }
-}
-
 const managementTokenCache = { token: null, expiresAt: 0 }
+const metadataCache = { value: null, expiresAt: 0 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -101,6 +77,75 @@ const getClientMetadata = async (domain, token) => {
   }
   const client = await response.json()
   return client.client_metadata || {}
+}
+
+const getCachedClientMetadata = async (domain, token) => {
+  const now = Date.now()
+  if (metadataCache.value && now < metadataCache.expiresAt) {
+    return metadataCache.value
+  }
+
+  const metadata = await getClientMetadata(domain, token)
+  metadataCache.value = metadata
+  metadataCache.expiresAt = now + 60_000
+  return metadata
+}
+
+const normalizeValue = (value) => (value ? String(value).trim() : '')
+
+const getHaConfig = (metadata, environmentId) => {
+  const requestedId = normalizeValue(environmentId)
+  const lowerRequested = requestedId.toLowerCase()
+
+  const envMap = metadata?.environments || {}
+  const environmentEntry = Object.entries(envMap).find(([id, env]) => (
+    id === requestedId ||
+    id.toLowerCase() === lowerRequested ||
+    String(env?.name || '').toLowerCase() === lowerRequested
+  ))
+
+  if (environmentEntry) {
+    const [, env] = environmentEntry
+    const config = env?.config || {}
+    const baseUrl = normalizeValue(config.base_url || config.baseUrl || env?.base_url || env?.url)
+    const token = normalizeValue(config.api_key || config.apiKey || env?.token)
+    if (baseUrl && token) {
+      return { baseUrl, token }
+    }
+  }
+
+  const legacyMap = metadata?.ha_environments || {}
+  const legacyEntry = Object.entries(legacyMap).find(([id, env]) => (
+    id === requestedId ||
+    id.toLowerCase() === lowerRequested ||
+    String(env?.name || '').toLowerCase() === lowerRequested
+  ))
+
+  if (legacyEntry) {
+    const [, env] = legacyEntry
+    const baseUrl = normalizeValue(env?.base_url || env?.url)
+    const token = normalizeValue(env?.token)
+    if (baseUrl && token) {
+      return { baseUrl, token }
+    }
+  }
+
+  let fallback = HA_ENVIRONMENTS[requestedId]
+  if (!fallback) {
+    const key = Object.keys(HA_ENVIRONMENTS).find((id) => id.toLowerCase() === lowerRequested)
+    if (key) {
+      fallback = HA_ENVIRONMENTS[key]
+    }
+  }
+
+  if (!fallback) {
+    throw new Error(`Unknown environment: ${environmentId}`)
+  }
+
+  return {
+    baseUrl: getEnv(fallback.urlEnv),
+    token: getEnv(fallback.tokenEnv),
+  }
 }
 
 const parseNumericState = (rawValue) => {
@@ -247,10 +292,19 @@ export const handler = async (event) => {
 
     console.log('[HA History] Request for environment:', environmentId, 'entities:', entityIds)
 
-    // Get HA config directly from environment variables
+    // Prefer metadata-backed config and fall back to environment variables
     let haConfig
     try {
-      haConfig = getHaConfigDirect(environmentId)
+      const domain = getEnv('AUTH0_DOMAIN')
+      let metadata = {}
+      try {
+        const managementToken = await getManagementToken(domain)
+        metadata = await getCachedClientMetadata(domain, managementToken)
+      } catch (metadataError) {
+        console.warn('[HA History] Metadata unavailable, using fallback env vars:', metadataError?.message || metadataError)
+      }
+
+      haConfig = getHaConfig(metadata, environmentId)
       console.log('[HA History] Got HA config, URL host:', new URL(haConfig.baseUrl).hostname)
     } catch (err) {
       console.error('[HA History] Failed to get HA config:', err.message || err)

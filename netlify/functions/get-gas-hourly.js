@@ -9,19 +9,149 @@ const getEnv = (key) => {
   return value
 }
 
+const managementTokenCache = { token: null, expiresAt: 0 }
+const metadataCache = { value: null, expiresAt: 0 }
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const getManagementToken = async (domain) => {
+  const now = Date.now()
+  if (managementTokenCache.token && now < managementTokenCache.expiresAt - 60000) {
+    return managementTokenCache.token
+  }
+
+  const fetchToken = async () => {
+    const response = await fetch(`https://${domain}/oauth/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id: getEnv('AUTH0_M2M_CLIENT_ID'),
+        client_secret: getEnv('AUTH0_M2M_CLIENT_SECRET'),
+        audience: `https://${domain}/api/v2/`,
+        grant_type: 'client_credentials',
+      }),
+    })
+
+    if (!response.ok) {
+      throw new Error('Unable to get management token')
+    }
+
+    return response.json()
+  }
+
+  try {
+    const data = await fetchToken()
+    const expiresIn = Number(data.expires_in) || 600
+    managementTokenCache.token = data.access_token
+    managementTokenCache.expiresAt = Date.now() + expiresIn * 1000
+    return managementTokenCache.token
+  } catch {
+    await sleep(200)
+    const data = await fetchToken()
+    const expiresIn = Number(data.expires_in) || 600
+    managementTokenCache.token = data.access_token
+    managementTokenCache.expiresAt = Date.now() + expiresIn * 1000
+    return managementTokenCache.token
+  }
+}
+
+const getClientMetadata = async (domain, token) => {
+  const clientId = getEnv('AUTH0_APP_CLIENT_ID')
+  const response = await fetch(`https://${domain}/api/v2/clients/${encodeURIComponent(clientId)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+
+  if (!response.ok) {
+    throw new Error('Unable to fetch app metadata')
+  }
+
+  const client = await response.json()
+  return client.client_metadata || {}
+}
+
+const getCachedClientMetadata = async (domain, token) => {
+  const now = Date.now()
+  if (metadataCache.value && now < metadataCache.expiresAt) {
+    return metadataCache.value
+  }
+
+  const metadata = await getClientMetadata(domain, token)
+  metadataCache.value = metadata
+  metadataCache.expiresAt = now + 60_000
+  return metadata
+}
+
 const HA_ENVIRONMENTS = {
   vacation: { urlEnv: 'HA_BROUWER_TEST_URL', tokenEnv: 'HA_BROUWER_TEST_TOKEN' },
   'Brouwer TEST': { urlEnv: 'HA_BROUWER_TEST_URL', tokenEnv: 'HA_BROUWER_TEST_TOKEN' },
   brouwer: { urlEnv: 'HA_BROUWER_TEST_URL', tokenEnv: 'HA_BROUWER_TEST_TOKEN' },
 }
 
-const getHaConfigDirect = (environmentId) => {
+const normalizeValue = (value) => (value ? String(value).trim() : '')
+
+const resolveHaConfigFromMetadata = (metadata, environmentId) => {
+  const requestedId = normalizeValue(environmentId)
+  const lowerRequested = requestedId.toLowerCase()
+
+  const envMap = metadata?.environments || {}
+  const environmentEntry = Object.entries(envMap).find(([id, env]) => (
+    id === requestedId ||
+    id.toLowerCase() === lowerRequested ||
+    String(env?.name || '').toLowerCase() === lowerRequested
+  ))
+
+  if (environmentEntry) {
+    const [, env] = environmentEntry
+    const config = env?.config || {}
+    const baseUrl = normalizeValue(config.base_url || config.baseUrl || env?.base_url || env?.url)
+    const token = normalizeValue(config.api_key || config.apiKey || env?.token)
+    if (baseUrl && token) {
+      return { baseUrl, token }
+    }
+  }
+
+  const legacyMap = metadata?.ha_environments || {}
+  const legacyEntry = Object.entries(legacyMap).find(([id, env]) => (
+    id === requestedId ||
+    id.toLowerCase() === lowerRequested ||
+    String(env?.name || '').toLowerCase() === lowerRequested
+  ))
+
+  if (legacyEntry) {
+    const [, env] = legacyEntry
+    const baseUrl = normalizeValue(env?.base_url || env?.url)
+    const token = normalizeValue(env?.token)
+    if (baseUrl && token) {
+      return { baseUrl, token }
+    }
+  }
+
+  return null
+}
+
+const getHaConfig = async (environmentId) => {
+  const domain = getEnv('AUTH0_DOMAIN')
+  let metadata = {}
+
+  try {
+    const managementToken = await getManagementToken(domain)
+    metadata = await getCachedClientMetadata(domain, managementToken)
+  } catch (error) {
+    console.warn('[Gas Hourly] Metadata unavailable, using fallback env vars:', error instanceof Error ? error.message : error)
+  }
+
+  const fromMetadata = resolveHaConfigFromMetadata(metadata, environmentId)
+  if (fromMetadata) {
+    return fromMetadata
+  }
+
   let fallback = HA_ENVIRONMENTS[environmentId]
   if (!fallback) {
-    const key = Object.keys(HA_ENVIRONMENTS).find(k => k.toLowerCase() === environmentId.toLowerCase())
+    const key = Object.keys(HA_ENVIRONMENTS).find((k) => k.toLowerCase() === String(environmentId).toLowerCase())
     if (key) fallback = HA_ENVIRONMENTS[key]
   }
   if (!fallback) throw new Error(`Unknown environment: ${environmentId}`)
+
   return { baseUrl: getEnv(fallback.urlEnv), token: getEnv(fallback.tokenEnv) }
 }
 
@@ -54,7 +184,7 @@ export const handler = async (event) => {
     const entityId = event.queryStringParameters?.entityId || 'sensor.gas_meter_gas_consumption'
     const hoursBack = parseInt(event.queryStringParameters?.hoursBack || '200', 10) // ~8 days back to March 3
 
-    const { baseUrl, token } = getHaConfigDirect(environmentId)
+    const { baseUrl, token } = await getHaConfig(environmentId)
 
     // Calculate time range: from N hours ago to now
     const now = new Date()

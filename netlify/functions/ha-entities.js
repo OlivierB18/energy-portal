@@ -16,6 +16,7 @@ const HA_ENVIRONMENTS = {
 }
 
 const managementTokenCache = { token: null, expiresAt: 0 }
+const metadataCache = { value: null, expiresAt: 0 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -75,6 +76,18 @@ const getClientMetadata = async (domain, token) => {
   }
   const client = await response.json()
   return client.client_metadata || {}
+}
+
+const getCachedClientMetadata = async (domain, token) => {
+  const now = Date.now()
+  if (metadataCache.value && now < metadataCache.expiresAt) {
+    return metadataCache.value
+  }
+
+  const metadata = await getClientMetadata(domain, token)
+  metadataCache.value = metadata
+  metadataCache.expiresAt = now + 60_000
+  return metadata
 }
 
 const getVisibleEntityIds = (metadata, environmentId) => {
@@ -258,15 +271,19 @@ export const handler = async (event) => {
       return { statusCode: 400, body: JSON.stringify({ error: 'Missing environmentId' }) }
     }
 
-    // SIMPLIFIED: Skip complex Auth0 verification, just verify token exists
-    const authHeader = event.headers.authorization || event.headers.Authorization
-    if (!authHeader?.startsWith('Bearer ')) {
-      return { statusCode: 401, body: JSON.stringify({ error: 'Missing authorization' }) }
+    await verifyAuth(event)
+
+    const domain = getEnv('AUTH0_DOMAIN')
+
+    let metadata = {}
+    try {
+      const managementToken = await getManagementToken(domain)
+      metadata = await getCachedClientMetadata(domain, managementToken)
+    } catch (metadataError) {
+      console.warn('ha-entities metadata warning:', metadataError instanceof Error ? metadataError.message : metadataError)
     }
 
-    // SIMPLIFIED: Go directly to env vars, skip Auth0 metadata fetch
-    console.log('Using environment variables directly for:', environmentId);
-    const { baseUrl, token } = getHaConfig({}, environmentId)
+    const { baseUrl, token } = getHaConfig(metadata, environmentId)
     
     console.log('Fetching from Home Assistant:', baseUrl);
     const response = await fetch(`${baseUrl}/api/states`, {
@@ -319,9 +336,10 @@ export const handler = async (event) => {
   } catch (error) {
     console.error('ha-entities handler error:', error);
     const message = error instanceof Error ? error.message : 'Server error';
+    const statusCode = message === 'Missing token' ? 401 : 500
     const stack = error && error.stack ? error.stack : String(error);
     return {
-      statusCode: 500,
+      statusCode,
       body: JSON.stringify({
         error: message,
         stack,

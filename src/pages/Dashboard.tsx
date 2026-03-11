@@ -119,6 +119,27 @@ const formatChartAxisLabel = (timestamp: number, range: 'today' | 'week' | 'mont
   }
 }
 
+const normalizePricingConfig = (input: unknown): EnergyPricingConfig | null => {
+  if (!input || typeof input !== 'object') {
+    return null
+  }
+
+  const value = input as Record<string, unknown>
+  const type = value.type === 'dynamic' ? 'dynamic' : 'fixed'
+  const parseNumber = (raw: unknown, fallback: number) => {
+    const parsed = Number(raw)
+    return Number.isFinite(parsed) ? parsed : fallback
+  }
+
+  return {
+    type,
+    consumerPrice: parseNumber(value.consumerPrice, 0.30),
+    producerPrice: parseNumber(value.producerPrice, 0.10),
+    consumerMargin: parseNumber(value.consumerMargin, 0.05),
+    producerMargin: parseNumber(value.producerMargin, 0.02),
+  }
+}
+
 export default function Dashboard({
   isAdmin,
   selectedEnvironmentId,
@@ -164,11 +185,36 @@ export default function Dashboard({
     })
   }, [getAccessTokenSilently])
 
+  const haEnvironmentsCacheKey = 'ha_environments_cache_v1'
+  const haEntitiesCacheKey = `ha_entities_cache_${selectedEnvironment || 'default'}`
+
   useEffect(() => {
     const loadEnvironments = async () => {
       if (!isAuthenticated) {
         setEnvironments([])
         return
+      }
+
+      try {
+        const cached = localStorage.getItem(haEnvironmentsCacheKey)
+        if (cached) {
+          const parsed = JSON.parse(cached)
+          if (Array.isArray(parsed)) {
+            const cachedEnvironments = parsed
+              .map((env: { id?: string; name?: string; type?: string }) => ({
+                id: String(env?.id || '').trim(),
+                name: String(env?.name || env?.id || '').trim(),
+                type: env?.type,
+              }))
+              .filter((env: EnvironmentConfig) => Boolean(env.id))
+
+            if (cachedEnvironments.length > 0) {
+              setEnvironments(cachedEnvironments)
+            }
+          }
+        }
+      } catch {
+        // Ignore cache parse errors and continue with network fetch.
       }
 
       setEnvLoading(true)
@@ -194,16 +240,16 @@ export default function Dashboard({
           type: env.type,
         }))
         setEnvironments(next)
+        localStorage.setItem(haEnvironmentsCacheKey, JSON.stringify(next))
       } catch (error) {
         setEnvError(error instanceof Error ? error.message : 'Unable to load environments')
-        setEnvironments([])
       } finally {
         setEnvLoading(false)
       }
     }
 
     void loadEnvironments()
-  }, [getAccessTokenSilently, isAuthenticated])
+  }, [haEnvironmentsCacheKey, isAuthenticated, getAuthToken])
 
   useEffect(() => {
     const getAuthToken = async () => {
@@ -283,19 +329,105 @@ export default function Dashboard({
   }, [selectedEnvironment, selectedEnvironmentId])
 
   useEffect(() => {
-    try {
-      const key = `energy_pricing_${selectedEnvironment}`
-      const saved = localStorage.getItem(key)
-      if (saved) {
-        const config: EnergyPricingConfig = JSON.parse(saved)
-        setPricingConfig(config)
-      } else {
+    let isMounted = true
+
+    const loadPricing = async () => {
+      if (!selectedEnvironment) {
         setPricingConfig(null)
+        return
+      }
+
+      const key = `energy_pricing_${selectedEnvironment}`
+
+      try {
+        const cached = localStorage.getItem(key)
+        if (cached && isMounted) {
+          const normalized = normalizePricingConfig(JSON.parse(cached))
+          if (normalized) {
+            setPricingConfig(normalized)
+          }
+        }
+      } catch {
+        // Ignore local parse errors and continue with server fetch.
+      }
+
+      if (!isAuthenticated) {
+        return
+      }
+
+      try {
+        const token = await getAuthToken()
+        const response = await fetch(`/.netlify/functions/get-energy-pricing?environmentId=${encodeURIComponent(selectedEnvironment)}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+
+        if (!response.ok) {
+          throw new Error('Unable to load pricing config')
+        }
+
+        const data = await response.json()
+        const normalized = normalizePricingConfig(data?.config)
+
+        if (!isMounted) {
+          return
+        }
+
+        if (normalized) {
+          setPricingConfig(normalized)
+          localStorage.setItem(key, JSON.stringify(normalized))
+        } else {
+          setPricingConfig(null)
+        }
+      } catch {
+        // Keep cached pricing when server fetch fails.
+      }
+    }
+
+    void loadPricing()
+
+    return () => {
+      isMounted = false
+    }
+  }, [selectedEnvironment, isAuthenticated, getAuthToken])
+
+  useEffect(() => {
+    setHaEntities([])
+    setLastKnownHaEntities([])
+    setIsInitialLoading(true)
+
+    if (!selectedEnvironment) {
+      return
+    }
+
+    try {
+      const cached = localStorage.getItem(haEntitiesCacheKey)
+      if (!cached) {
+        return
+      }
+
+      const parsed = JSON.parse(cached)
+      if (!Array.isArray(parsed) || parsed.length === 0) {
+        return
+      }
+
+      const normalized = parsed
+        .filter((entity: HaEntity) => typeof entity?.entity_id === 'string')
+        .map((entity: HaEntity) => ({
+          entity_id: entity.entity_id,
+          state: entity.state,
+          domain: entity.domain,
+          friendly_name: entity.friendly_name,
+        }))
+
+      if (normalized.length > 0) {
+        setHaEntities(normalized)
+        setLastKnownHaEntities(normalized)
+        setIsInitialLoading(false)
       }
     } catch {
-      setPricingConfig(null)
+      // Ignore entity cache parse errors.
     }
-  }, [selectedEnvironment])
+  }, [haEntitiesCacheKey, selectedEnvironment])
 
   // Close settings dropdown when clicking outside
   useEffect(() => {
@@ -363,6 +495,7 @@ export default function Dashboard({
         // Update entities AND keep them as last known
         setHaEntities(entities)
         setLastKnownHaEntities(entities)
+        localStorage.setItem(haEntitiesCacheKey, JSON.stringify(entities))
         
         if (!silent) {
           setHaConnectionStatus('connected')
@@ -396,7 +529,7 @@ export default function Dashboard({
     }, 10000)
     
     return () => clearInterval(interval)
-  }, [getAccessTokenSilently, isAuthenticated, selectedEnvironment, haRefreshKey])
+  }, [getAccessTokenSilently, haEntitiesCacheKey, isAuthenticated, selectedEnvironment, haRefreshKey])
 
   const getControlActions = (domain: string) => {
     switch (domain) {
@@ -455,18 +588,8 @@ export default function Dashboard({
     }
   }
 
-  // Mock data for demonstration - in real app, this would fetch from selected environment
   const configuredGasPrice = Number(import.meta.env.VITE_DEFAULT_GAS_PRICE_EUR_PER_M3)
   const gasRatePerM3 = Number.isFinite(configuredGasPrice) && configuredGasPrice > 0 ? configuredGasPrice : 1.35
-
-  const mockData = {
-    currentPower: 2.45,
-    dailyUsage: 12.8,
-    monthlyUsage: 285.3,
-    gasDailyUsage: 0,
-    gasMonthlyUsage: 0,
-    gasChartValue: 0,
-  }
 
   // Extract real-time energy data from Home Assistant entities
   const realTimeData = useMemo(() => {
@@ -671,7 +794,7 @@ export default function Dashboard({
 
     // Find power sensor (current usage in W or kW)
     const powerEntity = findEntity(['power', 'watt', 'current_power', 'active_power'])
-    let currentPower = powerEntity ? parseValue(powerEntity.state) : mockData.currentPower
+    let currentPower = powerEntity ? parseValue(powerEntity.state) : 0
     
     // eslint-disable-next-line no-console
     console.log('[Energy] Power entity:', powerEntity?.entity_id, '=', powerEntity?.state)
