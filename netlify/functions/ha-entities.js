@@ -97,6 +97,14 @@ const getVisibleEntityIds = (metadata, environmentId) => {
   return Array.isArray(visibleEntityIds) ? visibleEntityIds : []
 }
 
+const getUserVisibleEntityIds = (userMetadata, environmentId) => {
+  if (!userMetadata) return null
+  const haConfig = userMetadata.ha_config || {}
+  const envConfig = haConfig[environmentId] || {}
+  const visibleEntityIds = envConfig.visible_entity_ids
+  return Array.isArray(visibleEntityIds) ? visibleEntityIds : null
+}
+
 const getHaConfig = (metadata, environmentId) => {
   const envMap = metadata.environments || {}
   const envConfig = envMap[environmentId]
@@ -271,14 +279,31 @@ export const handler = async (event) => {
       return { statusCode: 400, body: JSON.stringify({ error: 'Missing environmentId' }) }
     }
 
-    await verifyAuth(event)
+    const { isAdmin, payload } = await verifyAuth(event)
 
     const domain = getEnv('AUTH0_DOMAIN')
 
     let metadata = {}
+    let userMetadata = null
     try {
       const managementToken = await getManagementToken(domain)
       metadata = await getCachedClientMetadata(domain, managementToken)
+
+      // Fetch user's own metadata for user-specific sensor visibility
+      if (payload?.sub) {
+        try {
+          const userResponse = await fetch(
+            `https://${domain}/api/v2/users/${encodeURIComponent(payload.sub)}?fields=user_metadata&include_fields=true`,
+            { headers: { Authorization: `Bearer ${managementToken}` } },
+          )
+          if (userResponse.ok) {
+            const userData = await userResponse.json()
+            userMetadata = userData.user_metadata || null
+          }
+        } catch (userMetadataError) {
+          console.warn('Failed to fetch user metadata:', userMetadataError instanceof Error ? userMetadataError.message : userMetadataError)
+        }
+      }
     } catch (metadataError) {
       console.warn('ha-entities metadata warning:', metadataError instanceof Error ? metadataError.message : metadataError)
     }
@@ -312,7 +337,7 @@ export const handler = async (event) => {
     // Filter to show ALMOST everything EXCEPT update entities and internal stuff
     const blockedDomains = ['update', 'script', 'automation', 'group', 'number', 'input_number', 'input_select', 'input_datetime']
     
-    const entities = Array.isArray(data)
+    let entities = Array.isArray(data)
       ? data
         .filter(entity => {
           const domain = String(entity.entity_id || '').split('.')[0]
@@ -326,6 +351,33 @@ export const handler = async (event) => {
           friendly_name: entity.attributes?.friendly_name || entity.entity_id,
         }))
       : []
+
+    if (!isAdmin) {
+      // Check for user-specific sensor visibility first
+      const userVisibleIds = getUserVisibleEntityIds(userMetadata, environmentId)
+      
+      if (userVisibleIds !== null) {
+        // User has user-specific sensor config - use it
+        const allowedSet = new Set(userVisibleIds.map((entityId) => String(entityId)))
+        const beforeFilterCount = entities.length
+        entities = entities.filter((entity) => allowedSet.has(entity.entity_id))
+        console.log('Applied user-specific visibility filter:', entities.length, 'of', beforeFilterCount, 'entities')
+      } else {
+        // No user-specific config - check for global admin config (for backward compatibility)
+        const globalVisibleIds = getVisibleEntityIds(metadata, environmentId)
+        if (globalVisibleIds.length > 0) {
+          const allowedSet = new Set(globalVisibleIds.map((entityId) => String(entityId)))
+          const beforeFilterCount = entities.length
+          entities = entities.filter((entity) => allowedSet.has(entity.entity_id))
+          console.log('Applied global visibility filter:', entities.length, 'of', beforeFilterCount, 'entities')
+        } else {
+          // No config at all - hide all entities by default
+          const beforeFilterCount = entities.length
+          entities = []
+          console.log('No sensor config found - hiding all entities for user. Was', beforeFilterCount, 'entities')
+        }
+      }
+    }
 
     console.log('Filtered to useful entities:', entities.length);
 

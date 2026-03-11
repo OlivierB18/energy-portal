@@ -40,13 +40,47 @@ export const handler = async (event) => {
     const environmentIds = Array.isArray(body.environmentIds)
       ? body.environmentIds.map((env) => String(env))
       : []
+    const environmentId = body.environmentId?.trim()
+    const visibleSensorIds = Array.isArray(body.visibleSensorIds)
+      ? body.visibleSensorIds.map((id) => String(id))
+      : []
 
     if (!userId) {
       return { statusCode: 400, body: JSON.stringify({ error: 'User ID is required' }) }
     }
 
     const managementToken = await getManagementToken(domain)
-    const user = await updateUserMetadata(domain, managementToken, userId, environmentIds)
+    let userMetadataUpdate = {}
+
+    // If environmentId and visibleSensorIds are provided, update sensor visibility
+    if (environmentId && visibleSensorIds.length >= 0) {
+      const currentUser = await getUserMetadata(domain, managementToken, userId)
+      const currentUserMetadata = currentUser.user_metadata || {}
+      const haConfig = currentUserMetadata.ha_config || {}
+
+      userMetadataUpdate = {
+        user_metadata: {
+          ...currentUserMetadata,
+          ha_config: {
+            ...haConfig,
+            [environmentId]: {
+              visible_entity_ids: visibleSensorIds,
+              updated_at: new Date().toISOString(),
+            },
+          },
+        },
+      }
+    }
+
+    const appMetadataUpdate = environmentIds.length > 0 ? { environmentIds } : {}
+
+    const user = await updateUserMetadata(
+      domain,
+      managementToken,
+      userId,
+      appMetadataUpdate,
+      userMetadataUpdate,
+    )
 
     return {
       statusCode: 200,
@@ -146,23 +180,42 @@ const getManagementToken = async (domain) => {
   }
 }
 
-const updateUserMetadata = async (domain, token, userId, environmentIds) => {
+const updateUserMetadata = async (domain, token, userId, appMetadata = {}, userMetadata = {}) => {
+  const body = {}
+  if (Object.keys(appMetadata).length > 0) {
+    body.app_metadata = appMetadata
+  }
+  if (Object.keys(userMetadata).length > 0) {
+    body.user_metadata = userMetadata.user_metadata
+  }
+
   const response = await fetch(`https://${domain}/api/v2/users/${encodeURIComponent(userId)}`, {
     method: 'PATCH',
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      app_metadata: {
-        environmentIds,
-      },
-    }),
+    body: JSON.stringify(body),
   })
 
   if (!response.ok) {
     const error = await response.json().catch(() => null)
     throw new Error(error?.message || 'Unable to update user')
+  }
+
+  return response.json()
+}
+
+const getUserMetadata = async (domain, token, userId) => {
+  const response = await fetch(`https://${domain}/api/v2/users/${encodeURIComponent(userId)}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  })
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => null)
+    throw new Error(error?.message || 'Unable to fetch user')
   }
 
   return response.json()

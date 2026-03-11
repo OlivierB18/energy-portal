@@ -11,7 +11,7 @@ function App() {
   const [isAdmin, setIsAdmin] = useState(false)
   const [selectedEnvironmentId, setSelectedEnvironmentId] = useState<string>('')
 
-  const { isAuthenticated, isLoading, loginWithRedirect, logout, getIdTokenClaims, getAccessTokenSilently } = useAuth0()
+  const { isAuthenticated, isLoading, loginWithRedirect, logout, getIdTokenClaims, getAccessTokenSilently, user } = useAuth0()
 
   const decodeJwtPayload = (token: string) => {
     try {
@@ -86,7 +86,8 @@ function App() {
           .map((email) => email.trim().toLowerCase())
           .filter(Boolean)
         const claimEmail = getEmailFromClaims(claims)
-        const email = claimEmail.toLowerCase()
+        const profileEmail = typeof user?.email === 'string' ? user.email : ''
+        const email = (claimEmail || profileEmail).toLowerCase()
         const isAllowedEmail = email.length > 0 && allowlist.includes(email)
 
         const nextIsAdmin = roles.includes('admin') || isAllowedEmail
@@ -99,7 +100,7 @@ function App() {
     }
 
     void loadRoles()
-  }, [getAccessTokenSilently, getIdTokenClaims, isAuthenticated])
+  }, [getAccessTokenSilently, getIdTokenClaims, isAuthenticated, user?.email])
 
   useEffect(() => {
     if (!isAuthenticated) {

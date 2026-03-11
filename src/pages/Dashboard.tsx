@@ -143,6 +143,8 @@ const normalizePricingConfig = (input: unknown): EnergyPricingConfig | null => {
   }
 }
 
+const sanitizeCacheSegment = (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, '_')
+
 export default function Dashboard({
   isAdmin,
   selectedEnvironmentId,
@@ -180,9 +182,9 @@ export default function Dashboard({
   const [showPriceModal, setShowPriceModal] = useState(false)
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false)
   const [pricingConfig, setPricingConfig] = useState<EnergyPricingConfig | null>(null)
-  // Home Assistant connection status: 'connecting' | 'connected' | 'error'
+  // Sensor connection status: 'connecting' | 'connected' | 'error'
   const [_haConnectionStatus, setHaConnectionStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
-  const { isAuthenticated, getIdTokenClaims, getAccessTokenSilently } = useAuth0()
+  const { isAuthenticated, getIdTokenClaims, getAccessTokenSilently, user } = useAuth0()
 
   const getAuthToken = useCallback(async () => {
     const audience = import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined
@@ -191,8 +193,13 @@ export default function Dashboard({
     })
   }, [getAccessTokenSilently])
 
+  const userCacheScope = useMemo(() => {
+    const rawScope = String(user?.sub || user?.email || 'anonymous')
+    return sanitizeCacheSegment(rawScope)
+  }, [user?.email, user?.sub])
+
   const haEnvironmentsCacheKey = 'ha_environments_cache_v1'
-  const haEntitiesCacheKey = `ha_entities_cache_${selectedEnvironment || 'default'}`
+  const haEntitiesCacheKey = `ha_entities_cache_${userCacheScope}_${selectedEnvironment || 'default'}`
 
   useEffect(() => {
     const loadEnvironments = async () => {
@@ -487,7 +494,7 @@ export default function Dashboard({
           console.error(`[HA] Error: ${data?.error || 'Unknown error'}`)
           if (!silent) {
             setHaConnectionStatus('error')
-            setHaError(data?.error || 'Unable to load Home Assistant data')
+            setHaError(data?.error || 'Unable to load sensor data')
           }
           // NEVER clear entities on error - keep showing last known data
           return
@@ -512,7 +519,7 @@ export default function Dashboard({
         // eslint-disable-next-line no-console
         console.error('[HA] Fetch error:', error);
         if (!silent) {
-          setHaError(error instanceof Error ? error.message : 'Unable to load Home Assistant data')
+          setHaError(error instanceof Error ? error.message : 'Unable to load sensor data')
           setHaConnectionStatus('error')
           setIsInitialLoading(false) // Set false on error too so we show last known data
         }
@@ -966,8 +973,8 @@ export default function Dashboard({
     }
   }, [haEntities, lastKnownHaEntities, pricingConfig, selectedEnvironment, gasRatePerM3, powerSamples])
 
-  const livePowerStorageKey = `energy_live_power_samples_${selectedEnvironment || 'default'}`
-  const liveGasStorageKey = `energy_gas_hourly_data_${selectedEnvironment || 'default'}`
+  const livePowerStorageKey = `energy_live_power_samples_${userCacheScope}_${selectedEnvironment || 'default'}`
+  const liveGasStorageKey = `energy_gas_hourly_data_${userCacheScope}_${selectedEnvironment || 'default'}`
   const latestPowerRef = useRef(realTimeData.currentPower)
 
   useEffect(() => {
@@ -1022,7 +1029,7 @@ export default function Dashboard({
     }
   }, [liveGasStorageKey])
 
-  // Fetch hourly gas consumption from HA
+  // Fetch hourly gas consumption
   useEffect(() => {
     if (!selectedEnvironment || !isAuthenticated) {
       return
@@ -1071,9 +1078,9 @@ export default function Dashboard({
     fetchGasHourly()
     const interval = window.setInterval(fetchGasHourly, 5 * 60 * 1000) // Refresh every 5 min
     return () => window.clearInterval(interval)
-  }, [selectedEnvironment])
+  }, [getAuthToken, isAuthenticated, liveGasStorageKey, selectedEnvironment])
 
-  // Fetch electricity history from Home Assistant
+  // Fetch electricity history
   useEffect(() => {
     if (!selectedEnvironment || !isAuthenticated || !haEntities.length) {
       return
@@ -1084,7 +1091,7 @@ export default function Dashboard({
         console.log('[HA History] Starting fetch for environment:', selectedEnvironment)
 
         // Get last fetch timestamp from localStorage
-        const lastFetchKey = `ha_history_last_fetch_${selectedEnvironment}`
+        const lastFetchKey = `ha_history_last_fetch_${userCacheScope}_${selectedEnvironment}`
         const lastFetchStr = localStorage.getItem(lastFetchKey)
         const lastFetch = lastFetchStr ? new Date(lastFetchStr) : null
 
@@ -1193,7 +1200,7 @@ export default function Dashboard({
     }
 
     void fetchHistoricalData()
-  }, [selectedEnvironment, isAuthenticated, haEntities, livePowerStorageKey, getAuthToken])
+  }, [selectedEnvironment, isAuthenticated, haEntities, livePowerStorageKey, getAuthToken, userCacheScope])
 
   useEffect(() => {
     if (!selectedEnvironment || visibleEnvironments.length === 0) {
@@ -1545,7 +1552,7 @@ export default function Dashboard({
                           <Settings className="w-5 h-5" />
                           <div>
                             <div className="font-medium">Configure Sensors</div>
-                            <div className="text-xs text-light-1">Setup Home Assistant</div>
+                            <div className="text-xs text-light-1">Choose visible sensors</div>
                           </div>
                         </button>
                       )}
@@ -1715,13 +1722,13 @@ export default function Dashboard({
           </div>
         </div>
 
-        {/* Home Assistant Panel */}
+        {/* Sensors Panel */}
         <div className="glass-panel rounded-3xl shadow-2xl p-8 mt-8">
           <div className="flex items-center justify-between mb-6">
-            <h2 className="text-2xl font-heavy text-dark-1">Home Assistant</h2>
+            <h2 className="text-2xl font-heavy text-dark-1">Sensors</h2>
           </div>
 
-          {haLoading && <p className="text-light-1">Loading Home Assistant data...</p>}
+          {haLoading && <p className="text-light-1">Loading sensor data...</p>}
           {haError && <p className="text-red-300">{haError}</p>}
           {/* Toon altijd de laatst bekende sensoren */}
           {!isInitialLoading && (haEntities.length > 0 || lastKnownHaEntities.length > 0) && (
@@ -1759,6 +1766,9 @@ export default function Dashboard({
                 })}
               </div>
             )}
+          {!isInitialLoading && haEntities.length === 0 && lastKnownHaEntities.length === 0 && (
+            <p className="text-light-1">No sensors are visible for this account yet.</p>
+          )}
         </div>
 
         {/* Footer Info */}

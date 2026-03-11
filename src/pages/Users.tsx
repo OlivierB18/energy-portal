@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useAuth0 } from '@auth0/auth0-react'
 import { Users as UsersIcon, ShieldAlert, Settings, Home, Zap, LogOut } from 'lucide-react'
+import UserSensorConfig from '../components/UserSensorConfig'
 
 interface UsersProps {
   isAdmin: boolean
@@ -39,6 +40,7 @@ export default function Users({ isAdmin, onOpenOverview, onOpenDashboard, onLogo
   const [environmentOptions, setEnvironmentOptions] = useState<EnvironmentOption[]>([])
   const [envError, setEnvError] = useState<string | null>(null)
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false)
+  const [selectedUserForSensorConfig, setSelectedUserForSensorConfig] = useState<{ userId: string; email: string; environmentId: string; environmentName: string } | null>(null)
 
   const adminEmailAllowlist = ((import.meta.env.VITE_ADMIN_EMAILS as string | undefined) ?? 'olivier@inside-out.tech')
     .split(',')
@@ -432,6 +434,28 @@ export default function Users({ isAdmin, onOpenOverview, onOpenDashboard, onLogo
                           >
                             {isAdminUser ? 'Admin' : savingUserId === user.user_id ? 'Saving...' : 'Save'}
                           </button>
+                          {!isAdminUser && user.email && (
+                            <button
+                              onClick={() => {
+                                if (user.environmentIds && user.environmentIds.length > 0) {
+                                  // Show a submenu or just configure for first env
+                                  const firstEnvId = user.environmentIds[0]
+                                  const envOption = environmentOptions.find((e) => e.id === firstEnvId)
+                                  if (envOption && user.email) {
+                                    setSelectedUserForSensorConfig({
+                                      userId: user.user_id,
+                                      email: user.email,
+                                      environmentId: firstEnvId,
+                                      environmentName: envOption.label,
+                                    })
+                                  }
+                                }
+                              }}
+                              className="px-3 py-1 rounded-lg bg-green-600 bg-opacity-30 text-green-200 text-xs font-medium hover:bg-opacity-50 transition-all"
+                            >
+                              Sensors
+                            </button>
+                          )}
                           {user.email && (
                             <button
                               onClick={() => sendPasswordReset(user.email ?? '')}
@@ -458,6 +482,42 @@ export default function Users({ isAdmin, onOpenOverview, onOpenDashboard, onLogo
           )}
         </div>
       </div>
+
+      {selectedUserForSensorConfig && (
+        <UserSensorConfig
+          userId={selectedUserForSensorConfig.userId}
+          userEmail={selectedUserForSensorConfig.email}
+          environmentId={selectedUserForSensorConfig.environmentId}
+          environmentName={selectedUserForSensorConfig.environmentName}
+          onClose={() => setSelectedUserForSensorConfig(null)}
+          onSaved={() => {
+            setSelectedUserForSensorConfig(null)
+            // Reload users to show updated state
+            const loadUsers = async () => {
+              try {
+                const token = await getAuthToken()
+                const response = await fetch('/.netlify/functions/list-users', {
+                  headers: {
+                    Authorization: `Bearer ${token}`,
+                  },
+                })
+
+                if (!response.ok) {
+                  throw new Error('Unable to load users')
+                }
+
+                const data = await response.json()
+                setUsers(data.users ?? [])
+              } catch (err) {
+                setError(err instanceof Error ? err.message : 'Unable to load users')
+              }
+            }
+
+            void loadUsers()
+          }}
+        />
+      )}
     </div>
   )
 }
+

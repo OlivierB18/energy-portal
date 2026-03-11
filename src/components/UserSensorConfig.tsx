@@ -3,19 +3,23 @@ import { useAuth0 } from '@auth0/auth0-react'
 import { Search, Save, X } from 'lucide-react'
 import { HaEntity } from '../types'
 
-interface HomeAssistantConfigProps {
+interface UserSensorConfigProps {
+  userId: string
+  userEmail: string
   environmentId: string
   environmentName: string
   onClose: () => void
   onSaved: () => void
 }
 
-export default function HomeAssistantConfig({
+export default function UserSensorConfig({
+  userId,
+  userEmail,
   environmentId,
   environmentName,
   onClose,
   onSaved,
-}: HomeAssistantConfigProps) {
+}: UserSensorConfigProps) {
   const { getAccessTokenSilently } = useAuth0()
   const [entities, setEntities] = useState<HaEntity[]>([])
   const [selectedEntityIds, setSelectedEntityIds] = useState<string[]>([])
@@ -55,25 +59,29 @@ export default function HomeAssistantConfig({
           fetch(`/.netlify/functions/ha-entities?environmentId=${environmentId}`, {
             headers: { Authorization: `Bearer ${token}` },
           }),
-          fetch(`/.netlify/functions/get-environment-config?environmentId=${environmentId}`, {
-            headers: { Authorization: `Bearer ${token}` },
-          }),
+          fetch(
+            `/.netlify/functions/get-user-environments?userId=${encodeURIComponent(userId)}&environmentId=${environmentId}`,
+            {
+              headers: { Authorization: `Bearer ${token}` },
+            },
+          ),
         ])
 
         if (!entitiesResponse.ok) {
           throw new Error('Unable to load entities')
         }
 
-        if (!configResponse.ok) {
-          throw new Error('Unable to load environment config')
-        }
-
         const entitiesData = await entitiesResponse.json()
-        const configData = await configResponse.json()
         const nextEntities = Array.isArray(entitiesData.entities) ? entitiesData.entities : []
-        const nextSelected = Array.isArray(configData.visibleEntityIds)
-          ? configData.visibleEntityIds
-          : []
+
+        // Try to load user's existing sensor config
+        let nextSelected: string[] = []
+        if (configResponse.ok) {
+          const configData = await configResponse.json()
+          if (configData.userMetadata?.ha_config?.[environmentId]?.visible_entity_ids) {
+            nextSelected = configData.userMetadata.ha_config[environmentId].visible_entity_ids
+          }
+        }
 
         setEntities(nextEntities)
         setSelectedEntityIds(nextSelected)
@@ -85,7 +93,7 @@ export default function HomeAssistantConfig({
     }
 
     void loadConfig()
-  }, [environmentId, getAccessTokenSilently])
+  }, [userId, environmentId, getAccessTokenSilently])
 
   const toggleSelection = (entityId: string) => {
     setSelectedEntityIds((prev) =>
@@ -99,15 +107,16 @@ export default function HomeAssistantConfig({
 
     try {
       const token = await getAuthToken()
-      const response = await fetch('/.netlify/functions/save-environment-config', {
+      const response = await fetch('/.netlify/functions/update-user', {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
+          userId,
           environmentId,
-          visibleEntityIds: selectedEntityIds,
+          visibleSensorIds: selectedEntityIds,
         }),
       })
 
@@ -130,7 +139,9 @@ export default function HomeAssistantConfig({
         <div className="p-6 flex items-center justify-between border-b border-dark-2 border-opacity-20">
           <div>
             <h2 className="text-2xl font-heavy text-light-2">Sensor Visibility</h2>
-            <p className="text-light-1 text-sm">{environmentName} - select what other users can see</p>
+            <p className="text-light-1 text-sm">
+              {userEmail} • {environmentName} - select visible sensors
+            </p>
           </div>
           <button
             onClick={onClose}
@@ -147,20 +158,18 @@ export default function HomeAssistantConfig({
               <input
                 value={filter}
                 onChange={(event) => setFilter(event.target.value)}
-                placeholder="Search entities"
+                placeholder="Search sensors"
                 className="bg-transparent text-light-2 w-full focus:outline-none"
               />
             </div>
-            <div className="text-sm text-light-1">
-              Selected: {selectedEntityIds.length}
-            </div>
+            <div className="text-sm text-light-1">Selected: {selectedEntityIds.length}</div>
           </div>
 
           {error && <div className="text-red-300 text-sm">{error}</div>}
-          {isLoading && <div className="text-light-1">Loading entities...</div>}
+          {isLoading && <div className="text-light-1">Loading sensors...</div>}
 
           {!isLoading && !error && filteredEntities.length === 0 && (
-            <div className="text-light-1">No entities found.</div>
+            <div className="text-light-1">No sensors found.</div>
           )}
 
           {!isLoading && filteredEntities.length > 0 && (
