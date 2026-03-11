@@ -166,11 +166,14 @@ const getUserEmailFromManagement = async (domain, token, userId) => {
     `https://${domain}/api/v2/users/${encodeURIComponent(userId)}?fields=email&include_fields=true`,
     { headers: { Authorization: `Bearer ${token}` } },
   )
+          console.log('[HA-ENTITIES] Failed to fetch user metadata, status:', response.status);
 
   if (!response.ok) {
     return ''
+        console.log('[HA-ENTITIES] Fetched user metadata, user_metadata exists:', !!userData.user_metadata);
   }
 
+        console.log('[HA-ENTITIES] Error fetching user metadata:', error.message);
   const data = await response.json()
   return typeof data.email === 'string' ? data.email.toLowerCase() : ''
 }
@@ -355,18 +358,19 @@ export const handler = async (event) => {
     if (!isAdmin) {
       // Check for user-specific sensor visibility only
       const userVisibleIds = getUserVisibleEntityIds(userMetadata, environmentId)
+        console.log('[HA-ENTITIES] Non-admin user, userVisibleIds:', userVisibleIds ? userVisibleIds.length : 'null')
       
       if (userVisibleIds !== null && userVisibleIds.length > 0) {
         // User has user-specific sensor config - use it
         const allowedSet = new Set(userVisibleIds.map((entityId) => String(entityId)))
         const beforeFilterCount = entities.length
         entities = entities.filter((entity) => allowedSet.has(entity.entity_id))
-        console.log('Applied user-specific visibility filter:', entities.length, 'of', beforeFilterCount, 'entities')
+          console.log('[HA-ENTITIES] Applied user-specific visibility filter:', entities.length, 'of', beforeFilterCount, 'entities')
       } else {
         // No user-specific config OR empty list - hide all entities by default
         const beforeFilterCount = entities.length
         entities = []
-        console.log('No user-specific sensor config - hiding all entities (default hidden). Was', beforeFilterCount, 'entities')
+          console.log('[HA-ENTITIES] No user-specific sensor config - hiding all entities. Was', beforeFilterCount, 'entities')
       }
     }
 

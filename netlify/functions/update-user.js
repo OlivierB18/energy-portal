@@ -54,6 +54,7 @@ export const handler = async (event) => {
 
     // If environmentId and visibleSensorIds are provided, update sensor visibility
     if (environmentId && visibleSensorIds.length >= 0) {
+        console.log('[UPDATE-USER] Updating sensor visibility for user:', userId, 'env:', environmentId, 'sensors:', visibleSensorIds.length)
       try {
         const currentUser = await getUserMetadata(domain, managementToken, userId)
         const currentUserMetadata = currentUser.user_metadata || {}
@@ -71,6 +72,7 @@ export const handler = async (event) => {
             },
           },
         }
+        console.log('[UPDATE-USER] Prepared userMetadataUpdate')
       } catch (metadataError) {
         console.error('Failed to update user metadata:', metadataError)
         throw new Error('Unable to get user metadata for sensor config')
@@ -78,6 +80,7 @@ export const handler = async (event) => {
     }
 
     const appMetadataUpdate = environmentIds.length > 0 ? { environmentIds } : {}
+      console.log('[UPDATE-USER] appMetadata keys:', Object.keys(appMetadataUpdate), 'userMetadata keys:', Object.keys(userMetadataUpdate))
 
     const user = await updateUserMetadata(
       domain,
@@ -195,10 +198,12 @@ const updateUserMetadata = async (domain, token, userId, appMetadata = {}, userM
   }
 
   if (Object.keys(body).length === 0) {
+    console.log('[UPDATE-USER] Empty body, skipping PATCH')
     // Nothing to update
     return { user_id: userId }
   }
 
+  console.log('[UPDATE-USER] Patching user with body keys:', Object.keys(body))
   const response = await fetch(`https://${domain}/api/v2/users/${encodeURIComponent(userId)}`, {
     method: 'PATCH',
     headers: {
@@ -209,10 +214,12 @@ const updateUserMetadata = async (domain, token, userId, appMetadata = {}, userM
   })
 
   if (!response.ok) {
+    console.log('[UPDATE-USER] PATCH failed with status:', response.status)
     const error = await response.json().catch(() => null)
     throw new Error(error?.message || 'Unable to update user')
   }
 
+  console.log('[UPDATE-USER] Successfully patched user')
   return response.json()
 }
 

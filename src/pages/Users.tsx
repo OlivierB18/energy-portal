@@ -472,15 +472,6 @@ export default function Users({ isAdmin, onOpenOverview, onOpenDashboard, onLogo
                               })
                             )}
                           </div>
-                          {!isAdminUser && (
-                            <button
-                              onClick={() => updateUserEnvironments(user.user_id, user.environmentIds ?? [])}
-                              disabled={savingUserId === user.user_id}
-                              className="mt-3 px-4 py-2 rounded-lg bg-brand-2 text-light-2 text-sm font-medium hover:bg-brand-3 transition-all disabled:opacity-60"
-                            >
-                              {savingUserId === user.user_id ? 'Saving...' : 'Save Environment Changes'}
-                            </button>
-                          )}
                         </div>
 
                         {/* Actions */}
