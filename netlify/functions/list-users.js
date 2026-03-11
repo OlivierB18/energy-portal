@@ -23,11 +23,11 @@ export const handler = async (event) => {
     const { payload } = await jwtVerify(token, jwks, {
       issuer: `https://${domain}/`,
     })
-    const fallbackEmail = getEmailFromPayload(payload)
-      ? ''
-      : await getUserInfoEmail(domain, token)
+    
+    const emailFromPayload = getEmailFromPayload(payload)
+    const fallbackEmail = emailFromPayload ? '' : await getUserInfoEmail(domain, token)
 
-    if (!isAdminFromClaims(payload, rolesClaim, fallbackEmail)) {
+    if (!isAdminFromClaims(payload, emailFromPayload || fallbackEmail)) {
       return { statusCode: 403, body: JSON.stringify({ error: 'Admin only' }) }
     }
 
@@ -64,7 +64,8 @@ const getUserInfoEmail = async (domain, token) => {
   return typeof data.email === 'string' ? data.email.toLowerCase() : ''
 }
 
-const isAdminFromClaims = (payload, rolesClaim, fallbackEmail = '') => {
+const isAdminFromClaims = (payload, email = '') => {
+  const rolesClaim = process.env.AUTH0_ROLES_CLAIM || 'https://brouwer-ems/roles'
   const rolesValue = payload[rolesClaim]
   const roles = Array.isArray(rolesValue)
     ? rolesValue
@@ -73,10 +74,9 @@ const isAdminFromClaims = (payload, rolesClaim, fallbackEmail = '') => {
       : []
   const allowlist = (process.env.ADMIN_EMAILS || process.env.VITE_ADMIN_EMAILS || 'olivier@inside-out.tech')
     .split(',')
-    .map((email) => email.trim().toLowerCase())
+    .map((emailStr) => emailStr.trim().toLowerCase())
     .filter(Boolean)
-  const email = getEmailFromPayload(payload) || fallbackEmail
-  const isAllowedEmail = email.length > 0 && allowlist.includes(email)
+  const isAllowedEmail = email.length > 0 && allowlist.includes(email.toLowerCase())
   return roles.includes('admin') || isAllowedEmail
 }
 
