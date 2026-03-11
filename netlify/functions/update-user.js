@@ -54,21 +54,26 @@ export const handler = async (event) => {
 
     // If environmentId and visibleSensorIds are provided, update sensor visibility
     if (environmentId && visibleSensorIds.length >= 0) {
-      const currentUser = await getUserMetadata(domain, managementToken, userId)
-      const currentUserMetadata = currentUser.user_metadata || {}
-      const haConfig = currentUserMetadata.ha_config || {}
+      try {
+        const currentUser = await getUserMetadata(domain, managementToken, userId)
+        const currentUserMetadata = currentUser.user_metadata || {}
+        const haConfig = currentUserMetadata.ha_config || {}
 
-      userMetadataUpdate = {
-        user_metadata: {
-          ...currentUserMetadata,
-          ha_config: {
-            ...haConfig,
-            [environmentId]: {
-              visible_entity_ids: visibleSensorIds,
-              updated_at: new Date().toISOString(),
+        userMetadataUpdate = {
+          user_metadata: {
+            ...currentUserMetadata,
+            ha_config: {
+              ...haConfig,
+              [environmentId]: {
+                visible_entity_ids: visibleSensorIds,
+                updated_at: new Date().toISOString(),
+              },
             },
           },
-        },
+        }
+      } catch (metadataError) {
+        console.error('Failed to update user metadata:', metadataError)
+        throw new Error('Unable to get user metadata for sensor config')
       }
     }
 
@@ -187,6 +192,11 @@ const updateUserMetadata = async (domain, token, userId, appMetadata = {}, userM
   }
   if (Object.keys(userMetadata).length > 0) {
     body.user_metadata = userMetadata.user_metadata
+  }
+
+  if (Object.keys(body).length === 0) {
+    // Nothing to update
+    return { user_id: userId }
   }
 
   const response = await fetch(`https://${domain}/api/v2/users/${encodeURIComponent(userId)}`, {
