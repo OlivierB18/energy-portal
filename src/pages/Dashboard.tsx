@@ -427,6 +427,7 @@ export default function Dashboard({
           state: entity.state,
           domain: entity.domain,
           friendly_name: entity.friendly_name,
+          unit_of_measurement: entity.unit_of_measurement,
         }))
 
       if (normalized.length > 0) {
@@ -613,6 +614,9 @@ export default function Dashboard({
 
     const environmentKey = selectedEnvironment || 'default'
 
+    const toSearchable = (entity: HaEntity) =>
+      `${entity.entity_id} ${entity.friendly_name || ''}`.toLowerCase()
+
     // Helper function to find entity by keywords in entity_id/friendly_name
     const findEntity = (keywords: string[], excludedKeywords: string[] = []): HaEntity | undefined => {
       return entities.find((entity) => {
@@ -620,10 +624,75 @@ export default function Dashboard({
           return false
         }
 
-        const searchable = `${entity.entity_id} ${entity.friendly_name || ''}`.toLowerCase()
+        const searchable = toSearchable(entity)
         return keywords.some((keyword) => searchable.includes(keyword.toLowerCase())) &&
           !excludedKeywords.some((keyword) => searchable.includes(keyword.toLowerCase()))
       })
+    }
+
+    const findPowerEntity = (): HaEntity | undefined => {
+      const powerKeywords = [
+        'current_power',
+        'active_power',
+        'power',
+        'watt',
+        'vermogen',
+        'actueel vermogen',
+        'actueel_vermogen',
+        'huidig verbruik',
+        'verbruik nu',
+        'current usage',
+        'current consumption',
+        'load',
+      ]
+      const excludedKeywords = [
+        'today',
+        'daily',
+        'day',
+        'month',
+        'monthly',
+        'total',
+        'kwh',
+        'energy',
+        'gas',
+        'price',
+        'cost',
+        'tariff',
+      ]
+
+      const candidates = entities.filter((entity) => {
+        if (entity.domain !== 'sensor') {
+          return false
+        }
+
+        const searchable = toSearchable(entity)
+        return !excludedKeywords.some((keyword) => searchable.includes(keyword))
+      })
+
+      const keywordMatch = candidates.find((entity) => {
+        const searchable = toSearchable(entity)
+        return powerKeywords.some((keyword) => searchable.includes(keyword))
+      })
+      if (keywordMatch) {
+        return keywordMatch
+      }
+
+      return candidates.find((entity) => {
+        const unit = String(entity.unit_of_measurement || '').trim().toLowerCase()
+        return unit === 'w' || unit === 'kw' || unit === 'watt' || unit === 'kilowatt'
+      })
+    }
+
+    const convertPowerToKw = (rawValue: number, unit: string | undefined) => {
+      const normalizedUnit = String(unit || '').trim().toLowerCase()
+      if (normalizedUnit === 'w' || normalizedUnit === 'watt' || normalizedUnit === 'va') {
+        return rawValue / 1000
+      }
+      if (normalizedUnit === 'kw' || normalizedUnit === 'kilowatt') {
+        return rawValue
+      }
+      // Backward-compatible fallback for sensors without units.
+      return rawValue > 100 ? rawValue / 1000 : rawValue
     }
 
     // Helper function to track energy usage locally when no sensor available
@@ -803,16 +872,13 @@ export default function Dashboard({
     }
 
     // Find power sensor (current usage in W or kW)
-    const powerEntity = findEntity(['power', 'watt', 'current_power', 'active_power'])
+    const powerEntity = findPowerEntity()
     let currentPower = powerEntity ? parseValue(powerEntity.state) : 0
     
     // eslint-disable-next-line no-console
     console.log('[Energy] Power entity:', powerEntity?.entity_id, '=', powerEntity?.state)
     
-    // Convert W to kW if needed (if value is > 100, assume it's in Watts)
-    if (currentPower > 100) {
-      currentPower = currentPower / 1000
-    }
+    currentPower = convertPowerToKw(currentPower, powerEntity?.unit_of_measurement)
 
     // Find daily/monthly/total electricity sensors (in kWh)
     const dailyEntity = findEntity(
