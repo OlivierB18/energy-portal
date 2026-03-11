@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useAuth0 } from '@auth0/auth0-react'
-import { Users as UsersIcon, ShieldAlert, Settings, Home, Zap, LogOut } from 'lucide-react'
+import { Users as UsersIcon, ShieldAlert, Settings, Home, Zap, LogOut, ChevronDown, Lock } from 'lucide-react'
 import UserSensorConfig from '../components/UserSensorConfig'
 
 interface UsersProps {
@@ -41,6 +41,7 @@ export default function Users({ isAdmin, onOpenOverview, onOpenDashboard, onLogo
   const [envError, setEnvError] = useState<string | null>(null)
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false)
   const [selectedUserForSensorConfig, setSelectedUserForSensorConfig] = useState<{ userId: string; email: string; environmentId: string; environmentName: string } | null>(null)
+  const [expandedUserId, setExpandedUserId] = useState<string | null>(null)
 
   const adminEmailAllowlist = ((import.meta.env.VITE_ADMIN_EMAILS as string | undefined) ?? 'olivier@inside-out.tech')
     .split(',')
@@ -374,110 +375,132 @@ export default function Users({ isAdmin, onOpenOverview, onOpenDashboard, onLogo
           )}
 
           {!isLoading && !error && users.length > 0 && (
-            <div className="overflow-x-auto">
-              <table className="min-w-full text-left">
-                <thead>
-                  <tr className="text-dark-2 text-sm">
-                    <th className="py-2">Name</th>
-                    <th className="py-2">Email</th>
-                    <th className="py-2">Environments</th>
-                    <th className="py-2">Actions</th>
-                    <th className="py-2">Last login</th>
-                    <th className="py-2">Created</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {users.map((user) => {
-                    const isAdminUser = !!user.email && adminEmailAllowlist.includes(user.email.toLowerCase())
+            <div className="space-y-2">
+              {users.map((user) => {
+                const isAdminUser = !!user.email && adminEmailAllowlist.includes(user.email.toLowerCase())
+                const isExpanded = expandedUserId === user.user_id
 
-                    return (
-                    <tr key={user.user_id} className="border-t border-dark-2 border-opacity-10">
-                      <td className="py-3 font-medium text-dark-1">{user.name ?? '—'}</td>
-                      <td className="py-3 text-dark-1">{user.email ?? '—'}</td>
-                      <td className="py-3 text-dark-2">
-                        <div className="flex flex-wrap gap-2">
-                          {environmentOptions.map((env) => (
-                            <label key={env.id} className="flex items-center gap-2 text-xs text-dark-2">
-                              <input
-                                type="checkbox"
-                                checked={user.environmentIds?.includes(env.id) ?? false}
-                                disabled={isAdminUser}
-                                onChange={(event) => {
-                                  if (isAdminUser) {
-                                    return
-                                  }
-                                  const current = user.environmentIds ?? []
-                                  const next = event.target.checked
-                                    ? [...current, env.id]
-                                    : current.filter((id) => id !== env.id)
-
-                                  setUsers((prev) =>
-                                    prev.map((row) =>
-                                      row.user_id === user.user_id
-                                        ? { ...row, environmentIds: next }
-                                        : row,
-                                    ),
-                                  )
-                                }}
-                              />
-                              {env.label}
-                            </label>
-                          ))}
+                return (
+                  <div key={user.user_id} className="border border-dark-2 border-opacity-10 rounded-xl overflow-hidden">
+                    {/* User Header Row */}
+                    <div className="bg-dark-2 bg-opacity-5 p-4 flex items-center justify-between hover:bg-opacity-10 transition-colors">
+                      <div className="flex items-center gap-4 flex-1">
+                        <button
+                          onClick={() => setExpandedUserId(isExpanded ? null : user.user_id)}
+                          className="p-1 hover:bg-dark-2 hover:bg-opacity-20 rounded transition-colors"
+                        >
+                          <ChevronDown
+                            className={`w-5 h-5 text-dark-2 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
+                          />
+                        </button>
+                        <div className="flex-1">
+                          <h3 className="font-semibold text-dark-1">{user.name ?? user.email ?? '—'}</h3>
+                          <p className="text-sm text-dark-2">{user.email ?? '—'}</p>
                         </div>
-                      </td>
-                      <td className="py-3 text-dark-2">
-                        <div className="flex flex-wrap gap-2">
-                          <button
-                            onClick={() => updateUserEnvironments(user.user_id, user.environmentIds ?? [])}
-                            disabled={savingUserId === user.user_id || isAdminUser}
-                            className="px-3 py-1 rounded-lg bg-brand-2 text-light-2 text-xs font-medium hover:bg-brand-3 transition-all disabled:opacity-60"
-                          >
-                            {isAdminUser ? 'Admin' : savingUserId === user.user_id ? 'Saving...' : 'Save'}
-                          </button>
-                          {!isAdminUser && user.email && (
+                        {isAdminUser && (
+                          <div className="flex items-center gap-1 px-2 py-1 bg-brand-2 bg-opacity-20 rounded-lg">
+                            <Lock className="w-3 h-3 text-brand-2" />
+                            <span className="text-xs font-medium text-brand-2">Admin</span>
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 text-xs text-dark-2">
+                        <div className="text-right">
+                          <div className="font-medium">Last login</div>
+                          <div>{user.last_login ? new Date(user.last_login).toLocaleDateString() : '—'}</div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Expanded Content */}
+                    {isExpanded && (
+                      <div className="p-4 bg-dark-2 bg-opacity-2 border-t border-dark-2 border-opacity-10 space-y-4">
+                        {/* Environments & Sensors Section */}
+                        <div>
+                          <h4 className="text-sm font-semibold text-dark-1 mb-3">Environments & Sensors</h4>
+                          <div className="space-y-2">
+                            {environmentOptions.length === 0 ? (
+                              <p className="text-xs text-dark-2">No environments available</p>
+                            ) : (
+                              environmentOptions.map((env) => {
+                                const hasAccess = user.environmentIds?.includes(env.id) ?? false
+                                return (
+                                  <div key={env.id} className="flex items-center justify-between p-3 bg-dark-2 bg-opacity-5 rounded-lg border border-dark-2 border-opacity-10">
+                                    <div className="flex items-center gap-3 flex-1">
+                                      <label className="flex items-center gap-2 cursor-pointer">
+                                        <input
+                                          type="checkbox"
+                                          checked={hasAccess}
+                                          disabled={isAdminUser}
+                                          onChange={(event) => {
+                                            if (isAdminUser) return
+                                            const next = event.target.checked
+                                              ? [...(user.environmentIds ?? []), env.id]
+                                              : (user.environmentIds ?? []).filter((id) => id !== env.id)
+                                            setUsers((prev) =>
+                                              prev.map((u) =>
+                                                u.user_id === user.user_id
+                                                  ? { ...u, environmentIds: next }
+                                                  : u,
+                                              ),
+                                            )
+                                          }}
+                                          className="rounded"
+                                        />
+                                        <span className="text-sm font-medium text-dark-1">{env.label}</span>
+                                      </label>
+                                    </div>
+                                    {!isAdminUser && hasAccess && user.email && (
+                                      <button
+                                        onClick={() => {
+                                          if (user.email) {
+                                            setSelectedUserForSensorConfig({
+                                              userId: user.user_id,
+                                              email: user.email,
+                                              environmentId: env.id,
+                                              environmentName: env.label,
+                                            })
+                                          }
+                                        }}
+                                        className="px-3 py-1 text-xs font-medium rounded-lg bg-green-600 bg-opacity-30 text-green-200 hover:bg-opacity-50 transition-all"
+                                      >
+                                        Configure Sensors
+                                      </button>
+                                    )}
+                                  </div>
+                                )
+                              })
+                            )}
+                          </div>
+                          {!isAdminUser && (
                             <button
-                              onClick={() => {
-                                if (user.environmentIds && user.environmentIds.length > 0) {
-                                  // Show a submenu or just configure for first env
-                                  const firstEnvId = user.environmentIds[0]
-                                  const envOption = environmentOptions.find((e) => e.id === firstEnvId)
-                                  if (envOption && user.email) {
-                                    setSelectedUserForSensorConfig({
-                                      userId: user.user_id,
-                                      email: user.email,
-                                      environmentId: firstEnvId,
-                                      environmentName: envOption.label,
-                                    })
-                                  }
-                                }
-                              }}
-                              className="px-3 py-1 rounded-lg bg-green-600 bg-opacity-30 text-green-200 text-xs font-medium hover:bg-opacity-50 transition-all"
+                              onClick={() => updateUserEnvironments(user.user_id, user.environmentIds ?? [])}
+                              disabled={savingUserId === user.user_id}
+                              className="mt-3 px-4 py-2 rounded-lg bg-brand-2 text-light-2 text-sm font-medium hover:bg-brand-3 transition-all disabled:opacity-60"
                             >
-                              Sensors
+                              {savingUserId === user.user_id ? 'Saving...' : 'Save Environment Changes'}
                             </button>
                           )}
+                        </div>
+
+                        {/* Actions */}
+                        <div className="border-t border-dark-2 border-opacity-10 pt-3">
+                          <p className="text-xs font-semibold text-dark-2 mb-2">Account Actions</p>
                           {user.email && (
                             <button
                               onClick={() => sendPasswordReset(user.email ?? '')}
                               disabled={resettingUserId === user.email}
-                              className="px-3 py-1 rounded-lg bg-dark-2 bg-opacity-10 text-dark-2 text-xs font-medium hover:bg-opacity-20 transition-all disabled:opacity-60"
+                              className="w-full px-3 py-2 rounded-lg bg-dark-2 bg-opacity-10 text-dark-2 text-sm font-medium hover:bg-opacity-20 transition-all disabled:opacity-60"
                             >
-                              {resettingUserId === user.email ? 'Sending...' : 'Send reset'}
+                              {resettingUserId === user.email ? 'Sending Password Reset...' : 'Send Password Reset Email'}
                             </button>
                           )}
                         </div>
-                      </td>
-                      <td className="py-3 text-dark-2">
-                        {user.last_login ? new Date(user.last_login).toLocaleString() : '—'}
-                      </td>
-                      <td className="py-3 text-dark-2">
-                        {user.created_at ? new Date(user.created_at).toLocaleDateString() : '—'}
-                      </td>
-                    </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
             </div>
           )}
         </div>

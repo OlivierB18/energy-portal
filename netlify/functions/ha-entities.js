@@ -353,29 +353,20 @@ export const handler = async (event) => {
       : []
 
     if (!isAdmin) {
-      // Check for user-specific sensor visibility first
+      // Check for user-specific sensor visibility only
       const userVisibleIds = getUserVisibleEntityIds(userMetadata, environmentId)
       
-      if (userVisibleIds !== null) {
+      if (userVisibleIds !== null && userVisibleIds.length > 0) {
         // User has user-specific sensor config - use it
         const allowedSet = new Set(userVisibleIds.map((entityId) => String(entityId)))
         const beforeFilterCount = entities.length
         entities = entities.filter((entity) => allowedSet.has(entity.entity_id))
         console.log('Applied user-specific visibility filter:', entities.length, 'of', beforeFilterCount, 'entities')
       } else {
-        // No user-specific config - check for global admin config (for backward compatibility)
-        const globalVisibleIds = getVisibleEntityIds(metadata, environmentId)
-        if (globalVisibleIds.length > 0) {
-          const allowedSet = new Set(globalVisibleIds.map((entityId) => String(entityId)))
-          const beforeFilterCount = entities.length
-          entities = entities.filter((entity) => allowedSet.has(entity.entity_id))
-          console.log('Applied global visibility filter:', entities.length, 'of', beforeFilterCount, 'entities')
-        } else {
-          // No config at all - hide all entities by default
-          const beforeFilterCount = entities.length
-          entities = []
-          console.log('No sensor config found - hiding all entities for user. Was', beforeFilterCount, 'entities')
-        }
+        // No user-specific config OR empty list - hide all entities by default
+        const beforeFilterCount = entities.length
+        entities = []
+        console.log('No user-specific sensor config - hiding all entities (default hidden). Was', beforeFilterCount, 'entities')
       }
     }
 
