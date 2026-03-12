@@ -218,17 +218,60 @@ const getDashboardMetrics = (entities) => {
       Number.isFinite(parseNumericValue(entity.state))
     ))
 
-  const dailyElectricityEntity = findEntityByKeywords(
-    entities,
-    ['energy_today', 'daily_energy', 'today_energy', 'day_energy', 'daily', 'today', 'verbruik_vandaag'],
-    ['gas', 'price', 'cost', 'tariff'],
-  )
+  const pickElectricityPeriodEntity = (period) => {
+    const isDaily = period === 'daily'
+    const periodKeywords = isDaily
+      ? ['today', 'daily', 'day', 'vandaag', 'dag']
+      : ['month', 'monthly', 'this_month', 'maand']
+    const energyContextKeywords = ['electricity', 'energy', 'consumption', 'meter', 'kwh', 'verbruik']
+    const preciseKeywords = isDaily
+      ? ['energy_today', 'today_energy', 'daily_energy', 'consumption_today', 'verbruik_vandaag']
+      : ['energy_month', 'month_energy', 'monthly_energy', 'consumption_month', 'verbruik_maand']
+    const tariffKeywords = ['tariff', 'peak', 'offpeak', 'dal', 'hoog', 'laag', 't1', 't2', 'normal', 'low', 'high']
 
-  const monthlyElectricityEntity = findEntityByKeywords(
-    entities,
-    ['energy_month', 'monthly_energy', 'month_energy', 'monthly', 'this_month', 'month', 'verbruik_maand'],
-    ['gas', 'price', 'cost', 'tariff'],
-  )
+    const candidates = entities
+      .filter((entity) => {
+        if (entity.domain !== 'sensor') {
+          return false
+        }
+
+        const searchable = toSearchable(entity)
+        if (includesAny(searchable, ['gas', 'price', 'cost', 'tariff'])) {
+          return false
+        }
+
+        const numericState = Number.isFinite(parseNumericValue(entity.state))
+        if (!numericState) {
+          return false
+        }
+
+        const hasPeriod = includesAny(searchable, periodKeywords)
+        const hasEnergyContext = includesAny(searchable, energyContextKeywords)
+        return hasPeriod && hasEnergyContext
+      })
+      .map((entity) => {
+        const searchable = toSearchable(entity)
+        const deviceClass = String(entity.device_class || '').toLowerCase()
+        const stateClass = String(entity.state_class || '').toLowerCase()
+        let score = 0
+
+        if (includesAny(searchable, preciseKeywords)) score += 5
+        if (includesAny(searchable, ['total', 'main', 'meter', 'consumption'])) score += 2
+        if (isEnergyUnit(entity.unit_of_measurement)) score += 2
+        if (deviceClass === 'energy') score += 2
+        if (stateClass === 'measurement') score += 1
+        if (includesAny(searchable, tariffKeywords)) score -= 3
+
+        return { entity, score }
+      })
+      .sort((a, b) => b.score - a.score)
+
+    return candidates[0]?.entity || null
+  }
+
+  const dailyElectricityEntity = pickElectricityPeriodEntity('daily')
+
+  const monthlyElectricityEntity = pickElectricityPeriodEntity('monthly')
 
   const dailyGasEntity = findEntityByKeywords(
     entities,
@@ -565,9 +608,7 @@ const enrichMetricsWithHistoryFallback = async ({
   const needsGasFallback =
     metrics.dailyGasM3 === null || metrics.monthlyGasM3 === null
 
-  const shouldDeriveElectricityFromTotalHistory = true
-
-  if (!shouldDeriveElectricityFromTotalHistory && !needsElectricityFallback && !needsGasFallback) {
+  if (!needsElectricityFallback && !needsGasFallback) {
     return metrics
   }
 
@@ -578,9 +619,9 @@ const enrichMetricsWithHistoryFallback = async ({
     return {
       ...metrics,
       dailyElectricityKwh:
-        cached.values.dailyElectricityKwh ?? metrics.dailyElectricityKwh ?? null,
+        metrics.dailyElectricityKwh ?? cached.values.dailyElectricityKwh ?? null,
       monthlyElectricityKwh:
-        cached.values.monthlyElectricityKwh ?? metrics.monthlyElectricityKwh ?? null,
+        metrics.monthlyElectricityKwh ?? cached.values.monthlyElectricityKwh ?? null,
       dailyGasM3:
         metrics.dailyGasM3 ?? cached.values.dailyGasM3 ?? null,
       monthlyGasM3:
@@ -605,7 +646,7 @@ const enrichMetricsWithHistoryFallback = async ({
 
   const fallbackSources = {}
 
-  if (shouldDeriveElectricityFromTotalHistory || needsElectricityFallback) {
+  if (needsElectricityFallback) {
     const electricityCandidates = pickTotalElectricityCandidates(entities)
 
     if (electricityCandidates.length > 0) {
@@ -689,9 +730,9 @@ const enrichMetricsWithHistoryFallback = async ({
   return {
     ...metrics,
     dailyElectricityKwh:
-      fallbackValues.dailyElectricityKwh ?? metrics.dailyElectricityKwh ?? null,
+      metrics.dailyElectricityKwh ?? fallbackValues.dailyElectricityKwh ?? null,
     monthlyElectricityKwh:
-      fallbackValues.monthlyElectricityKwh ?? metrics.monthlyElectricityKwh ?? null,
+      metrics.monthlyElectricityKwh ?? fallbackValues.monthlyElectricityKwh ?? null,
     dailyGasM3:
       metrics.dailyGasM3 ?? fallbackValues.dailyGasM3 ?? null,
     monthlyGasM3:
