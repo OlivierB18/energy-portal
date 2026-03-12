@@ -278,8 +278,6 @@ const getDashboardMetrics = (entities) => {
   }
 }
 
-const startsWithAny = (value, items) => items.some((item) => value.startsWith(item))
-
 const includesAny = (value, items) => items.some((item) => value.includes(item))
 
 const isEnergyUnit = (unit) => {
@@ -292,7 +290,40 @@ const isGasUnit = (unit) => {
   return normalized === 'm3' || normalized === 'm^3' || normalized === 'm³'
 }
 
-const pickTotalElectricityEntity = (entities) => {
+const getEntitySearchFlags = (searchable) => {
+  const isDailyLike = includesAny(searchable, ['today', 'daily', 'day'])
+  const isMonthlyLike = includesAny(searchable, ['month', 'monthly'])
+  const isTariffLike = includesAny(searchable, [
+    'tariff',
+    'peak',
+    'offpeak',
+    'dal',
+    'hoog',
+    'laag',
+    't1',
+    't2',
+    'normal',
+    'low',
+    'high',
+  ])
+  const isAggregateLike = includesAny(searchable, [
+    'total',
+    'meter',
+    'consumption',
+    'main',
+    'grid',
+    'verbruik',
+  ])
+
+  return {
+    isDailyLike,
+    isMonthlyLike,
+    isTariffLike,
+    isAggregateLike,
+  }
+}
+
+const pickTotalElectricityCandidates = (entities) => {
   const candidates = entities
     .filter((entity) => {
       if (entity.domain !== 'sensor') {
@@ -319,21 +350,55 @@ const pickTotalElectricityEntity = (entities) => {
       const searchable = toSearchable(entity)
       const stateClass = String(entity.state_class || '').toLowerCase()
       const deviceClass = String(entity.device_class || '').toLowerCase()
+      const flags = getEntitySearchFlags(searchable)
       let score = 0
 
       if (deviceClass === 'energy') score += 5
       if (stateClass === 'total_increasing') score += 5
       if (stateClass === 'total') score += 4
-      if (includesAny(searchable, ['total', 'meter', 'consumption'])) score += 3
+      if (flags.isAggregateLike) score += 3
       if (isEnergyUnit(entity.unit_of_measurement)) score += 2
-      if (includesAny(searchable, ['today', 'daily', 'day', 'month', 'monthly'])) score -= 6
-      if (startsWithAny(searchable, ['sensor.energy_'])) score += 1
+      if (flags.isDailyLike || flags.isMonthlyLike) score -= 8
+      if (flags.isTariffLike) score -= 1
 
-      return { entity, score }
+      return {
+        entity,
+        score,
+        stateClass,
+        ...flags,
+      }
     })
+    .filter((candidate) => !candidate.isDailyLike && !candidate.isMonthlyLike)
     .sort((a, b) => b.score - a.score)
 
-  return candidates[0]?.entity || null
+  return candidates
+}
+
+const convertEnergyToKwh = (value, unit) => {
+  if (!Number.isFinite(value)) {
+    return NaN
+  }
+
+  const normalized = String(unit || '').trim().toLowerCase()
+  if (normalized === 'wh') {
+    return value / 1000
+  }
+  if (normalized === 'mwh') {
+    return value * 1000
+  }
+  return value
+}
+
+const convertGasToM3 = (value, unit) => {
+  if (!Number.isFinite(value)) {
+    return NaN
+  }
+
+  const normalized = String(unit || '').trim().toLowerCase()
+  if (normalized === 'l' || normalized === 'liter' || normalized === 'liters') {
+    return value / 1000
+  }
+  return value
 }
 
 const pickTotalGasEntity = (entities) => {
@@ -379,7 +444,8 @@ const pickTotalGasEntity = (entities) => {
   return candidates[0]?.entity || null
 }
 
-const fetchEntityHistorySeries = async (baseUrl, token, entityId, startIso, endIso) => {
+const fetchEntityHistorySeries = async (baseUrl, token, entity, startIso, endIso) => {
+  const entityId = entity?.entity_id
   if (!entityId) {
     return []
   }
@@ -409,7 +475,10 @@ const fetchEntityHistorySeries = async (baseUrl, token, entityId, startIso, endI
   return (Array.isArray(historyEntries) ? historyEntries : [])
     .map((state) => {
       const timestamp = new Date(state?.last_changed || state?.last_updated).getTime()
-      const value = parseNumericValue(state?.state)
+      const rawValue = parseNumericValue(state?.state)
+      const value = entity?.kind === 'gas'
+        ? convertGasToM3(rawValue, entity?.unit_of_measurement)
+        : convertEnergyToKwh(rawValue, entity?.unit_of_measurement)
       if (!Number.isFinite(timestamp) || !Number.isFinite(value)) {
         return null
       }
@@ -496,7 +565,9 @@ const enrichMetricsWithHistoryFallback = async ({
   const needsGasFallback =
     metrics.dailyGasM3 === null || metrics.monthlyGasM3 === null
 
-  if (!needsElectricityFallback && !needsGasFallback) {
+  const shouldDeriveElectricityFromTotalHistory = true
+
+  if (!shouldDeriveElectricityFromTotalHistory && !needsElectricityFallback && !needsGasFallback) {
     return metrics
   }
 
@@ -507,9 +578,9 @@ const enrichMetricsWithHistoryFallback = async ({
     return {
       ...metrics,
       dailyElectricityKwh:
-        metrics.dailyElectricityKwh ?? cached.values.dailyElectricityKwh ?? null,
+        cached.values.dailyElectricityKwh ?? metrics.dailyElectricityKwh ?? null,
       monthlyElectricityKwh:
-        metrics.monthlyElectricityKwh ?? cached.values.monthlyElectricityKwh ?? null,
+        cached.values.monthlyElectricityKwh ?? metrics.monthlyElectricityKwh ?? null,
       dailyGasM3:
         metrics.dailyGasM3 ?? cached.values.dailyGasM3 ?? null,
       monthlyGasM3:
@@ -534,20 +605,61 @@ const enrichMetricsWithHistoryFallback = async ({
 
   const fallbackSources = {}
 
-  if (needsElectricityFallback) {
-    const electricityTotalEntity = pickTotalElectricityEntity(entities)
-    if (electricityTotalEntity?.entity_id) {
-      const electricitySeries = await fetchEntityHistorySeries(
-        baseUrl,
-        token,
-        electricityTotalEntity.entity_id,
-        startIso,
-        nowIso,
+  if (shouldDeriveElectricityFromTotalHistory || needsElectricityFallback) {
+    const electricityCandidates = pickTotalElectricityCandidates(entities)
+
+    if (electricityCandidates.length > 0) {
+      const aggregateCandidate = electricityCandidates.find(
+        (candidate) => candidate.isAggregateLike && !candidate.isTariffLike,
       )
-      const deltas = deriveDailyMonthlyDeltas(electricitySeries)
-      fallbackValues.dailyElectricityKwh = deltas.daily
-      fallbackValues.monthlyElectricityKwh = deltas.monthly
-      fallbackSources.electricityTotalEntityId = electricityTotalEntity.entity_id
+
+      const selectedCandidates = aggregateCandidate
+        ? [aggregateCandidate]
+        : (() => {
+            const tariffCandidates = electricityCandidates.filter((candidate) => candidate.isTariffLike)
+            if (tariffCandidates.length >= 2) {
+              return tariffCandidates.slice(0, 4)
+            }
+            return [electricityCandidates[0]]
+          })()
+
+      let dailySum = 0
+      let monthlySum = 0
+      let hasDaily = false
+      let hasMonthly = false
+      const usedEntityIds = []
+
+      for (const candidate of selectedCandidates) {
+        const sourceEntity = {
+          ...candidate.entity,
+          kind: 'energy',
+        }
+
+        const electricitySeries = await fetchEntityHistorySeries(
+          baseUrl,
+          token,
+          sourceEntity,
+          startIso,
+          nowIso,
+        )
+        const deltas = deriveDailyMonthlyDeltas(electricitySeries)
+
+        if (deltas.daily !== null) {
+          dailySum += deltas.daily
+          hasDaily = true
+        }
+        if (deltas.monthly !== null) {
+          monthlySum += deltas.monthly
+          hasMonthly = true
+        }
+
+        usedEntityIds.push(candidate.entity.entity_id)
+      }
+
+      fallbackValues.dailyElectricityKwh = hasDaily ? Number(dailySum.toFixed(3)) : null
+      fallbackValues.monthlyElectricityKwh = hasMonthly ? Number(monthlySum.toFixed(3)) : null
+      fallbackSources.electricityTotalEntityIds = usedEntityIds
+      fallbackSources.electricityTotalEntityId = usedEntityIds[0] || null
     }
   }
 
@@ -557,7 +669,7 @@ const enrichMetricsWithHistoryFallback = async ({
       const gasSeries = await fetchEntityHistorySeries(
         baseUrl,
         token,
-        gasTotalEntity.entity_id,
+        { ...gasTotalEntity, kind: 'gas' },
         startIso,
         nowIso,
       )
@@ -577,9 +689,9 @@ const enrichMetricsWithHistoryFallback = async ({
   return {
     ...metrics,
     dailyElectricityKwh:
-      metrics.dailyElectricityKwh ?? fallbackValues.dailyElectricityKwh ?? null,
+      fallbackValues.dailyElectricityKwh ?? metrics.dailyElectricityKwh ?? null,
     monthlyElectricityKwh:
-      metrics.monthlyElectricityKwh ?? fallbackValues.monthlyElectricityKwh ?? null,
+      fallbackValues.monthlyElectricityKwh ?? metrics.monthlyElectricityKwh ?? null,
     dailyGasM3:
       metrics.dailyGasM3 ?? fallbackValues.dailyGasM3 ?? null,
     monthlyGasM3:
