@@ -105,6 +105,178 @@ const getUserVisibleEntityIds = (userMetadata, environmentId) => {
   return Array.isArray(visibleEntityIds) ? visibleEntityIds : null
 }
 
+const parseNumericValue = (value) => {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : NaN
+  }
+
+  if (value === null || value === undefined) {
+    return NaN
+  }
+
+  const source = String(value).trim()
+  if (!source) {
+    return NaN
+  }
+
+  let normalized = source.replace(/\s/g, '')
+  const hasComma = normalized.includes(',')
+  const hasDot = normalized.includes('.')
+
+  if (hasComma && hasDot) {
+    const lastComma = normalized.lastIndexOf(',')
+    const lastDot = normalized.lastIndexOf('.')
+    normalized = lastComma > lastDot
+      ? normalized.replace(/\./g, '').replace(',', '.')
+      : normalized.replace(/,/g, '')
+  } else if (hasComma && !hasDot) {
+    normalized = normalized.replace(',', '.')
+  }
+
+  normalized = normalized.replace(/[^0-9+\-.]/g, '')
+  const parsed = Number(normalized)
+  return Number.isFinite(parsed) ? parsed : NaN
+}
+
+const toSearchable = (entity) => `${entity.entity_id} ${entity.friendly_name || ''}`.toLowerCase()
+
+const findEntityByKeywords = (entities, includeKeywords, excludeKeywords = []) =>
+  entities.find((entity) => {
+    if (entity.domain !== 'sensor') {
+      return false
+    }
+
+    const searchable = toSearchable(entity)
+    const hasInclude = includeKeywords.some((keyword) => searchable.includes(String(keyword).toLowerCase()))
+    const hasExclude = excludeKeywords.some((keyword) => searchable.includes(String(keyword).toLowerCase()))
+    const numericState = Number.isFinite(parseNumericValue(entity.state))
+    return hasInclude && !hasExclude && numericState
+  })
+
+const isPowerUnit = (unit) => {
+  const normalizedUnit = String(unit || '').trim().toLowerCase()
+  return (
+    normalizedUnit === 'w' ||
+    normalizedUnit === 'kw' ||
+    normalizedUnit === 'watt' ||
+    normalizedUnit === 'kilowatt' ||
+    normalizedUnit === 'va' ||
+    normalizedUnit === 'kva'
+  )
+}
+
+const convertPowerToKw = (rawValue, unit) => {
+  if (!Number.isFinite(rawValue)) {
+    return NaN
+  }
+
+  const normalizedUnit = String(unit || '').trim().toLowerCase()
+  if (normalizedUnit === 'w' || normalizedUnit === 'watt' || normalizedUnit === 'va') {
+    return rawValue / 1000
+  }
+  if (normalizedUnit === 'kw' || normalizedUnit === 'kilowatt' || normalizedUnit === 'kva') {
+    return rawValue
+  }
+  return rawValue > 100 ? rawValue / 1000 : rawValue
+}
+
+const toMetricValue = (value) => (Number.isFinite(value) ? Number(value) : null)
+
+const getDashboardMetrics = (entities) => {
+  if (!Array.isArray(entities) || entities.length === 0) {
+    return null
+  }
+
+  const powerEntity =
+    entities.find((entity) => (
+      entity.domain === 'sensor' &&
+      String(entity.device_class || '').toLowerCase() === 'power' &&
+      Number.isFinite(parseNumericValue(entity.state))
+    )) ||
+    findEntityByKeywords(
+      entities,
+      [
+        'current_power',
+        'active_power',
+        'power',
+        'watt',
+        'vermogen',
+        'actueel vermogen',
+        'actueel_vermogen',
+        'huidig verbruik',
+        'verbruik nu',
+        'current usage',
+        'current consumption',
+        'load',
+      ],
+      ['today', 'daily', 'month', 'monthly', 'total', 'kwh', 'energy', 'gas', 'price', 'cost', 'tariff'],
+    ) ||
+    entities.find((entity) => (
+      entity.domain === 'sensor' &&
+      isPowerUnit(entity.unit_of_measurement) &&
+      Number.isFinite(parseNumericValue(entity.state))
+    ))
+
+  const dailyElectricityEntity = findEntityByKeywords(
+    entities,
+    ['energy_today', 'daily_energy', 'today_energy', 'day_energy', 'daily', 'today', 'verbruik_vandaag'],
+    ['gas', 'price', 'cost', 'tariff'],
+  )
+
+  const monthlyElectricityEntity = findEntityByKeywords(
+    entities,
+    ['energy_month', 'monthly_energy', 'month_energy', 'monthly', 'this_month', 'month', 'verbruik_maand'],
+    ['gas', 'price', 'cost', 'tariff'],
+  )
+
+  const dailyGasEntity = findEntityByKeywords(
+    entities,
+    ['gas_today', 'daily_gas', 'today_gas', 'gas_day', 'gas_verbruik_dag', 'gas_consumption_today'],
+    ['price', 'cost', 'tariff'],
+  )
+
+  const monthlyGasEntity = findEntityByKeywords(
+    entities,
+    ['gas_month', 'monthly_gas', 'month_gas', 'gas_verbruik_maand', 'gas_consumption_month'],
+    ['price', 'cost', 'tariff'],
+  )
+
+  const currentPowerKw = powerEntity
+    ? convertPowerToKw(parseNumericValue(powerEntity.state), powerEntity.unit_of_measurement)
+    : NaN
+
+  const dailyElectricityKwh = dailyElectricityEntity
+    ? parseNumericValue(dailyElectricityEntity.state)
+    : NaN
+
+  const monthlyElectricityKwh = monthlyElectricityEntity
+    ? parseNumericValue(monthlyElectricityEntity.state)
+    : NaN
+
+  const dailyGasM3 = dailyGasEntity
+    ? parseNumericValue(dailyGasEntity.state)
+    : NaN
+
+  const monthlyGasM3 = monthlyGasEntity
+    ? parseNumericValue(monthlyGasEntity.state)
+    : NaN
+
+  return {
+    currentPowerKw: toMetricValue(currentPowerKw),
+    dailyElectricityKwh: toMetricValue(dailyElectricityKwh),
+    monthlyElectricityKwh: toMetricValue(monthlyElectricityKwh),
+    dailyGasM3: toMetricValue(dailyGasM3),
+    monthlyGasM3: toMetricValue(monthlyGasM3),
+    sources: {
+      currentPowerEntityId: powerEntity?.entity_id || null,
+      dailyElectricityEntityId: dailyElectricityEntity?.entity_id || null,
+      monthlyElectricityEntityId: monthlyElectricityEntity?.entity_id || null,
+      dailyGasEntityId: dailyGasEntity?.entity_id || null,
+      monthlyGasEntityId: monthlyGasEntity?.entity_id || null,
+    },
+  }
+}
+
 const getHaConfig = (metadata, environmentId) => {
   const envMap = metadata.environments || {}
   const envConfig = envMap[environmentId]
@@ -334,7 +506,7 @@ export const handler = async (event) => {
     // Filter to show ALMOST everything EXCEPT update entities and internal stuff
     const blockedDomains = ['update', 'script', 'automation', 'group', 'number', 'input_number', 'input_select', 'input_datetime']
     
-    let entities = Array.isArray(data)
+    const allEntities = Array.isArray(data)
       ? data
         .filter(entity => {
           const domain = String(entity.entity_id || '').split('.')[0]
@@ -351,6 +523,13 @@ export const handler = async (event) => {
           state_class: entity.attributes?.state_class,
         }))
       : []
+
+    const metrics = getDashboardMetrics(allEntities)
+    let entities = allEntities
+
+    if (metrics?.sources) {
+      console.log('[HA-ENTITIES] Metrics sources:', metrics.sources)
+    }
 
     if (!isAdmin) {
       // Check for user-specific sensor visibility only
@@ -375,7 +554,7 @@ export const handler = async (event) => {
 
     return {
       statusCode: 200,
-      body: JSON.stringify({ entities }),
+      body: JSON.stringify({ entities, metrics }),
     }
   } catch (error) {
     console.error('ha-entities handler error:', error);

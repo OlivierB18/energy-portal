@@ -36,6 +36,14 @@ interface PowerSample {
   power: number
 }
 
+interface HaMetricsSnapshot {
+  currentPowerKw: number | null
+  dailyElectricityKwh: number | null
+  monthlyElectricityKwh: number | null
+  dailyGasM3: number | null
+  monthlyGasM3: number | null
+}
+
 const GAS_METER_ENTITY_ID = 'sensor.gas_meter_gas_consumption'
 
 const parseNumericValue = (value: unknown) => {
@@ -143,6 +151,30 @@ const normalizePricingConfig = (input: unknown): EnergyPricingConfig | null => {
   }
 }
 
+const normalizeHaMetricsSnapshot = (input: unknown): HaMetricsSnapshot | null => {
+  if (!input || typeof input !== 'object') {
+    return null
+  }
+
+  const value = input as Record<string, unknown>
+  const toNumberOrNull = (raw: unknown) => {
+    if (raw === null || raw === undefined) {
+      return null
+    }
+
+    const parsed = Number(raw)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+
+  return {
+    currentPowerKw: toNumberOrNull(value.currentPowerKw),
+    dailyElectricityKwh: toNumberOrNull(value.dailyElectricityKwh),
+    monthlyElectricityKwh: toNumberOrNull(value.monthlyElectricityKwh),
+    dailyGasM3: toNumberOrNull(value.dailyGasM3),
+    monthlyGasM3: toNumberOrNull(value.monthlyGasM3),
+  }
+}
+
 export default function Dashboard({
   isAdmin,
   selectedEnvironmentId,
@@ -169,6 +201,7 @@ export default function Dashboard({
   const [haEntities, setHaEntities] = useState<HaEntity[]>([])
   // Laatst bekende sensoren (blijven altijd staan bij error)
   const [lastKnownHaEntities, setLastKnownHaEntities] = useState<HaEntity[]>([])
+  const [haMetricsSnapshot, setHaMetricsSnapshot] = useState<HaMetricsSnapshot | null>(null)
   const [haLoading, setHaLoading] = useState(false)
   const [haError, setHaError] = useState<string | null>(null)
   const [isInitialLoading, setIsInitialLoading] = useState(true)
@@ -403,6 +436,7 @@ export default function Dashboard({
   useEffect(() => {
     setHaEntities([])
     setLastKnownHaEntities([])
+    setHaMetricsSnapshot(null)
     setIsInitialLoading(true)
 
     if (!selectedEnvironment) {
@@ -416,11 +450,24 @@ export default function Dashboard({
       }
 
       const parsed = JSON.parse(cached)
-      if (!Array.isArray(parsed) || parsed.length === 0) {
+      const cachedEntities = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray(parsed?.entities)
+          ? parsed.entities
+          : []
+      const cachedMetrics = Array.isArray(parsed)
+        ? null
+        : normalizeHaMetricsSnapshot(parsed?.metrics)
+
+      if (cachedMetrics) {
+        setHaMetricsSnapshot(cachedMetrics)
+      }
+
+      if (!Array.isArray(cachedEntities) || cachedEntities.length === 0) {
         return
       }
 
-      const normalized = parsed
+      const normalized = cachedEntities
         .filter((entity: HaEntity) => typeof entity?.entity_id === 'string')
         .map((entity: HaEntity) => ({
           entity_id: entity.entity_id,
@@ -502,13 +549,15 @@ export default function Dashboard({
         
         const data = await response.json()
         const entities = Array.isArray(data?.entities) ? data.entities : []
+        const metrics = normalizeHaMetricsSnapshot(data?.metrics)
         // eslint-disable-next-line no-console
         console.log(`[HA] ✅ Loaded ${entities.length} entities`)
         
         // Update entities AND keep them as last known
         setHaEntities(entities)
         setLastKnownHaEntities(entities)
-        localStorage.setItem(haEntitiesCacheKey, JSON.stringify(entities))
+        setHaMetricsSnapshot(metrics)
+        localStorage.setItem(haEntitiesCacheKey, JSON.stringify({ entities, metrics }))
         
         if (!silent) {
           setHaConnectionStatus('connected')
@@ -592,7 +641,15 @@ export default function Dashboard({
 
       if (refresh.ok) {
         const data = await refresh.json()
-        setHaEntities(Array.isArray(data?.entities) ? data.entities : [])
+        const refreshedEntities = Array.isArray(data?.entities) ? data.entities : []
+        const refreshedMetrics = normalizeHaMetricsSnapshot(data?.metrics)
+        setHaEntities(refreshedEntities)
+        setLastKnownHaEntities(refreshedEntities)
+        setHaMetricsSnapshot(refreshedMetrics)
+        localStorage.setItem(
+          haEntitiesCacheKey,
+          JSON.stringify({ entities: refreshedEntities, metrics: refreshedMetrics }),
+        )
       }
     } catch (error) {
       setHaError(error instanceof Error ? error.message : 'Unable to run action')
@@ -607,6 +664,7 @@ export default function Dashboard({
   // Extract real-time energy data from Home Assistant entities
   const realTimeData = useMemo(() => {
     const entities = haEntities.length > 0 ? haEntities : lastKnownHaEntities
+    const serverMetrics = haMetricsSnapshot
     
     // Helper function to parse numeric values from entity state
     const parseValue = (state: string): number => {
@@ -954,7 +1012,9 @@ export default function Dashboard({
       ['gas', 'price', 'cost', 'tariff'],
     )
 
-    if (currentPower <= 0 && totalEnergyEntity) {
+    if (serverMetrics?.currentPowerKw !== null && serverMetrics?.currentPowerKw !== undefined) {
+      currentPower = serverMetrics.currentPowerKw
+    } else if (currentPower <= 0 && totalEnergyEntity) {
       currentPower = derivePowerFromEnergyMeter(parseValue(totalEnergyEntity.state))
     }
 
@@ -1052,6 +1112,13 @@ export default function Dashboard({
       console.log('[Energy] Tracking locally - Daily:', dailyUsage.toFixed(3), 'kWh, Monthly:', monthlyUsage.toFixed(3), 'kWh')
     }
 
+    if (serverMetrics?.dailyElectricityKwh !== null && serverMetrics?.dailyElectricityKwh !== undefined) {
+      dailyUsage = serverMetrics.dailyElectricityKwh
+    }
+    if (serverMetrics?.monthlyElectricityKwh !== null && serverMetrics?.monthlyElectricityKwh !== undefined) {
+      monthlyUsage = serverMetrics.monthlyElectricityKwh
+    }
+
     let gasDailyUsage = 0
     let gasMonthlyUsage = 0
 
@@ -1069,6 +1136,13 @@ export default function Dashboard({
       const trackedGas = trackGasFromMeter(parseValue(gasMeterEntity.state))
       gasDailyUsage = trackedGas.daily
       gasMonthlyUsage = trackedGas.monthly
+    }
+
+    if (serverMetrics?.dailyGasM3 !== null && serverMetrics?.dailyGasM3 !== undefined) {
+      gasDailyUsage = serverMetrics.dailyGasM3
+    }
+    if (serverMetrics?.monthlyGasM3 !== null && serverMetrics?.monthlyGasM3 !== undefined) {
+      gasMonthlyUsage = serverMetrics.monthlyGasM3
     }
 
     const gasChartValue = gasFlowEntity
@@ -1098,7 +1172,7 @@ export default function Dashboard({
       costToday: parseFloat(totalCostToday.toFixed(2)),
       costMonth: parseFloat(totalCostMonth.toFixed(2)),
     }
-  }, [haEntities, lastKnownHaEntities, pricingConfig, selectedEnvironment, gasRatePerM3, powerSamples])
+  }, [haEntities, lastKnownHaEntities, haMetricsSnapshot, pricingConfig, selectedEnvironment, gasRatePerM3, powerSamples])
 
   const livePowerStorageKey = `energy_live_power_samples_${selectedEnvironment || 'default'}`
   const liveGasStorageKey = `energy_gas_hourly_data_${selectedEnvironment || 'default'}`
