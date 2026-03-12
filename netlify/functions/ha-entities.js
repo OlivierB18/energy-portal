@@ -17,6 +17,7 @@ const HA_ENVIRONMENTS = {
 
 const managementTokenCache = { token: null, expiresAt: 0 }
 const metadataCache = { value: null, expiresAt: 0 }
+const metricsHistoryCache = new Map()
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -277,6 +278,319 @@ const getDashboardMetrics = (entities) => {
   }
 }
 
+const startsWithAny = (value, items) => items.some((item) => value.startsWith(item))
+
+const includesAny = (value, items) => items.some((item) => value.includes(item))
+
+const isEnergyUnit = (unit) => {
+  const normalized = String(unit || '').trim().toLowerCase()
+  return normalized === 'kwh' || normalized === 'wh' || normalized === 'mwh'
+}
+
+const isGasUnit = (unit) => {
+  const normalized = String(unit || '').trim().toLowerCase()
+  return normalized === 'm3' || normalized === 'm^3' || normalized === 'm³'
+}
+
+const pickTotalElectricityEntity = (entities) => {
+  const candidates = entities
+    .filter((entity) => {
+      if (entity.domain !== 'sensor') {
+        return false
+      }
+
+      const searchable = toSearchable(entity)
+      if (includesAny(searchable, ['gas', 'price', 'cost', 'tariff'])) {
+        return false
+      }
+
+      const numericState = Number.isFinite(parseNumericValue(entity.state))
+      if (!numericState) {
+        return false
+      }
+
+      return (
+        isEnergyUnit(entity.unit_of_measurement) ||
+        String(entity.device_class || '').toLowerCase() === 'energy' ||
+        includesAny(searchable, ['energy', 'consumption', 'meter', 'kwh'])
+      )
+    })
+    .map((entity) => {
+      const searchable = toSearchable(entity)
+      const stateClass = String(entity.state_class || '').toLowerCase()
+      const deviceClass = String(entity.device_class || '').toLowerCase()
+      let score = 0
+
+      if (deviceClass === 'energy') score += 5
+      if (stateClass === 'total_increasing') score += 5
+      if (stateClass === 'total') score += 4
+      if (includesAny(searchable, ['total', 'meter', 'consumption'])) score += 3
+      if (isEnergyUnit(entity.unit_of_measurement)) score += 2
+      if (includesAny(searchable, ['today', 'daily', 'day', 'month', 'monthly'])) score -= 6
+      if (startsWithAny(searchable, ['sensor.energy_'])) score += 1
+
+      return { entity, score }
+    })
+    .sort((a, b) => b.score - a.score)
+
+  return candidates[0]?.entity || null
+}
+
+const pickTotalGasEntity = (entities) => {
+  const candidates = entities
+    .filter((entity) => {
+      if (entity.domain !== 'sensor') {
+        return false
+      }
+
+      const searchable = toSearchable(entity)
+      if (!searchable.includes('gas')) {
+        return false
+      }
+
+      const numericState = Number.isFinite(parseNumericValue(entity.state))
+      if (!numericState) {
+        return false
+      }
+
+      return (
+        isGasUnit(entity.unit_of_measurement) ||
+        String(entity.device_class || '').toLowerCase() === 'gas' ||
+        includesAny(searchable, ['meter', 'consumption', 'verbruik'])
+      )
+    })
+    .map((entity) => {
+      const searchable = toSearchable(entity)
+      const stateClass = String(entity.state_class || '').toLowerCase()
+      const deviceClass = String(entity.device_class || '').toLowerCase()
+      let score = 0
+
+      if (deviceClass === 'gas') score += 5
+      if (stateClass === 'total_increasing') score += 5
+      if (stateClass === 'total') score += 4
+      if (includesAny(searchable, ['meter', 'consumption', 'gas_meter', 'verbruik'])) score += 3
+      if (isGasUnit(entity.unit_of_measurement)) score += 2
+      if (includesAny(searchable, ['today', 'daily', 'day', 'month', 'monthly'])) score -= 6
+
+      return { entity, score }
+    })
+    .sort((a, b) => b.score - a.score)
+
+  return candidates[0]?.entity || null
+}
+
+const fetchEntityHistorySeries = async (baseUrl, token, entityId, startIso, endIso) => {
+  if (!entityId) {
+    return []
+  }
+
+  const historyUrl = new URL(baseUrl)
+  historyUrl.pathname = `/api/history/period/${startIso}`
+  historyUrl.searchParams.append('filter_entity_id', entityId)
+  historyUrl.searchParams.append('end_time', endIso)
+
+  const response = await fetch(historyUrl.toString(), {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+  })
+
+  if (!response.ok) {
+    console.warn('[HA-ENTITIES] History fetch failed for', entityId, 'status:', response.status)
+    return []
+  }
+
+  const payload = await response.json()
+  const historyEntries = Array.isArray(payload)
+    ? payload.find((entry) => Array.isArray(entry) && entry[0]?.entity_id === entityId) || payload[0] || []
+    : []
+
+  return (Array.isArray(historyEntries) ? historyEntries : [])
+    .map((state) => {
+      const timestamp = new Date(state?.last_changed || state?.last_updated).getTime()
+      const value = parseNumericValue(state?.state)
+      if (!Number.isFinite(timestamp) || !Number.isFinite(value)) {
+        return null
+      }
+      return { timestamp, value }
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.timestamp - b.timestamp)
+}
+
+const getSeriesValueAtTime = (series, targetTimestamp) => {
+  if (!Array.isArray(series) || series.length === 0) {
+    return null
+  }
+
+  let before = null
+  for (const point of series) {
+    if (point.timestamp <= targetTimestamp) {
+      before = point
+      continue
+    }
+
+    if (before) {
+      return before.value
+    }
+
+    return point.value
+  }
+
+  return before ? before.value : null
+}
+
+const deriveDailyMonthlyDeltas = (series) => {
+  if (!Array.isArray(series) || series.length === 0) {
+    return { daily: null, monthly: null }
+  }
+
+  const latest = series[series.length - 1]
+  if (!latest || !Number.isFinite(latest.value)) {
+    return { daily: null, monthly: null }
+  }
+
+  const nowDate = new Date(latest.timestamp)
+  const dayStart = new Date(
+    nowDate.getFullYear(),
+    nowDate.getMonth(),
+    nowDate.getDate(),
+    0,
+    0,
+    0,
+    0,
+  ).getTime()
+  const monthStart = new Date(nowDate.getFullYear(), nowDate.getMonth(), 1, 0, 0, 0, 0).getTime()
+
+  const dayStartValue = getSeriesValueAtTime(series, dayStart)
+  const monthStartValue = getSeriesValueAtTime(series, monthStart)
+
+  const daily = Number.isFinite(dayStartValue)
+    ? Math.max(0, latest.value - dayStartValue)
+    : null
+
+  const monthly = Number.isFinite(monthStartValue)
+    ? Math.max(0, latest.value - monthStartValue)
+    : null
+
+  return {
+    daily: Number.isFinite(daily) ? Number(daily.toFixed(3)) : null,
+    monthly: Number.isFinite(monthly) ? Number(monthly.toFixed(3)) : null,
+  }
+}
+
+const enrichMetricsWithHistoryFallback = async ({
+  metrics,
+  entities,
+  baseUrl,
+  token,
+  environmentId,
+}) => {
+  if (!metrics || !Array.isArray(entities) || entities.length === 0) {
+    return metrics
+  }
+
+  const needsElectricityFallback =
+    metrics.dailyElectricityKwh === null || metrics.monthlyElectricityKwh === null
+  const needsGasFallback =
+    metrics.dailyGasM3 === null || metrics.monthlyGasM3 === null
+
+  if (!needsElectricityFallback && !needsGasFallback) {
+    return metrics
+  }
+
+  const cacheKey = String(environmentId || 'default')
+  const nowMs = Date.now()
+  const cached = metricsHistoryCache.get(cacheKey)
+  if (cached && nowMs < cached.expiresAt) {
+    return {
+      ...metrics,
+      dailyElectricityKwh:
+        metrics.dailyElectricityKwh ?? cached.values.dailyElectricityKwh ?? null,
+      monthlyElectricityKwh:
+        metrics.monthlyElectricityKwh ?? cached.values.monthlyElectricityKwh ?? null,
+      dailyGasM3:
+        metrics.dailyGasM3 ?? cached.values.dailyGasM3 ?? null,
+      monthlyGasM3:
+        metrics.monthlyGasM3 ?? cached.values.monthlyGasM3 ?? null,
+      sources: {
+        ...metrics.sources,
+        ...cached.sources,
+      },
+    }
+  }
+
+  const nowIso = new Date(nowMs).toISOString()
+  const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1, 0, 0, 0, 0)
+  const startIso = monthStart.toISOString()
+
+  const fallbackValues = {
+    dailyElectricityKwh: null,
+    monthlyElectricityKwh: null,
+    dailyGasM3: null,
+    monthlyGasM3: null,
+  }
+
+  const fallbackSources = {}
+
+  if (needsElectricityFallback) {
+    const electricityTotalEntity = pickTotalElectricityEntity(entities)
+    if (electricityTotalEntity?.entity_id) {
+      const electricitySeries = await fetchEntityHistorySeries(
+        baseUrl,
+        token,
+        electricityTotalEntity.entity_id,
+        startIso,
+        nowIso,
+      )
+      const deltas = deriveDailyMonthlyDeltas(electricitySeries)
+      fallbackValues.dailyElectricityKwh = deltas.daily
+      fallbackValues.monthlyElectricityKwh = deltas.monthly
+      fallbackSources.electricityTotalEntityId = electricityTotalEntity.entity_id
+    }
+  }
+
+  if (needsGasFallback) {
+    const gasTotalEntity = pickTotalGasEntity(entities)
+    if (gasTotalEntity?.entity_id) {
+      const gasSeries = await fetchEntityHistorySeries(
+        baseUrl,
+        token,
+        gasTotalEntity.entity_id,
+        startIso,
+        nowIso,
+      )
+      const deltas = deriveDailyMonthlyDeltas(gasSeries)
+      fallbackValues.dailyGasM3 = deltas.daily
+      fallbackValues.monthlyGasM3 = deltas.monthly
+      fallbackSources.gasTotalEntityId = gasTotalEntity.entity_id
+    }
+  }
+
+  metricsHistoryCache.set(cacheKey, {
+    expiresAt: nowMs + 30_000,
+    values: fallbackValues,
+    sources: fallbackSources,
+  })
+
+  return {
+    ...metrics,
+    dailyElectricityKwh:
+      metrics.dailyElectricityKwh ?? fallbackValues.dailyElectricityKwh ?? null,
+    monthlyElectricityKwh:
+      metrics.monthlyElectricityKwh ?? fallbackValues.monthlyElectricityKwh ?? null,
+    dailyGasM3:
+      metrics.dailyGasM3 ?? fallbackValues.dailyGasM3 ?? null,
+    monthlyGasM3:
+      metrics.monthlyGasM3 ?? fallbackValues.monthlyGasM3 ?? null,
+    sources: {
+      ...metrics.sources,
+      ...fallbackSources,
+    },
+  }
+}
+
 const getHaConfig = (metadata, environmentId) => {
   const envMap = metadata.environments || {}
   const envConfig = envMap[environmentId]
@@ -524,7 +838,14 @@ export const handler = async (event) => {
         }))
       : []
 
-    const metrics = getDashboardMetrics(allEntities)
+    let metrics = getDashboardMetrics(allEntities)
+    metrics = await enrichMetricsWithHistoryFallback({
+      metrics,
+      entities: allEntities,
+      baseUrl,
+      token,
+      environmentId,
+    })
     let entities = allEntities
 
     if (metrics?.sources) {

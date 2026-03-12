@@ -42,6 +42,7 @@ interface HaMetricsSnapshot {
   monthlyElectricityKwh: number | null
   dailyGasM3: number | null
   monthlyGasM3: number | null
+  powerEntityId: string | null
 }
 
 const GAS_METER_ENTITY_ID = 'sensor.gas_meter_gas_consumption'
@@ -172,6 +173,10 @@ const normalizeHaMetricsSnapshot = (input: unknown): HaMetricsSnapshot | null =>
     monthlyElectricityKwh: toNumberOrNull(value.monthlyElectricityKwh),
     dailyGasM3: toNumberOrNull(value.dailyGasM3),
     monthlyGasM3: toNumberOrNull(value.monthlyGasM3),
+    powerEntityId: typeof value?.sources === 'object' && value?.sources !== null &&
+      typeof (value.sources as Record<string, unknown>).currentPowerEntityId === 'string'
+      ? String((value.sources as Record<string, unknown>).currentPowerEntityId)
+      : null,
   }
 }
 
@@ -1283,7 +1288,7 @@ export default function Dashboard({
 
   // Fetch electricity history
   useEffect(() => {
-    if (!selectedEnvironment || !isAuthenticated || !haEntities.length) {
+    if (!selectedEnvironment || !isAuthenticated) {
       return
     }
 
@@ -1310,29 +1315,34 @@ export default function Dashboard({
           console.log('[HA History] Full 7-day fetch from', startTime.toISOString())
         }
 
-        // Find power entity - prioritize specific meter entities
-        const powerEntity = haEntities.find(
-          (e) => {
-            const id = e.entity_id.toLowerCase()
-            // Prioritize electricity meter, exclude binary sensors
-            return !id.startsWith('binary_sensor') && (
-              id.includes('electricity_meter_power_consumption') ||
-              id.includes('electricity_meter') && id.includes('power') ||
-              id.includes('meter') && id.includes('power') && id.includes('consumption')
-            )
-          }
-        ) || haEntities.find(
-          (e) => {
-            const id = e.entity_id.toLowerCase()
-            // Fallback to any power/watt sensor that's not binary
-            return !id.startsWith('binary_sensor') && id.startsWith('sensor.') && (
-              id.includes('current_power') ||
-              (id.includes('power') && (id.includes('consumption') || id.includes('watt')))
-            )
-          }
-        )
+        const preferredPowerEntityId = haMetricsSnapshot?.powerEntityId || null
+
+        // Find power entity - prefer server-selected metrics source for admin/non-admin parity.
+        const powerEntity = preferredPowerEntityId
+          ? { entity_id: preferredPowerEntityId }
+          : haEntities.find(
+            (e) => {
+              const id = e.entity_id.toLowerCase()
+              // Prioritize electricity meter, exclude binary sensors
+              return !id.startsWith('binary_sensor') && (
+                id.includes('electricity_meter_power_consumption') ||
+                id.includes('electricity_meter') && id.includes('power') ||
+                id.includes('meter') && id.includes('power') && id.includes('consumption')
+              )
+            }
+          ) || haEntities.find(
+            (e) => {
+              const id = e.entity_id.toLowerCase()
+              // Fallback to any power/watt sensor that's not binary
+              return !id.startsWith('binary_sensor') && id.startsWith('sensor.') && (
+                id.includes('current_power') ||
+                (id.includes('power') && (id.includes('consumption') || id.includes('watt')))
+              )
+            }
+          )
 
         console.log('[HA History] Available entities:', haEntities.map((e) => e.entity_id).join(', '))
+        console.log('[HA History] Preferred power entity from metrics:', preferredPowerEntityId)
         console.log('[HA History] Found power entity:', powerEntity?.entity_id)
 
         if (!powerEntity) {
@@ -1401,7 +1411,14 @@ export default function Dashboard({
     }
 
     void fetchHistoricalData()
-  }, [selectedEnvironment, isAuthenticated, haEntities, livePowerStorageKey, getAuthToken])
+  }, [
+    selectedEnvironment,
+    isAuthenticated,
+    haEntities,
+    haMetricsSnapshot,
+    livePowerStorageKey,
+    getAuthToken,
+  ])
   useEffect(() => {
     if (!selectedEnvironment || visibleEnvironments.length === 0) {
       return
