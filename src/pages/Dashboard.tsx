@@ -234,7 +234,7 @@ export default function Dashboard({
     const source = user?.sub || user?.email || 'anonymous'
     return String(source).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80)
   }, [user?.email, user?.sub])
-  const haEntitiesCacheKey = `ha_entities_cache_v2_${selectedEnvironment || 'default'}_${userCacheScope}`
+  const haEntitiesCacheKey = `ha_entities_cache_v3_${selectedEnvironment || 'default'}_${userCacheScope}`
 
   useEffect(() => {
     const loadEnvironments = async () => {

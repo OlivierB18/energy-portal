@@ -19,6 +19,27 @@ const managementTokenCache = { token: null, expiresAt: 0 }
 const metadataCache = { value: null, expiresAt: 0 }
 const metricsHistoryCache = new Map()
 
+const parseCsvEnv = (value, fallback = []) => {
+  const raw = String(value || '').trim()
+  if (!raw) {
+    return fallback
+  }
+
+  const parsed = raw
+    .split(',')
+    .map((item) => String(item || '').trim().toLowerCase())
+    .filter(Boolean)
+
+  return parsed.length > 0 ? parsed : fallback
+}
+
+const GAS_TOTAL_ENTITY_ID_CANDIDATES = parseCsvEnv(process.env.HA_GAS_TOTAL_ENTITY_IDS, [
+  'sensor.gas_meter_gas_consumption',
+  'sensor.gas_meter_gasverbruik',
+  'sensor.gas_total',
+  'sensor.gas_consumption_total',
+])
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 const getManagementToken = async (domain) => {
@@ -458,6 +479,15 @@ const convertGasToM3 = (value, unit) => {
 }
 
 const pickTotalGasEntity = (entities) => {
+  const normalizedMap = new Map(
+    entities.map((entity) => [String(entity.entity_id || '').trim().toLowerCase(), entity]),
+  )
+
+  const explicitMatchId = GAS_TOTAL_ENTITY_ID_CANDIDATES.find((candidateId) => normalizedMap.has(candidateId))
+  if (explicitMatchId) {
+    return normalizedMap.get(explicitMatchId)
+  }
+
   const candidates = entities
     .filter((entity) => {
       if (entity.domain !== 'sensor') {
@@ -783,6 +813,7 @@ const enrichMetricsWithHistoryFallback = async ({
   if (shouldDeriveGasFromTotalHistory || needsGasFallback) {
     const gasTotalEntity = pickTotalGasEntity(entities)
     if (gasTotalEntity?.entity_id) {
+      console.log('[HA-ENTITIES] Selected gas total entity:', gasTotalEntity.entity_id)
       const gasSeries = await fetchEntityHistorySeries(
         baseUrl,
         token,
