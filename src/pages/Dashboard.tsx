@@ -1521,72 +1521,78 @@ export default function Dashboard({
     [gasMeterReadings],
   )
 
-  const mapSamplesToChartPoints = (
-    samples: Array<{ timestamp: number; value: number }>,
-    fallbackValue: number,
-  ) => {
-    const filtered = samples.filter(
-      (sample) => sample.timestamp >= selectedRange.startMs && sample.timestamp <= selectedRange.endMs,
+  const bucketPowerSamples = useCallback(
+    (startMs: number, endMs: number, bucketMs: number, fallbackPower: number) => {
+      const sorted = powerSamples
+        .filter((sample) => sample.timestamp >= startMs - bucketMs && sample.timestamp <= endMs)
+        .sort((a, b) => a.timestamp - b.timestamp)
+
+      const bucketStart = Math.floor(startMs / bucketMs) * bucketMs
+      const bucketEnd = Math.ceil(endMs / bucketMs) * bucketMs
+      const buckets: Array<{ start: number; value: number }> = []
+
+      let index = 0
+      let lastKnownPower = Number.isFinite(fallbackPower) ? fallbackPower : 0
+
+      while (index < sorted.length && sorted[index].timestamp < bucketStart) {
+        lastKnownPower = sorted[index].power
+        index += 1
+      }
+
+      for (let t = bucketStart; t < bucketEnd; t += bucketMs) {
+        const nextT = t + bucketMs
+        let sum = 0
+        let count = 0
+
+        while (index < sorted.length && sorted[index].timestamp < nextT) {
+          const sample = sorted[index]
+          if (sample.timestamp >= t) {
+            sum += sample.power
+            count += 1
+          }
+          lastKnownPower = sample.power
+          index += 1
+        }
+
+        const bucketValue = count > 0 ? sum / count : lastKnownPower
+        buckets.push({
+          start: t,
+          value: parseFloat(Math.max(0, bucketValue).toFixed(3)),
+        })
+      }
+
+      return buckets
+    },
+    [powerSamples],
+  )
+
+  const chartData = useMemo(() => {
+    const bucketMs = timeRange === 'today' ? 3_600_000 : 86_400_000
+    const buckets = bucketPowerSamples(
+      selectedRange.startMs,
+      selectedRange.endMs,
+      bucketMs,
+      realTimeData.currentPower,
     )
 
-    if (filtered.length === 0) {
+    if (buckets.length === 0) {
       return [{
-        time: formatChartAxisLabel(selectedRange.startMs, timeRange),
+        time: '',
         power: 0,
-      }, {
-        time: formatChartAxisLabel(selectedRange.endMs, timeRange),
-        power: fallbackValue,
       }]
     }
 
-    const maxPoints = timeRange === 'today' ? 1440 : 2000
-    const step = Math.max(1, Math.ceil(filtered.length / maxPoints))
-    const reduced = filtered.filter((_, index) => index % step === 0 || index === filtered.length - 1)
-
-    // Find the last sample before the range to use as starting value
-    const beforeRange = samples
-      .filter((s) => s.timestamp < selectedRange.startMs)
-      .sort((a, b) => b.timestamp - a.timestamp)[0]
-    
-    const startValue = beforeRange?.value ?? 0
-
-    // Always include a point at the range start for daily/weekly views
-    const shouldAddStart = timeRange !== 'month' && filtered[0]?.timestamp > selectedRange.startMs
-
-    const chartPoints: Array<{ time: string; power: number }> = []
-
-    // Always add range start point first for daily/weekly views
-    if (timeRange !== 'month') {
-      chartPoints.push({
-        time: formatChartAxisLabel(selectedRange.startMs, timeRange),
-        power: shouldAddStart ? startValue : reduced[0]?.value ?? 0,
-      })
-    }
-
-    // Add the reduced data points
-    const dataPoints = reduced.map((sample) => ({
-      time: formatChartAxisLabel(sample.timestamp, timeRange),
-      power: sample.value,
+    return buckets.map((bucket) => ({
+      time: formatChartAxisLabel(bucket.start, timeRange),
+      power: bucket.value,
     }))
-    
-    // Avoid duplicate if first data point is at range start
-    const firstDataTime = dataPoints[0]?.time
-    const startPointTime = chartPoints[0]?.time
-    if (firstDataTime !== startPointTime) {
-      chartPoints.push(...dataPoints)
-    } else {
-      chartPoints.push(...dataPoints.slice(1))
-    }
-
-    return chartPoints
-  }
-
-  const chartData = useMemo(() => {
-    return mapSamplesToChartPoints(
-      powerSamples.map((sample) => ({ timestamp: sample.timestamp, value: sample.power })),
-      latestPowerRef.current,
-    )
-  }, [powerSamples, selectedRange.endMs, selectedRange.startMs, timeRange])
+  }, [
+    bucketPowerSamples,
+    selectedRange.startMs,
+    selectedRange.endMs,
+    realTimeData.currentPower,
+    timeRange,
+  ])
 
   const gasChartData = useMemo(() => {
     const bucketMs = timeRange === 'today' ? 3_600_000 : 86_400_000
