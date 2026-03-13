@@ -227,7 +227,7 @@ const getDashboardMetrics = (entities) => {
     const preciseKeywords = isDaily
       ? ['energy_today', 'today_energy', 'daily_energy', 'consumption_today', 'verbruik_vandaag']
       : ['energy_month', 'month_energy', 'monthly_energy', 'consumption_month', 'verbruik_maand']
-    const tariffKeywords = ['tariff', 'peak', 'offpeak', 'dal', 'hoog', 'laag', 't1', 't2', 'normal', 'low', 'high']
+    const tariffKeywords = ['tariff', 'tarif', 'tarief', 'peak', 'offpeak', 'dal', 'hoog', 'laag', 't1', 't2', 'normal', 'low', 'high']
 
     const candidates = entities
       .filter((entity) => {
@@ -236,7 +236,7 @@ const getDashboardMetrics = (entities) => {
         }
 
         const searchable = toSearchable(entity)
-        if (includesAny(searchable, ['gas', 'price', 'cost', 'tariff'])) {
+        if (includesAny(searchable, ['gas', 'price', 'cost', 'tariff', 'tarif', 'tarief'])) {
           return false
         }
 
@@ -338,6 +338,8 @@ const getEntitySearchFlags = (searchable) => {
   const isMonthlyLike = includesAny(searchable, ['month', 'monthly'])
   const isTariffLike = includesAny(searchable, [
     'tariff',
+    'tarif',
+    'tarief',
     'peak',
     'offpeak',
     'dal',
@@ -678,19 +680,23 @@ const enrichMetricsWithHistoryFallback = async ({
       const phaseCandidates = electricityCandidates.filter((candidate) => candidate.isPhaseLike)
       const tariffCandidates = electricityCandidates.filter((candidate) => candidate.isTariffLike)
 
-      const selectedCandidates = strongestAggregate
+      const hasTrustedAggregate = Boolean(
+        strongestAggregate &&
+        (strongestAggregate.stateClass === 'total_increasing' || strongestAggregate.stateClass === 'total'),
+      )
+
+      const selectedCandidates = hasTrustedAggregate
         ? [strongestAggregate]
-        : phaseCandidates.length >= 2
-          ? phaseCandidates.slice(0, 3)
-        : (() => {
-            if (tariffCandidates.length >= 2) {
-              return tariffCandidates.slice(0, 4)
-            }
-            const highestValueCandidate = electricityCandidates
-              .filter((candidate) => Number.isFinite(candidate.currentValueKwh))
-              .sort((a, b) => b.currentValueKwh - a.currentValueKwh)[0]
-            return [highestValueCandidate || electricityCandidates[0]]
-          })()
+        : tariffCandidates.length >= 2
+          ? tariffCandidates.slice(0, 4)
+          : phaseCandidates.length >= 2
+            ? phaseCandidates.slice(0, 3)
+            : (() => {
+                const highestValueCandidate = electricityCandidates
+                  .filter((candidate) => Number.isFinite(candidate.currentValueKwh))
+                  .sort((a, b) => b.currentValueKwh - a.currentValueKwh)[0]
+                return [highestValueCandidate || electricityCandidates[0]]
+              })()
 
       let dailySum = 0
       let monthlySum = 0
@@ -729,6 +735,15 @@ const enrichMetricsWithHistoryFallback = async ({
       fallbackValues.monthlyElectricityKwh = hasMonthly ? Number(monthlySum.toFixed(3)) : null
       fallbackSources.electricityTotalEntityIds = usedEntityIds
       fallbackSources.electricityTotalEntityId = usedEntityIds[0] || null
+
+      console.log(
+        '[HA-ENTITIES] Electricity fallback derived from:',
+        usedEntityIds,
+        'daily:',
+        fallbackValues.dailyElectricityKwh,
+        'monthly:',
+        fallbackValues.monthlyElectricityKwh,
+      )
     }
   }
 
