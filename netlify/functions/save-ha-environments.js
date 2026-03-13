@@ -102,20 +102,54 @@ const getUserInfoEmail = async (domain, token) => {
   return typeof data.email === 'string' ? data.email.toLowerCase() : ''
 }
 
-const isAdminFromClaims = (payload, rolesClaim, fallbackEmail = '') => {
+const getUserEmailFromManagement = async (domain, token, userId) => {
+  if (!userId) {
+    return ''
+  }
+
+  const response = await fetch(
+    `https://${domain}/api/v2/users/${encodeURIComponent(userId)}?fields=email&include_fields=true`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  )
+
+  if (!response.ok) {
+    return ''
+  }
+
+  const data = await response.json()
+  return typeof data.email === 'string' ? data.email.toLowerCase() : ''
+}
+
+const getAdminAllowlist = () =>
+  (process.env.ADMIN_EMAILS || process.env.VITE_ADMIN_EMAILS || 'olivier@inside-out.tech')
+    .split(',')
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean)
+
+const getForceEmail = () => (process.env.ADMIN_FORCE_EMAIL || '').trim().toLowerCase()
+
+const isEmailAllowed = (email, allowlist, forceEmail) => {
+  if (!email) {
+    return false
+  }
+
+  if (forceEmail && email === forceEmail) {
+    return true
+  }
+
+  return allowlist.includes(email)
+}
+
+const hasAdminRoleClaim = (payload, rolesClaim) => {
   const rolesValue = payload[rolesClaim]
   const roles = Array.isArray(rolesValue)
     ? rolesValue
     : typeof rolesValue === 'string'
       ? [rolesValue]
       : []
-  const allowlist = (process.env.ADMIN_EMAILS || process.env.VITE_ADMIN_EMAILS || 'olivier@inside-out.tech')
-    .split(',')
-    .map((email) => email.trim().toLowerCase())
-    .filter(Boolean)
-  const email = getEmailFromPayload(payload) || fallbackEmail
-  const isAllowedEmail = email.length > 0 && allowlist.includes(email)
-  return roles.includes('admin') || isAllowedEmail
+  return roles.includes('admin')
 }
 
 const verifyAdmin = async (event) => {
@@ -127,15 +161,40 @@ const verifyAdmin = async (event) => {
   const token = authHeader.replace('Bearer ', '')
   const domain = getEnv('AUTH0_DOMAIN')
   const rolesClaim = process.env.AUTH0_ROLES_CLAIM || 'https://brouwer-ems/roles'
+  const allowlist = getAdminAllowlist()
+  const forceEmail = getForceEmail()
   const jwks = createRemoteJWKSet(new URL(`https://${domain}/.well-known/jwks.json`))
   const { payload } = await jwtVerify(token, jwks, { issuer: `https://${domain}/` })
-  const fallbackEmail = getEmailFromPayload(payload)
-    ? ''
-    : await getUserInfoEmail(domain, token)
 
-  if (!isAdminFromClaims(payload, rolesClaim, fallbackEmail)) {
-    throw new Error('Admin only')
+  const emailFromPayload = getEmailFromPayload(payload)
+  if (isEmailAllowed(emailFromPayload, allowlist, forceEmail)) {
+    return
   }
+
+  const emailFromUserInfo = emailFromPayload ? '' : await getUserInfoEmail(domain, token)
+  if (isEmailAllowed(emailFromUserInfo, allowlist, forceEmail)) {
+    return
+  }
+
+  if (hasAdminRoleClaim(payload, rolesClaim)) {
+    return
+  }
+
+  try {
+    const managementToken = await getManagementToken(domain)
+    const emailFromManagement = await getUserEmailFromManagement(domain, managementToken, payload.sub)
+    if (isEmailAllowed(emailFromManagement, allowlist, forceEmail)) {
+      return
+    }
+  } catch {
+    // Ignore management fallback errors and continue normal deny path.
+  }
+
+  if ((process.env.ADMIN_FAIL_OPEN || '').toLowerCase() === 'true') {
+    return
+  }
+
+  throw new Error('Admin only')
 }
 
 const normalizeEnvironments = (environments) => {

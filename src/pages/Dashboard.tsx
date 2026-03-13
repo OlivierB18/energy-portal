@@ -72,6 +72,24 @@ interface DynamicPriceChartPoint {
 
 const GAS_METER_ENTITY_ID = 'sensor.gas_meter_gas_consumption'
 const DYNAMIC_PRICE_CHART_EVENT = 'energy-dynamic-chart-visibility-changed'
+const HA_ENVIRONMENTS_UPDATED_EVENT = 'ha-environments-updated'
+
+const normalizeEnvironmentConfigs = (input: unknown): EnvironmentConfig[] => {
+  if (!Array.isArray(input)) {
+    return []
+  }
+
+  return input
+    .map((env) => {
+      const payload = env as { id?: unknown; name?: unknown; type?: unknown }
+      return {
+        id: String(payload?.id || '').trim(),
+        name: String(payload?.name || payload?.id || '').trim(),
+        type: typeof payload?.type === 'string' ? payload.type : undefined,
+      }
+    })
+    .filter((env) => Boolean(env.id))
+}
 
 const normalizeDynamicPricePoints = (input: unknown): DynamicPricePoint[] => {
   if (!input || typeof input !== 'object') {
@@ -365,18 +383,10 @@ export default function Dashboard({
         const cached = localStorage.getItem(haEnvironmentsCacheKey)
         if (cached) {
           const parsed = JSON.parse(cached)
-          if (Array.isArray(parsed)) {
-            const cachedEnvironments = parsed
-              .map((env: { id?: string; name?: string; type?: string }) => ({
-                id: String(env?.id || '').trim(),
-                name: String(env?.name || env?.id || '').trim(),
-                type: env?.type,
-              }))
-              .filter((env: EnvironmentConfig) => Boolean(env.id))
+          const cachedEnvironments = normalizeEnvironmentConfigs(parsed)
 
-            if (cachedEnvironments.length > 0) {
-              setEnvironments(cachedEnvironments)
-            }
+          if (cachedEnvironments.length > 0) {
+            setEnvironments(cachedEnvironments)
           }
         }
       } catch {
@@ -416,6 +426,40 @@ export default function Dashboard({
 
     void loadEnvironments()
   }, [haEnvironmentsCacheKey, isAuthenticated, getAuthToken])
+
+  useEffect(() => {
+    const applyCachedEnvironments = (source: unknown) => {
+      const next = normalizeEnvironmentConfigs(source)
+      if (next.length > 0) {
+        setEnvironments(next)
+      }
+    }
+
+    const handleUpdatedEvent = (event: Event) => {
+      const customEvent = event as CustomEvent<unknown>
+      applyCachedEnvironments(customEvent.detail)
+    }
+
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key !== haEnvironmentsCacheKey || !event.newValue) {
+        return
+      }
+
+      try {
+        applyCachedEnvironments(JSON.parse(event.newValue))
+      } catch {
+        // Ignore malformed storage payloads.
+      }
+    }
+
+    window.addEventListener(HA_ENVIRONMENTS_UPDATED_EVENT, handleUpdatedEvent as EventListener)
+    window.addEventListener('storage', handleStorage)
+
+    return () => {
+      window.removeEventListener(HA_ENVIRONMENTS_UPDATED_EVENT, handleUpdatedEvent as EventListener)
+      window.removeEventListener('storage', handleStorage)
+    }
+  }, [haEnvironmentsCacheKey])
 
   useEffect(() => {
     const getAuthToken = async () => {

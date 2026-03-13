@@ -5,7 +5,7 @@ import { Environment } from '../types'
 import { useAuth0 } from '@auth0/auth0-react'
 
 const OVERVIEW_TEXT_STORAGE_KEY = 'overview_text_config_v1'
-const OVERVIEW_ENVIRONMENT_NAME_OVERRIDES_KEY = 'overview_environment_name_overrides_v1'
+const HA_ENVIRONMENTS_CACHE_KEY = 'ha_environments_cache_v1'
 
 interface OverviewTextConfig {
   title: string
@@ -86,7 +86,7 @@ export default function MultiEnvironmentOverview({
   const [isEditMode, setIsEditMode] = useState(false)
   const [isSavingEditMode, setIsSavingEditMode] = useState(false)
   const [overviewText, setOverviewText] = useState<OverviewTextConfig>(DEFAULT_OVERVIEW_TEXT)
-  const [environmentNameOverrides, setEnvironmentNameOverrides] = useState<Record<string, string>>({})
+  const [environmentNamesAtEditStart, setEnvironmentNamesAtEditStart] = useState<Record<string, string>>({})
 
   const getAuthToken = async () => {
     const audience = import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined
@@ -96,47 +96,6 @@ export default function MultiEnvironmentOverview({
   }
 
   const environmentIdsSignature = environments.map((env) => env.id).join('|')
-
-  useEffect(() => {
-    try {
-      const stored = localStorage.getItem(OVERVIEW_ENVIRONMENT_NAME_OVERRIDES_KEY)
-      if (!stored) {
-        return
-      }
-
-      const parsed = JSON.parse(stored) as Record<string, unknown>
-      const nextOverrides = Object.entries(parsed).reduce<Record<string, string>>((acc, [environmentId, value]) => {
-        if (typeof value === 'string') {
-          acc[environmentId] = value
-        }
-        return acc
-      }, {})
-
-      setEnvironmentNameOverrides(nextOverrides)
-    } catch {
-      // Ignore malformed local storage data and continue with backend names.
-    }
-  }, [])
-
-  useEffect(() => {
-    if (Object.keys(environmentNameOverrides).length === 0) {
-      return
-    }
-
-    setEnvironments((prev) =>
-      prev.map((env) => {
-        const override = environmentNameOverrides[env.id]
-        if (typeof override !== 'string') {
-          return env
-        }
-
-        return {
-          ...env,
-          name: override,
-        }
-      }),
-    )
-  }, [environmentNameOverrides])
 
   useEffect(() => {
     try {
@@ -387,11 +346,6 @@ export default function MultiEnvironmentOverview({
   }
 
   const updateEnvironmentName = (environmentId: string, value: string) => {
-    setEnvironmentNameOverrides((prev) => ({
-      ...prev,
-      [environmentId]: value,
-    }))
-
     setEnvironments((prev) =>
       prev.map((env) =>
         env.id === environmentId
@@ -405,26 +359,46 @@ export default function MultiEnvironmentOverview({
   }
 
   const persistEnvironments = async (nextEnvironments: Environment[]) => {
-    const token = await getAuthToken()
-    const response = await fetch('/.netlify/functions/save-ha-environments', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        environments: nextEnvironments.map((env) => ({
-          id: env.id,
-          name: env.name,
-          type: env.type,
-          config: env.config,
-        })),
-      }),
+    const requestBody = JSON.stringify({
+      environments: nextEnvironments.map((env) => ({
+        id: env.id,
+        name: env.name,
+        type: env.type,
+        config: env.config,
+      })),
     })
 
-    if (!response.ok) {
+    const performSaveRequest = async (token: string) => {
+      const response = await fetch('/.netlify/functions/save-ha-environments', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: requestBody,
+      })
+
+      if (response.ok) {
+        return
+      }
+
       const data = await response.json().catch(() => null)
       throw new Error(data?.error || 'Unable to save environments')
+    }
+
+    const accessToken = await getAuthToken()
+    try {
+      await performSaveRequest(accessToken)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : ''
+      const idTokenClaims = await getIdTokenClaims().catch(() => null)
+      const idToken = typeof idTokenClaims?.__raw === 'string' ? idTokenClaims.__raw : ''
+
+      if (message !== 'Admin only' || !idToken) {
+        throw error
+      }
+
+      await performSaveRequest(idToken)
     }
 
     const updated = nextEnvironments.map((env) => ({
@@ -433,11 +407,37 @@ export default function MultiEnvironmentOverview({
       lastUpdate: env.lastUpdate || 'just now',
     }))
     setEnvironments(updated)
+
+    const compactCache = updated.map((env) => ({
+      id: env.id,
+      name: env.name,
+      type: env.type,
+    }))
+    localStorage.setItem(HA_ENVIRONMENTS_CACHE_KEY, JSON.stringify(compactCache))
+    window.dispatchEvent(new CustomEvent('ha-environments-updated', { detail: compactCache }))
+  }
+
+  const hasEnvironmentNameChanges = () => {
+    if (!isEditMode) {
+      return false
+    }
+
+    const changedExistingNames = environments.some((env) => environmentNamesAtEditStart[env.id] !== env.name)
+    const deletedEnvironment = Object.keys(environmentNamesAtEditStart).some(
+      (environmentId) => !environments.some((env) => env.id === environmentId),
+    )
+    return changedExistingNames || deletedEnvironment
   }
 
   const handleEditToggle = async () => {
     if (!isEditMode) {
       setEnvError(null)
+      setEnvironmentNamesAtEditStart(
+        environments.reduce<Record<string, string>>((acc, env) => {
+          acc[env.id] = env.name
+          return acc
+        }, {}),
+      )
       setIsEditMode(true)
       return
     }
@@ -451,9 +451,13 @@ export default function MultiEnvironmentOverview({
 
     try {
       localStorage.setItem(OVERVIEW_TEXT_STORAGE_KEY, JSON.stringify(overviewText))
-      localStorage.setItem(OVERVIEW_ENVIRONMENT_NAME_OVERRIDES_KEY, JSON.stringify(environmentNameOverrides))
+
+      if (hasEnvironmentNameChanges()) {
+        await persistEnvironments(environments)
+      }
 
       setIsEditMode(false)
+      setEnvironmentNamesAtEditStart({})
     } catch (error) {
       setEnvError(error instanceof Error ? error.message : 'Unable to save edit mode changes')
     } finally {
