@@ -5,6 +5,7 @@ import { Environment } from '../types'
 import { useAuth0 } from '@auth0/auth0-react'
 
 const OVERVIEW_TEXT_STORAGE_KEY = 'overview_text_config_v1'
+const OVERVIEW_ENVIRONMENT_NAME_OVERRIDES_KEY = 'overview_environment_name_overrides_v1'
 
 interface OverviewTextConfig {
   title: string
@@ -85,7 +86,7 @@ export default function MultiEnvironmentOverview({
   const [isEditMode, setIsEditMode] = useState(false)
   const [isSavingEditMode, setIsSavingEditMode] = useState(false)
   const [overviewText, setOverviewText] = useState<OverviewTextConfig>(DEFAULT_OVERVIEW_TEXT)
-  const [environmentNamesAtEditStart, setEnvironmentNamesAtEditStart] = useState<Record<string, string>>({})
+  const [environmentNameOverrides, setEnvironmentNameOverrides] = useState<Record<string, string>>({})
 
   const getAuthToken = async () => {
     const audience = import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined
@@ -95,6 +96,47 @@ export default function MultiEnvironmentOverview({
   }
 
   const environmentIdsSignature = environments.map((env) => env.id).join('|')
+
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(OVERVIEW_ENVIRONMENT_NAME_OVERRIDES_KEY)
+      if (!stored) {
+        return
+      }
+
+      const parsed = JSON.parse(stored) as Record<string, unknown>
+      const nextOverrides = Object.entries(parsed).reduce<Record<string, string>>((acc, [environmentId, value]) => {
+        if (typeof value === 'string') {
+          acc[environmentId] = value
+        }
+        return acc
+      }, {})
+
+      setEnvironmentNameOverrides(nextOverrides)
+    } catch {
+      // Ignore malformed local storage data and continue with backend names.
+    }
+  }, [])
+
+  useEffect(() => {
+    if (Object.keys(environmentNameOverrides).length === 0) {
+      return
+    }
+
+    setEnvironments((prev) =>
+      prev.map((env) => {
+        const override = environmentNameOverrides[env.id]
+        if (typeof override !== 'string') {
+          return env
+        }
+
+        return {
+          ...env,
+          name: override,
+        }
+      }),
+    )
+  }, [environmentNameOverrides])
 
   useEffect(() => {
     try {
@@ -345,6 +387,11 @@ export default function MultiEnvironmentOverview({
   }
 
   const updateEnvironmentName = (environmentId: string, value: string) => {
+    setEnvironmentNameOverrides((prev) => ({
+      ...prev,
+      [environmentId]: value,
+    }))
+
     setEnvironments((prev) =>
       prev.map((env) =>
         env.id === environmentId
@@ -388,27 +435,9 @@ export default function MultiEnvironmentOverview({
     setEnvironments(updated)
   }
 
-  const hasEnvironmentNameChanges = () => {
-    if (!isEditMode) {
-      return false
-    }
-
-    const changedExistingNames = environments.some((env) => environmentNamesAtEditStart[env.id] !== env.name)
-    const deletedEnvironment = Object.keys(environmentNamesAtEditStart).some(
-      (environmentId) => !environments.some((env) => env.id === environmentId),
-    )
-    return changedExistingNames || deletedEnvironment
-  }
-
   const handleEditToggle = async () => {
     if (!isEditMode) {
       setEnvError(null)
-      setEnvironmentNamesAtEditStart(
-        environments.reduce<Record<string, string>>((acc, env) => {
-          acc[env.id] = env.name
-          return acc
-        }, {}),
-      )
       setIsEditMode(true)
       return
     }
@@ -422,13 +451,9 @@ export default function MultiEnvironmentOverview({
 
     try {
       localStorage.setItem(OVERVIEW_TEXT_STORAGE_KEY, JSON.stringify(overviewText))
-
-      if (hasEnvironmentNameChanges()) {
-        await persistEnvironments(environments)
-      }
+      localStorage.setItem(OVERVIEW_ENVIRONMENT_NAME_OVERRIDES_KEY, JSON.stringify(environmentNameOverrides))
 
       setIsEditMode(false)
-      setEnvironmentNamesAtEditStart({})
     } catch (error) {
       setEnvError(error instanceof Error ? error.message : 'Unable to save edit mode changes')
     } finally {
