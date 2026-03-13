@@ -30,6 +30,8 @@ interface EntsoeChartPoint {
   price: number
   currentPrice: number | null
   forecastPrice: number | null
+  fixedConsumerPrice: number | null
+  fixedProducerPrice: number | null
 }
 
 const DYNAMIC_PRICE_CHART_EVENT = 'energy-dynamic-chart-visibility-changed'
@@ -41,17 +43,27 @@ export default function EnergyPriceModal({
   getAuthToken,
 }: EnergyPriceModalProps) {
   const dynamicChartPreferenceKey = `energy_dynamic_chart_visible_${environmentId || 'default'}`
+  const fixedLinesPreferenceKey = `energy_dynamic_chart_show_fixed_lines_${environmentId || 'default'}`
 
   const parseNumber = (raw: unknown, fallback: number) => {
     const parsed = Number(raw)
     return Number.isFinite(parsed) ? parsed : fallback
   }
 
-  const persistDynamicChartPreference = (visible: boolean) => {
-    localStorage.setItem(dynamicChartPreferenceKey, JSON.stringify({ visible, updatedAt: new Date().toISOString() }))
+  const emitChartPreferenceChange = (visible: boolean, showFixedLines: boolean) => {
     window.dispatchEvent(new CustomEvent(DYNAMIC_PRICE_CHART_EVENT, {
-      detail: { environmentId, visible },
+      detail: { environmentId, visible, showFixedLines },
     }))
+  }
+
+  const persistDynamicChartPreference = (visible: boolean, showFixedLines: boolean) => {
+    localStorage.setItem(dynamicChartPreferenceKey, JSON.stringify({ visible, updatedAt: new Date().toISOString() }))
+    emitChartPreferenceChange(visible, showFixedLines)
+  }
+
+  const persistFixedLinesPreference = (showFixedLines: boolean, visible: boolean) => {
+    localStorage.setItem(fixedLinesPreferenceKey, JSON.stringify({ visible: showFixedLines, updatedAt: new Date().toISOString() }))
+    emitChartPreferenceChange(visible, showFixedLines)
   }
 
   const normalizeEntsoePoints = (payload: unknown): EntsoePricePoint[] => {
@@ -125,10 +137,18 @@ export default function EnergyPriceModal({
   const [error, setError] = useState<string | null>(null)
   const [entsoeLoading, setEntsoeLoading] = useState(false)
   const [showDynamicChart, setShowDynamicChart] = useState(false)
+  const [showFixedPriceLines, setShowFixedPriceLines] = useState(true)
   const [entsoePoints, setEntsoePoints] = useState<EntsoePricePoint[]>([])
   const [entsoeUpdatedAt, setEntsoeUpdatedAt] = useState<string | null>(null)
 
   const entsoeChartData = useMemo<EntsoeChartPoint[]>(() => {
+    const fixedConsumerLine = showFixedPriceLines && pricingType === 'fixed'
+      ? Number((parseNumber(consumerPrice, 0.30) + parseNumber(consumerMargin, 0.05)).toFixed(4))
+      : null
+    const fixedProducerLine = showFixedPriceLines && pricingType === 'fixed'
+      ? Number(Math.max(0, parseNumber(producerPrice, 0.10) - parseNumber(producerMargin, 0.02)).toFixed(4))
+      : null
+
     return entsoePoints.map((point) => {
       const date = new Date(point.time)
       const time = date.toLocaleString([], {
@@ -153,9 +173,11 @@ export default function EnergyPriceModal({
         price: roundedPrice,
         currentPrice: point.isForecast ? null : roundedPrice,
         forecastPrice: point.isForecast ? roundedPrice : null,
+        fixedConsumerPrice: fixedConsumerLine,
+        fixedProducerPrice: fixedProducerLine,
       }
     })
-  }, [entsoePoints])
+  }, [consumerMargin, consumerPrice, entsoePoints, pricingType, producerMargin, producerPrice, showFixedPriceLines])
 
   useEffect(() => {
     let isMounted = true
@@ -213,31 +235,26 @@ export default function EnergyPriceModal({
   }, [environmentId, getAuthToken])
 
   useEffect(() => {
-    if (pricingType !== 'dynamic' && showDynamicChart) {
-      setShowDynamicChart(false)
-      persistDynamicChartPreference(false)
-    }
-  }, [pricingType, showDynamicChart])
-
-  useEffect(() => {
-    if (pricingType !== 'dynamic') {
-      return
-    }
-
     try {
-      const stored = localStorage.getItem(dynamicChartPreferenceKey)
-      if (!stored) {
-        return
+      const chartStored = localStorage.getItem(dynamicChartPreferenceKey)
+      if (chartStored) {
+        const parsed = JSON.parse(chartStored)
+        if (typeof parsed?.visible === 'boolean') {
+          setShowDynamicChart(parsed.visible)
+        }
       }
 
-      const parsed = JSON.parse(stored)
-      if (typeof parsed?.visible === 'boolean') {
-        setShowDynamicChart(parsed.visible)
+      const fixedLinesStored = localStorage.getItem(fixedLinesPreferenceKey)
+      if (fixedLinesStored) {
+        const parsed = JSON.parse(fixedLinesStored)
+        if (typeof parsed?.visible === 'boolean') {
+          setShowFixedPriceLines(parsed.visible)
+        }
       }
     } catch {
       // Ignore malformed preference data.
     }
-  }, [dynamicChartPreferenceKey, pricingType])
+  }, [dynamicChartPreferenceKey, fixedLinesPreferenceKey])
 
   const fetchENTSOE = async (hoursAhead: number) => {
     if (!getAuthToken) {
@@ -262,7 +279,7 @@ export default function EnergyPriceModal({
   }
 
   useEffect(() => {
-    if (pricingType !== 'dynamic' || !showDynamicChart) {
+    if (!showDynamicChart) {
       setEntsoeLoading(false)
       return
     }
@@ -301,7 +318,9 @@ export default function EnergyPriceModal({
           throw new Error('No valid ENTSOE price returned')
         }
 
-        setConsumerPrice(nextBasePrice.toFixed(4))
+        if (pricingType === 'dynamic') {
+          setConsumerPrice(nextBasePrice.toFixed(4))
+        }
       } catch (err) {
         if (isMounted) {
           setError(err instanceof Error ? err.message : 'Failed to fetch ENTSOE prices')
@@ -326,7 +345,12 @@ export default function EnergyPriceModal({
 
   const handleShowChartOnUiChange = (visible: boolean) => {
     setShowDynamicChart(visible)
-    persistDynamicChartPreference(visible)
+    persistDynamicChartPreference(visible, showFixedPriceLines)
+  }
+
+  const handleShowFixedLinesChange = (visible: boolean) => {
+    setShowFixedPriceLines(visible)
+    persistFixedLinesPreference(visible, showDynamicChart)
   }
 
   const handleSave = async () => {
@@ -400,7 +424,7 @@ export default function EnergyPriceModal({
         <div className="p-6 space-y-6">
           {error && <p className="text-red-300 text-sm">{error}</p>}
 
-          {entsoeLoading && pricingType === 'dynamic' && showDynamicChart && (
+          {entsoeLoading && showDynamicChart && (
             <p className="text-light-1 text-xs opacity-80">Updating dynamic prices in background...</p>
           )}
 
@@ -495,8 +519,8 @@ export default function EnergyPriceModal({
             </div>
           </div>
 
-          {/* Dynamic Chart Toggle */}
-          {pricingType === 'dynamic' && (
+          {/* Dynamic Chart Toggles */}
+          <div className="space-y-3">
             <label className="flex items-center gap-3 rounded-lg border border-light-2 border-opacity-20 bg-dark-2 bg-opacity-50 px-4 py-3 cursor-pointer select-none">
               <input
                 type="checkbox"
@@ -507,16 +531,35 @@ export default function EnergyPriceModal({
               <div>
                 <p className="text-light-2 text-sm font-medium">Show chart on UI</p>
                 <p className="text-xs text-light-1 opacity-75">
-                  Fetches dynamic prices in background only when this is enabled.
+                  Fetches dynamic market prices in background only when enabled.
                 </p>
               </div>
             </label>
-          )}
 
-          {pricingType === 'dynamic' && showDynamicChart && (
+            {showDynamicChart && pricingType === 'fixed' && (
+              <label className="flex items-center gap-3 rounded-lg border border-light-2 border-opacity-20 bg-dark-2 bg-opacity-50 px-4 py-3 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={showFixedPriceLines}
+                  onChange={(event) => handleShowFixedLinesChange(event.target.checked)}
+                  className="h-4 w-4 accent-emerald-500"
+                />
+                <div>
+                  <p className="text-light-2 text-sm font-medium">Show fixed prices in chart</p>
+                  <p className="text-xs text-light-1 opacity-75">
+                    Adds your fixed consumer/producer rates as comparison lines.
+                  </p>
+                </div>
+              </label>
+            )}
+          </div>
+
+          {showDynamicChart && (
             <div className="bg-dark-2 bg-opacity-50 rounded-lg p-4">
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3">
-                <p className="text-light-2 text-sm font-medium">Dynamic Price Chart (Today + Forecast)</p>
+                <p className="text-light-2 text-sm font-medium">
+                  Dynamic Price Chart (Today + Forecast)
+                </p>
                 {entsoeUpdatedAt && (
                   <p className="text-xs text-light-1 opacity-80">
                     Updated: {new Date(entsoeUpdatedAt).toLocaleString()}
@@ -585,6 +628,29 @@ export default function EnergyPriceModal({
                           connectNulls
                           name="Forecast"
                         />
+                        {showFixedPriceLines && pricingType === 'fixed' && (
+                          <Line
+                            type="linear"
+                            dataKey="fixedConsumerPrice"
+                            stroke="#60a5fa"
+                            strokeWidth={2}
+                            dot={false}
+                            connectNulls
+                            name="Fixed Consumer (incl. margin)"
+                          />
+                        )}
+                        {showFixedPriceLines && pricingType === 'fixed' && (
+                          <Line
+                            type="linear"
+                            dataKey="fixedProducerPrice"
+                            stroke="#a78bfa"
+                            strokeWidth={2}
+                            strokeDasharray="4 4"
+                            dot={false}
+                            connectNulls
+                            name="Fixed Producer (after margin)"
+                          />
+                        )}
                       </LineChart>
                     </ResponsiveContainer>
                   </div>

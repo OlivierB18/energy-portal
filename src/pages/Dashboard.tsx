@@ -66,6 +66,8 @@ interface DynamicPriceChartPoint {
   price: number
   currentPrice: number | null
   forecastPrice: number | null
+  fixedConsumerPrice: number | null
+  fixedProducerPrice: number | null
 }
 
 const GAS_METER_ENTITY_ID = 'sensor.gas_meter_gas_consumption'
@@ -330,6 +332,7 @@ export default function Dashboard({
   const [dynamicPriceUpdatedAt, setDynamicPriceUpdatedAt] = useState<string | null>(null)
   const [dynamicPriceChartLoading, setDynamicPriceChartLoading] = useState(false)
   const [dynamicPriceChartError, setDynamicPriceChartError] = useState<string | null>(null)
+  const [showFixedPriceLinesOnChart, setShowFixedPriceLinesOnChart] = useState(true)
   // Sensor connection status: 'connecting' | 'connected' | 'error'
   const [_haConnectionStatus, setHaConnectionStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   const { isAuthenticated, getIdTokenClaims, getAccessTokenSilently, user } = useAuth0()
@@ -349,6 +352,7 @@ export default function Dashboard({
   const haEntitiesCacheKey = `ha_entities_cache_v4_${selectedEnvironment || 'default'}_${userCacheScope}`
   const dynamicPriceCacheKey = `energy_dynamic_price_${selectedEnvironment || 'default'}`
   const dynamicPriceChartPreferenceKey = `energy_dynamic_chart_visible_${selectedEnvironment || 'default'}`
+  const dynamicPriceFixedLinesPreferenceKey = `energy_dynamic_chart_show_fixed_lines_${selectedEnvironment || 'default'}`
 
   useEffect(() => {
     const loadEnvironments = async () => {
@@ -553,25 +557,37 @@ export default function Dashboard({
   }, [selectedEnvironment, isAuthenticated, getAuthToken])
 
   useEffect(() => {
-    if (!selectedEnvironment || pricingConfig?.type !== 'dynamic') {
+    if (!selectedEnvironment) {
       setShowDynamicPriceChart(false)
       setDynamicPriceChartError(null)
       return
     }
 
     try {
-      const stored = localStorage.getItem(dynamicPriceChartPreferenceKey)
-      if (!stored) {
+      const chartStored = localStorage.getItem(dynamicPriceChartPreferenceKey)
+      if (chartStored) {
+        const parsed = JSON.parse(chartStored)
+        setShowDynamicPriceChart(Boolean(parsed?.visible))
+      } else {
         setShowDynamicPriceChart(false)
-        return
       }
 
-      const parsed = JSON.parse(stored)
-      setShowDynamicPriceChart(Boolean(parsed?.visible))
+      const fixedLinesStored = localStorage.getItem(dynamicPriceFixedLinesPreferenceKey)
+      if (fixedLinesStored) {
+        const parsed = JSON.parse(fixedLinesStored)
+        setShowFixedPriceLinesOnChart(typeof parsed?.visible === 'boolean' ? parsed.visible : true)
+      } else {
+        setShowFixedPriceLinesOnChart(true)
+      }
     } catch {
       setShowDynamicPriceChart(false)
+      setShowFixedPriceLinesOnChart(true)
     }
-  }, [dynamicPriceChartPreferenceKey, pricingConfig?.type, selectedEnvironment])
+  }, [
+    dynamicPriceChartPreferenceKey,
+    dynamicPriceFixedLinesPreferenceKey,
+    selectedEnvironment,
+  ])
 
   useEffect(() => {
     if (!selectedEnvironment) {
@@ -579,13 +595,16 @@ export default function Dashboard({
     }
 
     const handleDynamicChartVisibilityChange = (event: Event) => {
-      const detail = (event as CustomEvent<{ environmentId?: string; visible?: boolean }>)?.detail
+      const detail = (event as CustomEvent<{ environmentId?: string; visible?: boolean; showFixedLines?: boolean }>)?.detail
       if (!detail || detail.environmentId !== selectedEnvironment) {
         return
       }
 
       const visible = Boolean(detail.visible)
       setShowDynamicPriceChart(visible)
+      if (typeof detail.showFixedLines === 'boolean') {
+        setShowFixedPriceLinesOnChart(detail.showFixedLines)
+      }
       if (!visible) {
         setDynamicPriceChartError(null)
       }
@@ -598,7 +617,7 @@ export default function Dashboard({
   }, [selectedEnvironment])
 
   useEffect(() => {
-    if (!selectedEnvironment || !isAuthenticated || pricingConfig?.type !== 'dynamic' || !showDynamicPriceChart) {
+    if (!selectedEnvironment || !isAuthenticated || !showDynamicPriceChart) {
       setDynamicPriceChartLoading(false)
       return
     }
@@ -670,7 +689,6 @@ export default function Dashboard({
     dynamicPriceCacheKey,
     getAuthToken,
     isAuthenticated,
-    pricingConfig?.type,
     selectedEnvironment,
     showDynamicPriceChart,
   ])
@@ -1897,6 +1915,13 @@ export default function Dashboard({
   }, [bucketGasReadings, selectedRange.startMs, selectedRange.endMs, timeRange])
 
   const dynamicPriceChartData = useMemo<DynamicPriceChartPoint[]>(() => {
+    const fixedConsumerLine = showFixedPriceLinesOnChart && pricingConfig?.type === 'fixed'
+      ? Number(((pricingConfig?.consumerPrice || 0.30) + (pricingConfig?.consumerMargin || 0)).toFixed(4))
+      : null
+    const fixedProducerLine = showFixedPriceLinesOnChart && pricingConfig?.type === 'fixed'
+      ? Number(Math.max(0, (pricingConfig?.producerPrice || 0.10) - (pricingConfig?.producerMargin || 0)).toFixed(4))
+      : null
+
     return dynamicPricePoints.map((point) => {
       const date = new Date(point.time)
       const time = date.toLocaleString([], {
@@ -1921,9 +1946,11 @@ export default function Dashboard({
         price: roundedPrice,
         currentPrice: point.isForecast ? null : roundedPrice,
         forecastPrice: point.isForecast ? roundedPrice : null,
+        fixedConsumerPrice: fixedConsumerLine,
+        fixedProducerPrice: fixedProducerLine,
       }
     })
-  }, [dynamicPricePoints])
+  }, [dynamicPricePoints, pricingConfig, showFixedPriceLinesOnChart])
 
   const gasSelectedPeriodTotal = useMemo(() => {
     return parseFloat(
@@ -2270,18 +2297,23 @@ export default function Dashboard({
           </div>
 
           {/* Dynamic Price Chart */}
-          {pricingConfig?.type === 'dynamic' && showDynamicPriceChart && (
+          {showDynamicPriceChart && (
             <div className="glass-panel rounded-3xl shadow-2xl p-4 sm:p-6 md:p-8">
               <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <h2 className="text-2xl font-heavy text-dark-1 flex items-center gap-2">
                   <DollarSign className="w-6 h-6 text-brand-2" />
                   Dynamic Price Chart
                 </h2>
-                {dynamicPriceUpdatedAt && (
-                  <p className="text-xs text-light-1 opacity-80">
-                    Updated: {new Date(dynamicPriceUpdatedAt).toLocaleString()}
-                  </p>
-                )}
+                <div className="text-right">
+                  {dynamicPriceUpdatedAt && (
+                    <p className="text-xs text-light-1 opacity-80">
+                      Updated: {new Date(dynamicPriceUpdatedAt).toLocaleString()}
+                    </p>
+                  )}
+                  {showFixedPriceLinesOnChart && pricingConfig?.type === 'fixed' && (
+                    <p className="text-xs text-light-1 opacity-80">Fixed comparison lines enabled</p>
+                  )}
+                </div>
               </div>
 
               {dynamicPriceChartLoading && dynamicPriceChartData.length === 0 && (
@@ -2347,6 +2379,29 @@ export default function Dashboard({
                           connectNulls
                           name="Forecast"
                         />
+                        {showFixedPriceLinesOnChart && pricingConfig?.type === 'fixed' && (
+                          <Line
+                            type="linear"
+                            dataKey="fixedConsumerPrice"
+                            stroke="#60a5fa"
+                            strokeWidth={2}
+                            dot={false}
+                            connectNulls
+                            name="Fixed Consumer (incl. margin)"
+                          />
+                        )}
+                        {showFixedPriceLinesOnChart && pricingConfig?.type === 'fixed' && (
+                          <Line
+                            type="linear"
+                            dataKey="fixedProducerPrice"
+                            stroke="#a78bfa"
+                            strokeWidth={2}
+                            strokeDasharray="4 4"
+                            dot={false}
+                            connectNulls
+                            name="Fixed Producer (after margin)"
+                          />
+                        )}
                       </LineChart>
                     </ResponsiveContainer>
                   </div>
