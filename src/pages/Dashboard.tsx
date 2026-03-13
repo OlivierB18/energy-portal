@@ -619,7 +619,7 @@ export default function Dashboard({
 
         if (!response.ok) {
           const payload = await response.json().catch(() => null)
-          throw new Error(payload?.error || 'Unable to load dynamic price chart')
+          throw new Error(payload?.message || payload?.error || 'Unable to load dynamic price chart')
         }
 
         const data = await response.json()

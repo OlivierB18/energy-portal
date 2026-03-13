@@ -15,6 +15,20 @@ const getTagValue = (xml, tagName) => {
   return match ? String(match[1]).trim() : ''
 }
 
+const parseEntsoeReasonText = (xml) => {
+  if (!xml || typeof xml !== 'string') {
+    return ''
+  }
+
+  const reasonCode = getTagValue(xml, 'code')
+  const reasonText = getTagValue(xml, 'text')
+  if (!reasonCode && !reasonText) {
+    return ''
+  }
+
+  return [reasonCode ? `code ${reasonCode}` : '', reasonText].filter(Boolean).join(': ')
+}
+
 const parseResolutionMinutes = (resolutionRaw) => {
   const source = String(resolutionRaw || '').trim()
   const match = source.match(/^PT(?:(\d+)H)?(?:(\d+)M)?$/i)
@@ -37,6 +51,7 @@ const parseENTSOEXML = (xml) => {
   const periodRegex = /<Period>([\s\S]*?)<\/Period>/gi
   const pointRegex = /<Point>([\s\S]*?)<\/Point>/gi
   const byTime = new Map()
+  const resolutions = new Set()
 
   let periodMatch
   while ((periodMatch = periodRegex.exec(xml)) !== null) {
@@ -47,7 +62,11 @@ const parseENTSOEXML = (xml) => {
       continue
     }
 
-    const resolutionMinutes = parseResolutionMinutes(getTagValue(periodXml, 'resolution'))
+    const resolutionRaw = getTagValue(periodXml, 'resolution')
+    const resolutionMinutes = parseResolutionMinutes(resolutionRaw)
+    if (resolutionRaw) {
+      resolutions.add(resolutionRaw)
+    }
     let pointMatch
     while ((pointMatch = pointRegex.exec(periodXml)) !== null) {
       const pointXml = pointMatch[1]
@@ -71,7 +90,11 @@ const parseENTSOEXML = (xml) => {
     }
   }
 
-  return Array.from(byTime.values()).sort((a, b) => Date.parse(a.time) - Date.parse(b.time))
+  const prices = Array.from(byTime.values()).sort((a, b) => Date.parse(a.time) - Date.parse(b.time))
+  return {
+    prices,
+    resolutions: Array.from(resolutions),
+  }
 }
 
 const pickCurrentPrice = (prices) => {
@@ -175,18 +198,32 @@ export const handler = async (event) => {
     const response = await fetch(url.toString())
     if (!response.ok) {
       const text = await response.text()
+      const reason = parseEntsoeReasonText(text)
       return {
         statusCode: response.status,
         body: JSON.stringify({
           error: 'Failed to fetch ENTSOE prices',
+          message: reason || `ENTSOE responded with HTTP ${response.status}`,
           details: text,
         }),
       }
     }
 
     const xml = await response.text()
-    const prices = parseENTSOEXML(xml)
+    const parsed = parseENTSOEXML(xml)
+    const prices = parsed.prices
     const current = pickCurrentPrice(prices)
+
+    if (prices.length === 0) {
+      const reason = parseEntsoeReasonText(xml)
+      return {
+        statusCode: 502,
+        body: JSON.stringify({
+          error: 'No ENTSOE prices found for requested period',
+          message: reason || 'ENTSOE returned no price points',
+        }),
+      }
+    }
 
     return {
       statusCode: 200,
@@ -202,6 +239,8 @@ export const handler = async (event) => {
         currency: 'EUR',
         unit: 'MWh',
         biddingZone,
+        resolutions: parsed.resolutions,
+        pricePoints: prices.length,
         hoursAhead,
         periodStart: startUtc.toISOString(),
         periodEnd: endUtc.toISOString(),
@@ -211,10 +250,11 @@ export const handler = async (event) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error'
     const statusCode = message === 'Missing token' ? 401 : 500
+    const isMissingConfig = /^Missing\s+/i.test(message)
     return {
       statusCode,
       body: JSON.stringify({
-        error: 'Unable to fetch ENTSOE prices',
+        error: isMissingConfig ? `Configuration error: ${message}` : 'Unable to fetch ENTSOE prices',
         message,
       }),
     }

@@ -251,7 +251,7 @@ export default function EnergyPriceModal({
 
     if (!response.ok) {
       const data = await response.json().catch(() => null)
-      throw new Error(data?.error || 'Failed to fetch ENTSOE prices')
+      throw new Error(data?.message || data?.error || 'Failed to fetch ENTSOE prices')
     }
 
     const data = await response.json()
@@ -268,7 +268,10 @@ export default function EnergyPriceModal({
     try {
       const { data, points } = await fetchENTSOE(120)
       if (points.length === 0) {
-        throw new Error('No ENTSOE prices available for the selected horizon')
+        const resolutionInfo = Array.isArray(data?.resolutions) && data.resolutions.length > 0
+          ? ` (resolution: ${data.resolutions.join(', ')})`
+          : ''
+        throw new Error(`No ENTSOE prices available for the selected horizon${resolutionInfo}`)
       }
 
       const currentPrice = parseNumber(data?.current?.eurPerKwh, NaN)
