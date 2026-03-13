@@ -4,6 +4,50 @@ import EnvironmentConfig from '../components/EnvironmentConfig'
 import { Environment } from '../types'
 import { useAuth0 } from '@auth0/auth0-react'
 
+const OVERVIEW_TEXT_STORAGE_KEY = 'overview_text_config_v1'
+
+interface OverviewTextConfig {
+  title: string
+  menuOpenDashboard: string
+  menuUsers: string
+  menuAddEnvironment: string
+  menuConfigure: string
+  menuLogout: string
+  loadingEnvironments: string
+  noEnvironments: string
+  currentPower: string
+  dailyUsage: string
+  lastUpdate: string
+  environmentOffline: string
+  lastSeen: string
+  cardOpenDashboard: string
+  summaryTitle: string
+  environmentsOnline: string
+  totalCurrentPower: string
+  totalDailyUsage: string
+}
+
+const DEFAULT_OVERVIEW_TEXT: OverviewTextConfig = {
+  title: 'Inside-Out Foxtrot',
+  menuOpenDashboard: 'Open Dashboard',
+  menuUsers: 'Users',
+  menuAddEnvironment: 'Add Environment',
+  menuConfigure: 'Configure',
+  menuLogout: 'Logout',
+  loadingEnvironments: 'Loading environments...',
+  noEnvironments: 'No environments configured yet.',
+  currentPower: 'Current Power',
+  dailyUsage: 'Daily Usage',
+  lastUpdate: 'Last update',
+  environmentOffline: 'Environment offline',
+  lastSeen: 'Last seen',
+  cardOpenDashboard: 'Open Dashboard',
+  summaryTitle: 'Environment Summary',
+  environmentsOnline: 'Environments Online',
+  totalCurrentPower: 'Total Current Power (kW)',
+  totalDailyUsage: 'Total Daily Usage (kWh)',
+}
+
 interface MultiEnvironmentOverviewProps {
   isAdmin: boolean
   onManageUsers: () => void
@@ -38,6 +82,10 @@ export default function MultiEnvironmentOverview({
   const [envError, setEnvError] = useState<string | null>(null)
   const { isAuthenticated, getIdTokenClaims, getAccessTokenSilently } = useAuth0()
   const [environments, setEnvironments] = useState<Environment[]>([])
+  const [isEditMode, setIsEditMode] = useState(false)
+  const [isSavingEditMode, setIsSavingEditMode] = useState(false)
+  const [overviewText, setOverviewText] = useState<OverviewTextConfig>(DEFAULT_OVERVIEW_TEXT)
+  const [environmentNamesAtEditStart, setEnvironmentNamesAtEditStart] = useState<Record<string, string>>({})
 
   const getAuthToken = async () => {
     const audience = import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined
@@ -47,6 +95,31 @@ export default function MultiEnvironmentOverview({
   }
 
   const environmentIdsSignature = environments.map((env) => env.id).join('|')
+
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(OVERVIEW_TEXT_STORAGE_KEY)
+      if (!stored) {
+        return
+      }
+
+      const parsed = JSON.parse(stored) as Partial<OverviewTextConfig>
+      setOverviewText((prev) => {
+        const next = { ...prev }
+
+        ;(Object.keys(DEFAULT_OVERVIEW_TEXT) as Array<keyof OverviewTextConfig>).forEach((key) => {
+          const candidate = parsed[key]
+          if (typeof candidate === 'string') {
+            next[key] = candidate
+          }
+        })
+
+        return next
+      })
+    } catch {
+      // Ignore malformed local storage data and continue with defaults.
+    }
+  }, [])
 
   useEffect(() => {
     const loadEnvironments = async () => {
@@ -264,38 +337,110 @@ export default function MultiEnvironmentOverview({
     ? environments.filter((env) => allowedEnvironmentIds.includes(env.id))
     : environments
 
+  const updateOverviewText = (key: keyof OverviewTextConfig, value: string) => {
+    setOverviewText((prev) => ({
+      ...prev,
+      [key]: value,
+    }))
+  }
+
+  const updateEnvironmentName = (environmentId: string, value: string) => {
+    setEnvironments((prev) =>
+      prev.map((env) =>
+        env.id === environmentId
+          ? {
+              ...env,
+              name: value,
+            }
+          : env,
+      ),
+    )
+  }
+
+  const persistEnvironments = async (nextEnvironments: Environment[]) => {
+    const token = await getAuthToken()
+    const response = await fetch('/.netlify/functions/save-ha-environments', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        environments: nextEnvironments.map((env) => ({
+          id: env.id,
+          name: env.name,
+          type: env.type,
+          config: env.config,
+        })),
+      }),
+    })
+
+    if (!response.ok) {
+      const data = await response.json().catch(() => null)
+      throw new Error(data?.error || 'Unable to save environments')
+    }
+
+    const updated = nextEnvironments.map((env) => ({
+      ...env,
+      status: env.status || 'offline',
+      lastUpdate: env.lastUpdate || 'just now',
+    }))
+    setEnvironments(updated)
+  }
+
+  const hasEnvironmentNameChanges = () => {
+    if (!isEditMode) {
+      return false
+    }
+
+    const changedExistingNames = environments.some((env) => environmentNamesAtEditStart[env.id] !== env.name)
+    const deletedEnvironment = Object.keys(environmentNamesAtEditStart).some(
+      (environmentId) => !environments.some((env) => env.id === environmentId),
+    )
+    return changedExistingNames || deletedEnvironment
+  }
+
+  const handleEditToggle = async () => {
+    if (!isEditMode) {
+      setEnvError(null)
+      setEnvironmentNamesAtEditStart(
+        environments.reduce<Record<string, string>>((acc, env) => {
+          acc[env.id] = env.name
+          return acc
+        }, {}),
+      )
+      setIsEditMode(true)
+      return
+    }
+
+    if (isSavingEditMode) {
+      return
+    }
+
+    setIsSavingEditMode(true)
+    setEnvError(null)
+
+    try {
+      localStorage.setItem(OVERVIEW_TEXT_STORAGE_KEY, JSON.stringify(overviewText))
+
+      if (hasEnvironmentNameChanges()) {
+        await persistEnvironments(environments)
+      }
+
+      setIsEditMode(false)
+      setEnvironmentNamesAtEditStart({})
+    } catch (error) {
+      setEnvError(error instanceof Error ? error.message : 'Unable to save edit mode changes')
+    } finally {
+      setIsSavingEditMode(false)
+    }
+  }
+
   const handleSaveEnvironments = async (nextEnvironments: Environment[]) => {
     setEnvError(null)
 
     try {
-      const token = await getAuthToken()
-      const response = await fetch('/.netlify/functions/save-ha-environments', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          environments: nextEnvironments.map((env) => ({
-            id: env.id,
-            name: env.name,
-            type: env.type,
-            config: env.config,
-          })),
-        }),
-      })
-
-      if (!response.ok) {
-        const data = await response.json().catch(() => null)
-        throw new Error(data?.error || 'Unable to save environments')
-      }
-
-      const updated = nextEnvironments.map((env) => ({
-        ...env,
-        status: env.status || 'offline',
-        lastUpdate: env.lastUpdate || 'just now',
-      }))
-      setEnvironments(updated)
+      await persistEnvironments(nextEnvironments)
       setShowConfig(false)
     } catch (error) {
       setEnvError(error instanceof Error ? error.message : 'Unable to save environments')
@@ -328,9 +473,19 @@ export default function MultiEnvironmentOverview({
             <div className="flex items-center gap-4 min-w-0">
               <Home className="w-8 h-8 text-brand-2" />
               <div className="min-w-0">
-                <h1 className="text-3xl md:text-5xl font-heavy text-light-2 leading-tight">
-                  Inside-Out Foxtrot
-                </h1>
+                {isEditMode ? (
+                  <input
+                    type="text"
+                    value={overviewText.title}
+                    onChange={(event) => updateOverviewText('title', event.target.value)}
+                    className="w-full md:min-w-[22rem] text-3xl md:text-5xl font-heavy leading-tight bg-black bg-opacity-35 text-light-2 border border-light-2 border-opacity-30 rounded-lg px-3 py-1 focus:outline-none focus:ring-2 focus:ring-brand-2"
+                    onClick={(event) => event.stopPropagation()}
+                  />
+                ) : (
+                  <h1 className="text-3xl md:text-5xl font-heavy text-light-2 leading-tight">
+                    {overviewText.title}
+                  </h1>
+                )}
               </div>
             </div>
             <div className="relative overview-settings-dropdown shrink-0">
@@ -353,7 +508,17 @@ export default function MultiEnvironmentOverview({
                       className="w-full flex items-center gap-3 px-4 py-3 text-light-2 hover:bg-light-2 hover:bg-opacity-10 transition-all text-left"
                     >
                       <LayoutDashboard className="w-5 h-5" />
-                      <span className="font-medium">Open Dashboard</span>
+                      {isEditMode ? (
+                        <input
+                          type="text"
+                          value={overviewText.menuOpenDashboard}
+                          onChange={(event) => updateOverviewText('menuOpenDashboard', event.target.value)}
+                          className="w-full bg-black bg-opacity-35 text-light-2 border border-light-2 border-opacity-20 rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-brand-2"
+                          onClick={(event) => event.stopPropagation()}
+                        />
+                      ) : (
+                        <span className="font-medium">{overviewText.menuOpenDashboard}</span>
+                      )}
                     </button>
 
                     {isAdmin && (
@@ -365,7 +530,17 @@ export default function MultiEnvironmentOverview({
                         className="w-full flex items-center gap-3 px-4 py-3 text-light-2 hover:bg-light-2 hover:bg-opacity-10 transition-all text-left"
                       >
                         <UsersIcon className="w-5 h-5" />
-                        <span className="font-medium">Users</span>
+                        {isEditMode ? (
+                          <input
+                            type="text"
+                            value={overviewText.menuUsers}
+                            onChange={(event) => updateOverviewText('menuUsers', event.target.value)}
+                            className="w-full bg-black bg-opacity-35 text-light-2 border border-light-2 border-opacity-20 rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-brand-2"
+                            onClick={(event) => event.stopPropagation()}
+                          />
+                        ) : (
+                          <span className="font-medium">{overviewText.menuUsers}</span>
+                        )}
                       </button>
                     )}
 
@@ -378,7 +553,17 @@ export default function MultiEnvironmentOverview({
                         className="w-full flex items-center gap-3 px-4 py-3 text-light-2 hover:bg-light-2 hover:bg-opacity-10 transition-all text-left"
                       >
                         <Settings className="w-5 h-5" />
-                        <span className="font-medium">Add Environment</span>
+                        {isEditMode ? (
+                          <input
+                            type="text"
+                            value={overviewText.menuAddEnvironment}
+                            onChange={(event) => updateOverviewText('menuAddEnvironment', event.target.value)}
+                            className="w-full bg-black bg-opacity-35 text-light-2 border border-light-2 border-opacity-20 rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-brand-2"
+                            onClick={(event) => event.stopPropagation()}
+                          />
+                        ) : (
+                          <span className="font-medium">{overviewText.menuAddEnvironment}</span>
+                        )}
                       </button>
                     )}
 
@@ -391,7 +576,17 @@ export default function MultiEnvironmentOverview({
                         className="w-full flex items-center gap-3 px-4 py-3 text-light-2 hover:bg-light-2 hover:bg-opacity-10 transition-all text-left"
                       >
                         <Settings className="w-5 h-5" />
-                        <span className="font-medium">Configure</span>
+                        {isEditMode ? (
+                          <input
+                            type="text"
+                            value={overviewText.menuConfigure}
+                            onChange={(event) => updateOverviewText('menuConfigure', event.target.value)}
+                            className="w-full bg-black bg-opacity-35 text-light-2 border border-light-2 border-opacity-20 rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-brand-2"
+                            onClick={(event) => event.stopPropagation()}
+                          />
+                        ) : (
+                          <span className="font-medium">{overviewText.menuConfigure}</span>
+                        )}
                       </button>
                     )}
 
@@ -403,30 +598,77 @@ export default function MultiEnvironmentOverview({
                       className="w-full flex items-center gap-3 px-4 py-3 text-red-200 hover:bg-red-500 hover:bg-opacity-20 transition-all text-left border-t border-light-2 border-opacity-10"
                     >
                       <LogOut className="w-5 h-5" />
-                      <span className="font-medium">Logout</span>
+                      {isEditMode ? (
+                        <input
+                          type="text"
+                          value={overviewText.menuLogout}
+                          onChange={(event) => updateOverviewText('menuLogout', event.target.value)}
+                          className="w-full bg-black bg-opacity-35 text-light-2 border border-light-2 border-opacity-20 rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-brand-2"
+                          onClick={(event) => event.stopPropagation()}
+                        />
+                      ) : (
+                        <span className="font-medium">{overviewText.menuLogout}</span>
+                      )}
                     </button>
                   </div>
                 </div>
               )}
             </div>
           </div>
+          {isEditMode && (
+            <p className="text-light-1 text-sm">Edit mode is active. Click Save in the bottom-left corner to store changes.</p>
+          )}
         </div>
 
         {/* Environment Grid */}
-        {envLoading && <p className="text-light-1 mb-6">Loading environments...</p>}
+        {envLoading && (
+          <p className="text-light-1 mb-6">
+            {isEditMode ? (
+              <input
+                type="text"
+                value={overviewText.loadingEnvironments}
+                onChange={(event) => updateOverviewText('loadingEnvironments', event.target.value)}
+                className="w-full max-w-xl bg-black bg-opacity-35 text-light-2 border border-light-2 border-opacity-30 rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-2"
+                onClick={(event) => event.stopPropagation()}
+              />
+            ) : (
+              overviewText.loadingEnvironments
+            )}
+          </p>
+        )}
         {envError && <p className="text-red-300 mb-6">{envError}</p>}
         {!envLoading && !envError && visibleEnvironments.length === 0 && (
-          <p className="text-light-1 mb-6">No environments configured yet.</p>
+          <p className="text-light-1 mb-6">
+            {isEditMode ? (
+              <input
+                type="text"
+                value={overviewText.noEnvironments}
+                onChange={(event) => updateOverviewText('noEnvironments', event.target.value)}
+                className="w-full max-w-xl bg-black bg-opacity-35 text-light-2 border border-light-2 border-opacity-30 rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-2"
+                onClick={(event) => event.stopPropagation()}
+              />
+            ) : (
+              overviewText.noEnvironments
+            )}
+          </p>
         )}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
           {visibleEnvironments.map((env) => (
             <div
               key={env.id}
-              className="glass-card rounded-2xl p-6 shadow-xl hover:shadow-2xl transition-all cursor-pointer"
-              onClick={() => onOpenEnvironment(env.id)}
-              role="button"
-              tabIndex={0}
+              className={`glass-card rounded-2xl p-6 shadow-xl transition-all ${isEditMode ? 'cursor-default' : 'hover:shadow-2xl cursor-pointer'}`}
+              onClick={() => {
+                if (!isEditMode) {
+                  onOpenEnvironment(env.id)
+                }
+              }}
+              role={isEditMode ? undefined : 'button'}
+              tabIndex={isEditMode ? -1 : 0}
               onKeyDown={(event) => {
+                if (isEditMode) {
+                  return
+                }
+
                 if (event.key === 'Enter' || event.key === ' ') {
                   event.preventDefault()
                   onOpenEnvironment(env.id)
@@ -435,7 +677,17 @@ export default function MultiEnvironmentOverview({
             >
               {/* Environment Header */}
               <div className="flex items-center justify-between mb-4">
-                <h3 className="text-xl font-heavy text-dark-1">{env.name}</h3>
+                {isEditMode ? (
+                  <input
+                    type="text"
+                    value={env.name}
+                    onChange={(event) => updateEnvironmentName(env.id, event.target.value)}
+                    className="w-full mr-3 bg-black bg-opacity-35 text-light-2 border border-light-2 border-opacity-30 rounded px-2 py-1 font-heavy focus:outline-none focus:ring-2 focus:ring-brand-2"
+                    onClick={(event) => event.stopPropagation()}
+                  />
+                ) : (
+                  <h3 className="text-xl font-heavy text-dark-1">{env.name}</h3>
+                )}
                 <div className={`flex items-center gap-1 ${getStatusColor(env.status)}`}>
                   {getStatusIcon(env.status)}
                   <span className="text-sm font-medium capitalize">{env.status}</span>
@@ -446,37 +698,111 @@ export default function MultiEnvironmentOverview({
               {env.status === 'online' ? (
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
-                    <span className="text-dark-2 text-sm">Current Power</span>
+                    <span className="text-dark-2 text-sm">
+                      {isEditMode ? (
+                        <input
+                          type="text"
+                          value={overviewText.currentPower}
+                          onChange={(event) => updateOverviewText('currentPower', event.target.value)}
+                          className="w-36 bg-black bg-opacity-35 text-light-2 border border-light-2 border-opacity-30 rounded px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-brand-2"
+                          onClick={(event) => event.stopPropagation()}
+                        />
+                      ) : (
+                        overviewText.currentPower
+                      )}
+                    </span>
                     <div className="flex items-center gap-2">
                       <Zap className="w-4 h-4 text-brand-2" />
                       <span className="font-heavy text-dark-1">{env.currentPower} kW</span>
                     </div>
                   </div>
                   <div className="flex items-center justify-between">
-                    <span className="text-dark-2 text-sm">Daily Usage</span>
+                    <span className="text-dark-2 text-sm">
+                      {isEditMode ? (
+                        <input
+                          type="text"
+                          value={overviewText.dailyUsage}
+                          onChange={(event) => updateOverviewText('dailyUsage', event.target.value)}
+                          className="w-36 bg-black bg-opacity-35 text-light-2 border border-light-2 border-opacity-30 rounded px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-brand-2"
+                          onClick={(event) => event.stopPropagation()}
+                        />
+                      ) : (
+                        overviewText.dailyUsage
+                      )}
+                    </span>
                     <span className="font-medium text-dark-1">{env.dailyUsage} kWh</span>
                   </div>
                   <div className="pt-2 border-t border-dark-2 border-opacity-10">
-                    <p className="text-xs text-dark-2">Last update: {env.lastUpdate}</p>
+                    <p className="text-xs text-dark-2">
+                      {isEditMode ? (
+                        <input
+                          type="text"
+                          value={overviewText.lastUpdate}
+                          onChange={(event) => updateOverviewText('lastUpdate', event.target.value)}
+                          className="w-32 bg-black bg-opacity-35 text-light-2 border border-light-2 border-opacity-30 rounded px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-brand-2"
+                          onClick={(event) => event.stopPropagation()}
+                        />
+                      ) : (
+                        overviewText.lastUpdate
+                      )}
+                      : {env.lastUpdate}
+                    </p>
                   </div>
                 </div>
               ) : (
                 <div className="text-center py-4">
                   <WifiOff className="w-8 h-8 text-red-400 mx-auto mb-2" />
-                  <p className="text-dark-2 text-sm">Environment offline</p>
-                  <p className="text-xs text-dark-2 mt-1">Last seen: {env.lastUpdate}</p>
+                  <p className="text-dark-2 text-sm">
+                    {isEditMode ? (
+                      <input
+                        type="text"
+                        value={overviewText.environmentOffline}
+                        onChange={(event) => updateOverviewText('environmentOffline', event.target.value)}
+                        className="w-full max-w-[12rem] mx-auto bg-black bg-opacity-35 text-light-2 border border-light-2 border-opacity-30 rounded px-2 py-1 text-xs text-center focus:outline-none focus:ring-2 focus:ring-brand-2"
+                        onClick={(event) => event.stopPropagation()}
+                      />
+                    ) : (
+                      overviewText.environmentOffline
+                    )}
+                  </p>
+                  <p className="text-xs text-dark-2 mt-1">
+                    {isEditMode ? (
+                      <input
+                        type="text"
+                        value={overviewText.lastSeen}
+                        onChange={(event) => updateOverviewText('lastSeen', event.target.value)}
+                        className="w-24 bg-black bg-opacity-35 text-light-2 border border-light-2 border-opacity-30 rounded px-2 py-1 text-xs text-center focus:outline-none focus:ring-2 focus:ring-brand-2"
+                        onClick={(event) => event.stopPropagation()}
+                      />
+                    ) : (
+                      overviewText.lastSeen
+                    )}
+                    : {env.lastUpdate}
+                  </p>
                 </div>
               )}
 
               {/* Action Button */}
               <button
-                className="w-full mt-4 glass-button py-2 px-4 rounded-lg font-medium transition-all"
+                className={`w-full mt-4 glass-button py-2 px-4 rounded-lg font-medium transition-all ${isEditMode ? 'opacity-70' : ''}`}
                 onClick={(event) => {
                   event.stopPropagation()
-                  onOpenEnvironment(env.id)
+                  if (!isEditMode) {
+                    onOpenEnvironment(env.id)
+                  }
                 }}
               >
-                Open Dashboard
+                {isEditMode ? (
+                  <input
+                    type="text"
+                    value={overviewText.cardOpenDashboard}
+                    onChange={(event) => updateOverviewText('cardOpenDashboard', event.target.value)}
+                    className="w-full bg-black bg-opacity-35 text-light-2 border border-light-2 border-opacity-30 rounded px-2 py-1 text-center focus:outline-none focus:ring-2 focus:ring-brand-2"
+                    onClick={(event) => event.stopPropagation()}
+                  />
+                ) : (
+                  overviewText.cardOpenDashboard
+                )}
               </button>
             </div>
           ))}
@@ -484,28 +810,86 @@ export default function MultiEnvironmentOverview({
 
         {/* Summary Stats */}
         <div className="glass-panel rounded-2xl p-6 shadow-xl">
-          <h2 className="text-2xl font-heavy text-dark-1 mb-6">Environment Summary</h2>
+          {isEditMode ? (
+            <input
+              type="text"
+              value={overviewText.summaryTitle}
+              onChange={(event) => updateOverviewText('summaryTitle', event.target.value)}
+              className="w-full max-w-md text-2xl font-heavy bg-black bg-opacity-35 text-light-2 border border-light-2 border-opacity-30 rounded px-3 py-2 mb-6 focus:outline-none focus:ring-2 focus:ring-brand-2"
+              onClick={(event) => event.stopPropagation()}
+            />
+          ) : (
+            <h2 className="text-2xl font-heavy text-dark-1 mb-6">{overviewText.summaryTitle}</h2>
+          )}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             <div className="text-center">
               <div className="text-3xl font-heavy text-brand-2 mb-2">
                 {visibleEnvironments.filter(e => e.status === 'online').length}/{visibleEnvironments.length}
               </div>
-              <p className="text-dark-2">Environments Online</p>
+              <p className="text-dark-2">
+                {isEditMode ? (
+                  <input
+                    type="text"
+                    value={overviewText.environmentsOnline}
+                    onChange={(event) => updateOverviewText('environmentsOnline', event.target.value)}
+                    className="w-full max-w-[14rem] mx-auto bg-black bg-opacity-35 text-light-2 border border-light-2 border-opacity-30 rounded px-2 py-1 text-center focus:outline-none focus:ring-2 focus:ring-brand-2"
+                    onClick={(event) => event.stopPropagation()}
+                  />
+                ) : (
+                  overviewText.environmentsOnline
+                )}
+              </p>
             </div>
             <div className="text-center">
               <div className="text-3xl font-heavy text-brand-3 mb-2">
                 {visibleEnvironments.reduce((sum, env) => sum + (env.currentPower || 0), 0).toFixed(1)}
               </div>
-              <p className="text-dark-2">Total Current Power (kW)</p>
+              <p className="text-dark-2">
+                {isEditMode ? (
+                  <input
+                    type="text"
+                    value={overviewText.totalCurrentPower}
+                    onChange={(event) => updateOverviewText('totalCurrentPower', event.target.value)}
+                    className="w-full max-w-[14rem] mx-auto bg-black bg-opacity-35 text-light-2 border border-light-2 border-opacity-30 rounded px-2 py-1 text-center focus:outline-none focus:ring-2 focus:ring-brand-2"
+                    onClick={(event) => event.stopPropagation()}
+                  />
+                ) : (
+                  overviewText.totalCurrentPower
+                )}
+              </p>
             </div>
             <div className="text-center">
               <div className="text-3xl font-heavy text-brand-4 mb-2">
                 {visibleEnvironments.reduce((sum, env) => sum + (env.dailyUsage || 0), 0).toFixed(1)}
               </div>
-              <p className="text-dark-2">Total Daily Usage (kWh)</p>
+              <p className="text-dark-2">
+                {isEditMode ? (
+                  <input
+                    type="text"
+                    value={overviewText.totalDailyUsage}
+                    onChange={(event) => updateOverviewText('totalDailyUsage', event.target.value)}
+                    className="w-full max-w-[14rem] mx-auto bg-black bg-opacity-35 text-light-2 border border-light-2 border-opacity-30 rounded px-2 py-1 text-center focus:outline-none focus:ring-2 focus:ring-brand-2"
+                    onClick={(event) => event.stopPropagation()}
+                  />
+                ) : (
+                  overviewText.totalDailyUsage
+                )}
+              </p>
             </div>
           </div>
         </div>
+
+        {isAdmin && (
+          <button
+            onClick={() => {
+              void handleEditToggle()
+            }}
+            className="fixed left-4 bottom-4 z-40 glass-button px-5 py-3 rounded-xl font-semibold shadow-lg transition-all disabled:opacity-60"
+            disabled={isSavingEditMode}
+          >
+            {isSavingEditMode ? 'Saving...' : isEditMode ? 'Save' : 'Edit'}
+          </button>
+        )}
 
         {/* Configuration Modal */}
         {showConfig && (
