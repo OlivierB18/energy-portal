@@ -234,7 +234,7 @@ export default function Dashboard({
     const source = user?.sub || user?.email || 'anonymous'
     return String(source).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80)
   }, [user?.email, user?.sub])
-  const haEntitiesCacheKey = `ha_entities_cache_${selectedEnvironment || 'default'}_${userCacheScope}`
+  const haEntitiesCacheKey = `ha_entities_cache_v2_${selectedEnvironment || 'default'}_${userCacheScope}`
 
   useEffect(() => {
     const loadEnvironments = async () => {
@@ -1179,7 +1179,12 @@ export default function Dashboard({
     }
   }, [haEntities, lastKnownHaEntities, haMetricsSnapshot, pricingConfig, selectedEnvironment, gasRatePerM3, powerSamples])
 
-  const livePowerStorageKey = `energy_live_power_samples_${selectedEnvironment || 'default'}`
+  const powerHistoryScope = useMemo(() => {
+    const source = haMetricsSnapshot?.powerEntityId || 'fallback'
+    return String(source).replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 120)
+  }, [haMetricsSnapshot?.powerEntityId])
+
+  const livePowerStorageKey = `energy_live_power_samples_${selectedEnvironment || 'default'}_${powerHistoryScope}`
   const liveGasStorageKey = `energy_gas_hourly_data_${selectedEnvironment || 'default'}`
   const latestPowerRef = useRef(realTimeData.currentPower)
 
@@ -1296,8 +1301,13 @@ export default function Dashboard({
       try {
         console.log('[HA History] Starting fetch for environment:', selectedEnvironment)
 
+        const preferredPowerEntityId = haMetricsSnapshot?.powerEntityId || null
+        const powerHistoryScopeKey = String(preferredPowerEntityId || 'fallback')
+          .replace(/[^a-zA-Z0-9_.-]/g, '_')
+          .slice(0, 120)
+
         // Get last fetch timestamp from localStorage
-        const lastFetchKey = `ha_history_last_fetch_${selectedEnvironment}`
+        const lastFetchKey = `ha_history_last_fetch_${selectedEnvironment}_${powerHistoryScopeKey}`
         const lastFetchStr = localStorage.getItem(lastFetchKey)
         const lastFetch = lastFetchStr ? new Date(lastFetchStr) : null
 
@@ -1314,8 +1324,6 @@ export default function Dashboard({
         } else {
           console.log('[HA History] Full 7-day fetch from', startTime.toISOString())
         }
-
-        const preferredPowerEntityId = haMetricsSnapshot?.powerEntityId || null
 
         // Find power entity - prefer server-selected metrics source for admin/non-admin parity.
         const powerEntity = preferredPowerEntityId
