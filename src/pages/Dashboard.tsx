@@ -373,27 +373,33 @@ export default function Dashboard({
   const dynamicPriceFixedLinesPreferenceKey = `energy_dynamic_chart_show_fixed_lines_${selectedEnvironment || 'default'}`
 
   useEffect(() => {
-    const loadEnvironments = async () => {
+    let isDisposed = false
+
+    const loadEnvironments = async ({ useCache = false, silent = false } = {}) => {
       if (!isAuthenticated) {
         setEnvironments([])
         return
       }
 
-      try {
-        const cached = localStorage.getItem(haEnvironmentsCacheKey)
-        if (cached) {
-          const parsed = JSON.parse(cached)
-          const cachedEnvironments = normalizeEnvironmentConfigs(parsed)
+      if (useCache) {
+        try {
+          const cached = localStorage.getItem(haEnvironmentsCacheKey)
+          if (cached) {
+            const parsed = JSON.parse(cached)
+            const cachedEnvironments = normalizeEnvironmentConfigs(parsed)
 
-          if (cachedEnvironments.length > 0) {
-            setEnvironments(cachedEnvironments)
+            if (cachedEnvironments.length > 0 && !isDisposed) {
+              setEnvironments(cachedEnvironments)
+            }
           }
+        } catch {
+          // Ignore cache parse errors and continue with network fetch.
         }
-      } catch {
-        // Ignore cache parse errors and continue with network fetch.
       }
 
-      setEnvLoading(true)
+      if (!silent) {
+        setEnvLoading(true)
+      }
       setEnvError(null)
 
       try {
@@ -415,16 +421,38 @@ export default function Dashboard({
           name: String(env.name || env.id),
           type: env.type,
         }))
-        setEnvironments(next)
+        if (!isDisposed) {
+          setEnvironments(next)
+        }
         localStorage.setItem(haEnvironmentsCacheKey, JSON.stringify(next))
       } catch (error) {
-        setEnvError(error instanceof Error ? error.message : 'Unable to load environments')
+        if (!isDisposed) {
+          setEnvError(error instanceof Error ? error.message : 'Unable to load environments')
+        }
       } finally {
-        setEnvLoading(false)
+        if (!silent && !isDisposed) {
+          setEnvLoading(false)
+        }
       }
     }
 
-    void loadEnvironments()
+    void loadEnvironments({ useCache: true, silent: false })
+
+    const interval = setInterval(() => {
+      void loadEnvironments({ useCache: false, silent: true })
+    }, 15000)
+
+    const handleFocusRefresh = () => {
+      void loadEnvironments({ useCache: false, silent: true })
+    }
+
+    window.addEventListener('focus', handleFocusRefresh)
+
+    return () => {
+      isDisposed = true
+      clearInterval(interval)
+      window.removeEventListener('focus', handleFocusRefresh)
+    }
   }, [haEnvironmentsCacheKey, isAuthenticated, getAuthToken])
 
   useEffect(() => {
