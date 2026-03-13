@@ -1522,7 +1522,13 @@ export default function Dashboard({
   )
 
   const bucketPowerSamples = useCallback(
-    (startMs: number, endMs: number, bucketMs: number, fallbackPower: number) => {
+    (
+      startMs: number,
+      endMs: number,
+      bucketMs: number,
+      fallbackPower: number,
+      aggregationMode: 'average' | 'peak' = 'average',
+    ) => {
       const sorted = powerSamples
         .filter((sample) => sample.timestamp >= startMs - bucketMs && sample.timestamp <= endMs)
         .sort((a, b) => a.timestamp - b.timestamp)
@@ -1543,18 +1549,24 @@ export default function Dashboard({
         const nextT = t + bucketMs
         let sum = 0
         let count = 0
+        let maxInBucket = Number.NEGATIVE_INFINITY
 
         while (index < sorted.length && sorted[index].timestamp < nextT) {
           const sample = sorted[index]
           if (sample.timestamp >= t) {
             sum += sample.power
             count += 1
+            if (sample.power > maxInBucket) {
+              maxInBucket = sample.power
+            }
           }
           lastKnownPower = sample.power
           index += 1
         }
 
-        const bucketValue = count > 0 ? sum / count : lastKnownPower
+        const bucketValue = count > 0
+          ? (aggregationMode === 'peak' ? maxInBucket : sum / count)
+          : lastKnownPower
         buckets.push({
           start: t,
           value: parseFloat(Math.max(0, bucketValue).toFixed(3)),
@@ -1568,11 +1580,13 @@ export default function Dashboard({
 
   const chartData = useMemo(() => {
     const bucketMs = timeRange === 'today' ? 3_600_000 : 86_400_000
+    const aggregationMode = timeRange === 'today' ? 'peak' : 'average'
     const buckets = bucketPowerSamples(
       selectedRange.startMs,
       selectedRange.endMs,
       bucketMs,
       realTimeData.currentPower,
+      aggregationMode,
     )
 
     if (buckets.length === 0) {
@@ -1927,6 +1941,7 @@ export default function Dashboard({
               unit="kW"
               seriesLabel="Electricity chart"
               rangeLabel={selectedRange.label}
+              lineType="linear"
             />
           </div>
 

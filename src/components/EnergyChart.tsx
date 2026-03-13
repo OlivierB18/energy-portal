@@ -72,6 +72,7 @@ interface EnergyChartProps {
   seriesLabel?: string
   rangeLabel?: string
   chartType?: 'line' | 'bar'
+  lineType?: 'monotone' | 'linear' | 'step'
 }
 
 export default function EnergyChart({
@@ -81,6 +82,7 @@ export default function EnergyChart({
   seriesLabel = 'Power',
   rangeLabel,
   chartType = 'line',
+  lineType = 'monotone',
 }: EnergyChartProps) {
   const [isMobile, setIsMobile] = useState(() =>
     typeof window !== 'undefined' ? window.innerWidth < 640 : false,
@@ -213,7 +215,7 @@ export default function EnergyChart({
             />
             <Tooltip {...commonTooltipProps} />
             <Line
-              type="monotone"
+              type={lineType}
               dataKey="power"
               stroke="rgb(2, 125, 94)"
               strokeWidth={isMobile ? 2.8 : 3.2}
