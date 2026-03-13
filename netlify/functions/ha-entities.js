@@ -674,7 +674,7 @@ const enrichMetricsWithHistoryFallback = async ({
     metrics.dailyGasM3 === null || metrics.monthlyGasM3 === null
 
   const shouldDeriveElectricityFromTotalHistory = true
-  const shouldDeriveGasFromTotalHistory = true
+  const shouldDeriveGasFromTotalHistory = false
 
   if (
     !shouldDeriveElectricityFromTotalHistory &&
