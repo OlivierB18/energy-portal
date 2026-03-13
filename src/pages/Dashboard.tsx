@@ -2405,6 +2405,28 @@ export default function Dashboard({
                       </LineChart>
                     </ResponsiveContainer>
                   </div>
+                  <div className="mt-3 flex flex-wrap gap-4 text-xs text-light-1">
+                    <span className="inline-flex items-center gap-2">
+                      <span className="h-2 w-2 rounded-full bg-emerald-400" />
+                      Current dynamic
+                    </span>
+                    <span className="inline-flex items-center gap-2">
+                      <span className="h-0 w-4 border-t-2 border-dashed border-amber-400" />
+                      Forecast dynamic
+                    </span>
+                    {showFixedPriceLinesOnChart && pricingConfig?.type === 'fixed' && (
+                      <span className="inline-flex items-center gap-2">
+                        <span className="h-0 w-4 border-t-2 border-blue-400" />
+                        Fixed consumer
+                      </span>
+                    )}
+                    {showFixedPriceLinesOnChart && pricingConfig?.type === 'fixed' && (
+                      <span className="inline-flex items-center gap-2">
+                        <span className="h-0 w-4 border-t-2 border-dashed border-violet-400" />
+                        Fixed producer
+                      </span>
+                    )}
+                  </div>
                   <p className="text-xs text-light-1 opacity-75 mt-3">
                     Dynamic ENTSOE prices shown for today and available forecast horizon.
                   </p>
