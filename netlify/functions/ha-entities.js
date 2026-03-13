@@ -469,6 +469,10 @@ const pickTotalGasEntity = (entities) => {
         return false
       }
 
+      if (includesAny(searchable, ['price', 'cost', 'tariff', 'tarif', 'tarief', 'flow', 'rate'])) {
+        return false
+      }
+
       const numericState = Number.isFinite(parseNumericValue(entity.state))
       if (!numericState) {
         return false
@@ -484,6 +488,8 @@ const pickTotalGasEntity = (entities) => {
       const searchable = toSearchable(entity)
       const stateClass = String(entity.state_class || '').toLowerCase()
       const deviceClass = String(entity.device_class || '').toLowerCase()
+      const isDailyLike = includesAny(searchable, ['today', 'daily', 'day', 'vandaag', 'dag'])
+      const isMonthlyLike = includesAny(searchable, ['month', 'monthly', 'maand'])
       let score = 0
 
       if (deviceClass === 'gas') score += 5
@@ -491,13 +497,17 @@ const pickTotalGasEntity = (entities) => {
       if (stateClass === 'total') score += 4
       if (includesAny(searchable, ['meter', 'consumption', 'gas_meter', 'verbruik'])) score += 3
       if (isGasUnit(entity.unit_of_measurement)) score += 2
-      if (includesAny(searchable, ['today', 'daily', 'day', 'month', 'monthly'])) score -= 6
+      if (isDailyLike || isMonthlyLike) score -= 8
 
-      return { entity, score }
+      const rawState = parseNumericValue(entity.state)
+      const currentValueM3 = convertGasToM3(rawState, entity.unit_of_measurement)
+
+      return { entity, score, isDailyLike, isMonthlyLike, currentValueM3 }
     })
     .sort((a, b) => b.score - a.score)
 
-  return candidates[0]?.entity || null
+  const preferred = candidates.find((candidate) => !candidate.isDailyLike && !candidate.isMonthlyLike)
+  return preferred?.entity || candidates[0]?.entity || null
 }
 
 const fetchEntityHistorySeries = async (baseUrl, token, entity, startIso, endIso) => {
@@ -566,12 +576,24 @@ const getSeriesValueAtTime = (series, targetTimestamp) => {
   return before ? before.value : null
 }
 
-const deriveDailyMonthlyDeltas = (series) => {
+const deriveDailyMonthlyDeltas = (series, latestValueOverride = null, nowTimestampOverride = null) => {
   if (!Array.isArray(series) || series.length === 0) {
     return { daily: null, monthly: null }
   }
 
-  const latest = series[series.length - 1]
+  const seriesLatest = series[series.length - 1]
+  const effectiveTimestamp = Number.isFinite(nowTimestampOverride)
+    ? nowTimestampOverride
+    : seriesLatest?.timestamp
+  const effectiveValue = Number.isFinite(latestValueOverride)
+    ? latestValueOverride
+    : seriesLatest?.value
+
+  const latest = {
+    timestamp: effectiveTimestamp,
+    value: effectiveValue,
+  }
+
   if (!latest || !Number.isFinite(latest.value)) {
     return { daily: null, monthly: null }
   }
@@ -622,8 +644,14 @@ const enrichMetricsWithHistoryFallback = async ({
     metrics.dailyGasM3 === null || metrics.monthlyGasM3 === null
 
   const shouldDeriveElectricityFromTotalHistory = true
+  const shouldDeriveGasFromTotalHistory = true
 
-  if (!shouldDeriveElectricityFromTotalHistory && !needsElectricityFallback && !needsGasFallback) {
+  if (
+    !shouldDeriveElectricityFromTotalHistory &&
+    !shouldDeriveGasFromTotalHistory &&
+    !needsElectricityFallback &&
+    !needsGasFallback
+  ) {
     return metrics
   }
 
@@ -642,9 +670,13 @@ const enrichMetricsWithHistoryFallback = async ({
           ? cached.values.monthlyElectricityKwh ?? metrics.monthlyElectricityKwh ?? null
           : metrics.monthlyElectricityKwh ?? cached.values.monthlyElectricityKwh ?? null,
       dailyGasM3:
-        metrics.dailyGasM3 ?? cached.values.dailyGasM3 ?? null,
+        shouldDeriveGasFromTotalHistory
+          ? cached.values.dailyGasM3 ?? metrics.dailyGasM3 ?? null
+          : metrics.dailyGasM3 ?? cached.values.dailyGasM3 ?? null,
       monthlyGasM3:
-        metrics.monthlyGasM3 ?? cached.values.monthlyGasM3 ?? null,
+        shouldDeriveGasFromTotalHistory
+          ? cached.values.monthlyGasM3 ?? metrics.monthlyGasM3 ?? null
+          : metrics.monthlyGasM3 ?? cached.values.monthlyGasM3 ?? null,
       sources: {
         ...metrics.sources,
         ...cached.sources,
@@ -717,7 +749,8 @@ const enrichMetricsWithHistoryFallback = async ({
           startIso,
           nowIso,
         )
-        const deltas = deriveDailyMonthlyDeltas(electricitySeries)
+        const liveValue = Number.isFinite(candidate.currentValueKwh) ? candidate.currentValueKwh : null
+        const deltas = deriveDailyMonthlyDeltas(electricitySeries, liveValue, nowMs)
 
         if (deltas.daily !== null) {
           dailySum += deltas.daily
@@ -747,7 +780,7 @@ const enrichMetricsWithHistoryFallback = async ({
     }
   }
 
-  if (needsGasFallback) {
+  if (shouldDeriveGasFromTotalHistory || needsGasFallback) {
     const gasTotalEntity = pickTotalGasEntity(entities)
     if (gasTotalEntity?.entity_id) {
       const gasSeries = await fetchEntityHistorySeries(
@@ -757,10 +790,20 @@ const enrichMetricsWithHistoryFallback = async ({
         startIso,
         nowIso,
       )
-      const deltas = deriveDailyMonthlyDeltas(gasSeries)
+      const liveGasValue = convertGasToM3(parseNumericValue(gasTotalEntity.state), gasTotalEntity.unit_of_measurement)
+      const deltas = deriveDailyMonthlyDeltas(gasSeries, liveGasValue, nowMs)
       fallbackValues.dailyGasM3 = deltas.daily
       fallbackValues.monthlyGasM3 = deltas.monthly
       fallbackSources.gasTotalEntityId = gasTotalEntity.entity_id
+
+      console.log(
+        '[HA-ENTITIES] Gas fallback derived from:',
+        gasTotalEntity.entity_id,
+        'daily:',
+        fallbackValues.dailyGasM3,
+        'monthly:',
+        fallbackValues.monthlyGasM3,
+      )
     }
   }
 
@@ -781,9 +824,13 @@ const enrichMetricsWithHistoryFallback = async ({
         ? fallbackValues.monthlyElectricityKwh ?? metrics.monthlyElectricityKwh ?? null
         : metrics.monthlyElectricityKwh ?? fallbackValues.monthlyElectricityKwh ?? null,
     dailyGasM3:
-      metrics.dailyGasM3 ?? fallbackValues.dailyGasM3 ?? null,
+      shouldDeriveGasFromTotalHistory
+        ? fallbackValues.dailyGasM3 ?? metrics.dailyGasM3 ?? null
+        : metrics.dailyGasM3 ?? fallbackValues.dailyGasM3 ?? null,
     monthlyGasM3:
-      metrics.monthlyGasM3 ?? fallbackValues.monthlyGasM3 ?? null,
+      shouldDeriveGasFromTotalHistory
+        ? fallbackValues.monthlyGasM3 ?? metrics.monthlyGasM3 ?? null
+        : metrics.monthlyGasM3 ?? fallbackValues.monthlyGasM3 ?? null,
     sources: {
       ...metrics.sources,
       ...fallbackSources,
