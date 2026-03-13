@@ -1,5 +1,14 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { X, Download } from 'lucide-react'
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts'
 import { EnergyPricingConfig, EnergyPricingType } from '../types'
 
 interface EnergyPriceModalProps {
@@ -9,22 +18,75 @@ interface EnergyPriceModalProps {
   getAuthToken?: () => Promise<string>
 }
 
+interface EntsoePricePoint {
+  time: string
+  eurPerKwh: number
+  isForecast: boolean
+}
+
+interface EntsoeChartPoint {
+  time: string
+  fullTime: string
+  price: number
+  currentPrice: number | null
+  forecastPrice: number | null
+}
+
 export default function EnergyPriceModal({
   environmentId,
   onClose,
   onSave,
   getAuthToken,
 }: EnergyPriceModalProps) {
+  const parseNumber = (raw: unknown, fallback: number) => {
+    const parsed = Number(raw)
+    return Number.isFinite(parsed) ? parsed : fallback
+  }
+
+  const normalizeEntsoePoints = (payload: unknown): EntsoePricePoint[] => {
+    if (!payload || typeof payload !== 'object') {
+      return []
+    }
+
+    const value = payload as { prices?: Array<{ time?: unknown; eurPerKwh?: unknown; price?: unknown }> }
+    const rows = Array.isArray(value.prices) ? value.prices : []
+    const now = Date.now()
+    const byTime = new Map<string, EntsoePricePoint>()
+
+    for (const row of rows) {
+      const rawTime = String(row?.time || '').trim()
+      const parsedTime = Date.parse(rawTime)
+      if (!rawTime || Number.isNaN(parsedTime)) {
+        continue
+      }
+
+      const directPrice = Number(row?.eurPerKwh)
+      const convertedPrice = Number(row?.price) / 1000
+      const eurPerKwh = Number.isFinite(directPrice)
+        ? directPrice
+        : convertedPrice
+
+      if (!Number.isFinite(eurPerKwh)) {
+        continue
+      }
+
+      const normalizedTime = new Date(parsedTime).toISOString()
+      byTime.set(normalizedTime, {
+        time: normalizedTime,
+        eurPerKwh,
+        isForecast: parsedTime > now,
+      })
+    }
+
+    return Array.from(byTime.values()).sort((a, b) => Date.parse(a.time) - Date.parse(b.time))
+  }
+
   const normalizePricingConfig = (input: unknown): EnergyPricingConfig | null => {
     if (!input || typeof input !== 'object') {
       return null
     }
 
     const value = input as Record<string, unknown>
-    const parseNumber = (raw: unknown, fallback: number) => {
-      const parsed = Number(raw)
-      return Number.isFinite(parsed) ? parsed : fallback
-    }
 
     return {
       type: value.type === 'dynamic' ? 'dynamic' : 'fixed',
@@ -51,6 +113,38 @@ export default function EnergyPriceModal({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [entsoeLoading, setEntsoeLoading] = useState(false)
+  const [showDynamicChart, setShowDynamicChart] = useState(false)
+  const [entsoePoints, setEntsoePoints] = useState<EntsoePricePoint[]>([])
+  const [entsoeUpdatedAt, setEntsoeUpdatedAt] = useState<string | null>(null)
+
+  const entsoeChartData = useMemo<EntsoeChartPoint[]>(() => {
+    return entsoePoints.map((point) => {
+      const date = new Date(point.time)
+      const time = date.toLocaleString([], {
+        day: '2-digit',
+        month: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+      })
+      const fullTime = date.toLocaleString([], {
+        weekday: 'short',
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      })
+      const roundedPrice = Number(point.eurPerKwh.toFixed(4))
+
+      return {
+        time,
+        fullTime,
+        price: roundedPrice,
+        currentPrice: point.isForecast ? null : roundedPrice,
+        forecastPrice: point.isForecast ? roundedPrice : null,
+      }
+    })
+  }, [entsoePoints])
 
   useEffect(() => {
     let isMounted = true
@@ -107,9 +201,73 @@ export default function EnergyPriceModal({
     }
   }, [environmentId, getAuthToken])
 
-  const handleFetchENTSOE = async () => {
+  useEffect(() => {
+    if (pricingType !== 'dynamic') {
+      setShowDynamicChart(false)
+    }
+  }, [pricingType])
+
+  const fetchENTSOE = async (hoursAhead: number) => {
     if (!getAuthToken) {
-      setError('No auth function available')
+      throw new Error('No auth function available')
+    }
+
+    const token = await getAuthToken()
+    const response = await fetch(`/.netlify/functions/get-entsoe-prices?hoursAhead=${encodeURIComponent(String(hoursAhead))}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+
+    if (!response.ok) {
+      const data = await response.json().catch(() => null)
+      throw new Error(data?.error || 'Failed to fetch ENTSOE prices')
+    }
+
+    const data = await response.json()
+    const points = normalizeEntsoePoints(data)
+    setEntsoePoints(points)
+    setEntsoeUpdatedAt(typeof data?.timestamp === 'string' ? data.timestamp : new Date().toISOString())
+    return { data, points }
+  }
+
+  const handleFetchENTSOE = async () => {
+    setEntsoeLoading(true)
+    setError(null)
+
+    try {
+      const { data, points } = await fetchENTSOE(120)
+      if (points.length === 0) {
+        throw new Error('No ENTSOE prices available for the selected horizon')
+      }
+
+      const currentPrice = parseNumber(data?.current?.eurPerKwh, NaN)
+      const averagePrice = points.length > 0
+        ? points.reduce((sum, point) => sum + point.eurPerKwh, 0) / points.length
+        : NaN
+
+      const nextBasePrice = Number.isFinite(currentPrice)
+        ? currentPrice
+        : Number.isFinite(averagePrice)
+          ? averagePrice
+          : NaN
+
+      if (!Number.isFinite(nextBasePrice)) {
+        throw new Error('No valid ENTSOE price returned')
+      }
+
+      setPricingType('dynamic')
+      setConsumerPrice(nextBasePrice.toFixed(4))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to fetch ENTSOE prices')
+    } finally {
+      setEntsoeLoading(false)
+    }
+  }
+
+  const handleToggleDynamicChart = async () => {
+    const nextState = !showDynamicChart
+    setShowDynamicChart(nextState)
+
+    if (!nextState || entsoePoints.length > 0) {
       return
     }
 
@@ -117,30 +275,12 @@ export default function EnergyPriceModal({
     setError(null)
 
     try {
-      const token = await getAuthToken()
-      const response = await fetch('/.netlify/functions/get-entsoe-prices', {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-
-      if (!response.ok) {
-        const data = await response.json().catch(() => null)
-        throw new Error(data?.error || 'Failed to fetch ENTSOE prices')
-      }
-
-      const data = await response.json()
-      // eslint-disable-next-line no-console
-      console.log('[EnergyPrice] ENTSOE prices:', data)
-
-      if (data.prices && data.prices.length > 0) {
-        setPricingType('dynamic')
-        // For now, show average price
-        const avgPrice = (data.prices.reduce((sum: number, p: any) => sum + p.price, 0) / data.prices.length) / 1000 // Convert MWh to kWh
-        setConsumerPrice(avgPrice.toFixed(4))
-        // eslint-disable-next-line no-console
-        console.log('[EnergyPrice] Set consumer price to:', avgPrice.toFixed(4), '€/kWh')
+      const { points } = await fetchENTSOE(120)
+      if (points.length === 0) {
+        throw new Error('No ENTSOE prices available for chart')
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch ENTSOE prices')
+      setError(err instanceof Error ? err.message : 'Failed to load dynamic price chart')
     } finally {
       setEntsoeLoading(false)
     }
@@ -153,10 +293,10 @@ export default function EnergyPriceModal({
     try {
       const config: EnergyPricingConfig = {
         type: pricingType,
-        consumerPrice: parseFloat(consumerPrice),
-        producerPrice: parseFloat(producerPrice),
-        consumerMargin: parseFloat(consumerMargin),
-        producerMargin: parseFloat(producerMargin),
+        consumerPrice: parseNumber(consumerPrice, 0.30),
+        producerPrice: parseNumber(producerPrice, 0.10),
+        consumerMargin: parseNumber(consumerMargin, 0.05),
+        producerMargin: parseNumber(producerMargin, 0.02),
       }
 
       const key = `energy_pricing_${environmentId}`
@@ -196,7 +336,7 @@ export default function EnergyPriceModal({
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4">
-      <div className="glass-panel rounded-2xl shadow-2xl max-w-2xl w-full max-h-96 overflow-y-auto">
+      <div className="glass-panel rounded-2xl shadow-2xl max-w-3xl w-full max-h-[90vh] overflow-y-auto">
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-light-2 border-opacity-10">
           <h2 className="text-2xl font-heavy text-dark-1">Energy Price Settings</h2>
@@ -293,19 +433,116 @@ export default function EnergyPriceModal({
 
           {/* ENTSOE Button */}
           {pricingType === 'dynamic' && (
-            <button
-              onClick={handleFetchENTSOE}
-              disabled={entsoeLoading}
-              className="w-full flex items-center justify-center gap-2 py-2 px-4 bg-brand-2 hover:bg-brand-3 text-light-2 rounded-lg font-medium transition-all disabled:opacity-60"
-            >
-              <Download className="w-4 h-4" />
-              {entsoeLoading ? 'Loading...' : 'Fetch ENTSOE Day-Ahead Prices'}
-            </button>
+            <div className="flex flex-col sm:flex-row gap-3">
+              <button
+                onClick={handleFetchENTSOE}
+                disabled={entsoeLoading}
+                className="flex-1 flex items-center justify-center gap-2 py-2 px-4 bg-brand-2 hover:bg-brand-3 text-light-2 rounded-lg font-medium transition-all disabled:opacity-60"
+              >
+                <Download className="w-4 h-4" />
+                {entsoeLoading ? 'Loading...' : 'Refresh Dynamic Price (Day + Forecast)'}
+              </button>
+              <button
+                onClick={() => {
+                  void handleToggleDynamicChart()
+                }}
+                disabled={entsoeLoading}
+                className="flex-1 py-2 px-4 bg-dark-2 bg-opacity-70 text-light-1 hover:bg-opacity-90 rounded-lg font-medium transition-all disabled:opacity-60"
+              >
+                {showDynamicChart ? 'Hide Dynamic Price Chart' : 'Show Dynamic Price Chart'}
+              </button>
+            </div>
+          )}
+
+          {pricingType === 'dynamic' && showDynamicChart && (
+            <div className="bg-dark-2 bg-opacity-50 rounded-lg p-4">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3">
+                <p className="text-light-2 text-sm font-medium">Dynamic Price Chart (Today + Forecast)</p>
+                {entsoeUpdatedAt && (
+                  <p className="text-xs text-light-1 opacity-80">
+                    Updated: {new Date(entsoeUpdatedAt).toLocaleString()}
+                  </p>
+                )}
+              </div>
+
+              {entsoeChartData.length === 0 ? (
+                <p className="text-xs text-light-1 opacity-80">
+                  No dynamic prices available yet. Click refresh to load ENTSOE prices.
+                </p>
+              ) : (
+                <>
+                  <div className="h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={entsoeChartData} margin={{ top: 12, right: 16, left: 0, bottom: 8 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.12)" />
+                        <XAxis
+                          dataKey="time"
+                          tick={{ fill: 'rgba(255,255,255,0.75)', fontSize: 11 }}
+                          minTickGap={24}
+                        />
+                        <YAxis
+                          tick={{ fill: 'rgba(255,255,255,0.75)', fontSize: 11 }}
+                          tickFormatter={(value: number) => `EUR ${Number(value).toFixed(3)}`}
+                          width={84}
+                        />
+                        <Tooltip
+                          labelFormatter={(label, payload) => {
+                            const first = Array.isArray(payload) && payload.length > 0
+                              ? payload[0]
+                              : null
+                            return typeof first?.payload?.fullTime === 'string' ? first.payload.fullTime : String(label)
+                          }}
+                          formatter={(value: number | string) => {
+                            const numericValue = Number(value)
+                            return [`EUR ${numericValue.toFixed(4)} /kWh`, 'Price']
+                          }}
+                          contentStyle={{
+                            background: 'rgba(15, 23, 42, 0.95)',
+                            border: '1px solid rgba(255,255,255,0.15)',
+                            borderRadius: '0.75rem',
+                            color: '#f8fafc',
+                          }}
+                          itemStyle={{ color: '#f8fafc' }}
+                          labelStyle={{ color: '#f8fafc' }}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="currentPrice"
+                          stroke="#34d399"
+                          strokeWidth={2}
+                          dot={false}
+                          connectNulls
+                          name="Current"
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="forecastPrice"
+                          stroke="#f59e0b"
+                          strokeWidth={2}
+                          strokeDasharray="6 4"
+                          dot={false}
+                          connectNulls
+                          name="Forecast"
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <p className="text-xs text-light-1 opacity-75 mt-3">
+                    The chart shows ENTSOE prices as far ahead as currently available from the API.
+                  </p>
+                </>
+              )}
+            </div>
           )}
 
           {/* Summary */}
           <div className="bg-dark-2 bg-opacity-50 rounded-lg p-4 text-sm text-light-1">
             <p className="font-medium mb-2">Summary:</p>
+            {pricingType === 'dynamic' && (
+              <p className="mb-2 text-xs text-light-1 opacity-80">
+                Dynamic mode uses ENTSOE base price; supplier margin is added on top.
+              </p>
+            )}
             <p>
               Consumer: €{parseFloat(consumerPrice).toFixed(4)}/kWh + €{parseFloat(consumerMargin).toFixed(4)}/kWh margin
             </p>

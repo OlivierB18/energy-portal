@@ -1,107 +1,222 @@
-const handler = async (event) => {
-  const apiKey = process.env.ENTSOE_API_KEY
-  const biddingZone = process.env.ENTSOE_BIDDING_ZONE || '10YNL----------L'
+import { createRemoteJWKSet, jwtVerify } from 'jose'
 
-  if (!apiKey || apiKey === 'your_entsoe_api_key_here') {
-    return {
-      statusCode: 400,
-      body: JSON.stringify({ error: 'ENTSOE_API_KEY not configured' }),
+const getEnv = (key) => {
+  const value = process.env[key]
+  if (!value) {
+    throw new Error(`Missing ${key}`)
+  }
+  return value
+}
+
+const getTagValue = (xml, tagName) => {
+  const escaped = tagName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const regex = new RegExp(`<${escaped}[^>]*>([\\s\\S]*?)<\\/${escaped}>`, 'i')
+  const match = xml.match(regex)
+  return match ? String(match[1]).trim() : ''
+}
+
+const parseResolutionMinutes = (resolutionRaw) => {
+  const source = String(resolutionRaw || '').trim()
+  const match = source.match(/^PT(?:(\d+)H)?(?:(\d+)M)?$/i)
+  if (!match) {
+    return 60
+  }
+
+  const hours = Number(match[1] || 0)
+  const minutes = Number(match[2] || 0)
+  const total = (Number.isFinite(hours) ? hours : 0) * 60 + (Number.isFinite(minutes) ? minutes : 0)
+  return total > 0 ? total : 60
+}
+
+const round = (value, decimals) => {
+  const factor = 10 ** decimals
+  return Math.round(value * factor) / factor
+}
+
+const parseENTSOEXML = (xml) => {
+  const periodRegex = /<Period>([\s\S]*?)<\/Period>/gi
+  const pointRegex = /<Point>([\s\S]*?)<\/Point>/gi
+  const byTime = new Map()
+
+  let periodMatch
+  while ((periodMatch = periodRegex.exec(xml)) !== null) {
+    const periodXml = periodMatch[1]
+    const startRaw = getTagValue(periodXml, 'start')
+    const startDate = new Date(startRaw)
+    if (Number.isNaN(startDate.getTime())) {
+      continue
+    }
+
+    const resolutionMinutes = parseResolutionMinutes(getTagValue(periodXml, 'resolution'))
+    let pointMatch
+    while ((pointMatch = pointRegex.exec(periodXml)) !== null) {
+      const pointXml = pointMatch[1]
+      const position = Number(getTagValue(pointXml, 'position'))
+      const rawPrice = getTagValue(pointXml, 'price.amount') || getTagValue(pointXml, 'price')
+      const eurPerMWh = Number(rawPrice)
+
+      if (!Number.isFinite(position) || position < 1 || !Number.isFinite(eurPerMWh)) {
+        continue
+      }
+
+      const timestamp = new Date(startDate.getTime() + (position - 1) * resolutionMinutes * 60_000)
+      const time = timestamp.toISOString()
+
+      byTime.set(time, {
+        time,
+        hour: timestamp.getUTCHours(),
+        price: round(eurPerMWh, 2),
+        eurPerKwh: round(eurPerMWh / 1000, 5),
+      })
     }
   }
 
+  return Array.from(byTime.values()).sort((a, b) => Date.parse(a.time) - Date.parse(b.time))
+}
+
+const pickCurrentPrice = (prices) => {
+  if (!Array.isArray(prices) || prices.length === 0) {
+    return null
+  }
+
+  const now = Date.now()
+  for (let index = 0; index < prices.length; index += 1) {
+    const current = prices[index]
+    const currentStart = Date.parse(current.time)
+    const nextStart = index + 1 < prices.length
+      ? Date.parse(prices[index + 1].time)
+      : currentStart + 60 * 60 * 1000
+
+    if (!Number.isFinite(currentStart) || !Number.isFinite(nextStart)) {
+      continue
+    }
+
+    if (now >= currentStart && now < nextStart) {
+      return current
+    }
+  }
+
+  const past = prices.filter((entry) => Date.parse(entry.time) <= now)
+  if (past.length > 0) {
+    return past[past.length - 1]
+  }
+
+  return prices[0]
+}
+
+const verifyAuth = async (event) => {
+  const authHeader = event.headers.authorization || event.headers.Authorization
+  if (!authHeader?.startsWith('Bearer ')) {
+    throw new Error('Missing token')
+  }
+
+  const token = authHeader.replace('Bearer ', '')
+  const domain = getEnv('AUTH0_DOMAIN')
+  const jwks = createRemoteJWKSet(new URL(`https://${domain}/.well-known/jwks.json`))
+  await jwtVerify(token, jwks, { issuer: `https://${domain}/` })
+}
+
+const formatEntsoeTimestamp = (date) => {
+  const year = date.getUTCFullYear()
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0')
+  const day = String(date.getUTCDate()).padStart(2, '0')
+  const hours = String(date.getUTCHours()).padStart(2, '0')
+  const minutes = String(date.getUTCMinutes()).padStart(2, '0')
+  return `${year}${month}${day}${hours}${minutes}`
+}
+
+const parseHoursAhead = (event) => {
+  const raw = Number(event.queryStringParameters?.hoursAhead || 48)
+  if (!Number.isFinite(raw)) {
+    return 48
+  }
+
+  const rounded = Math.round(raw)
+  return Math.min(168, Math.max(24, rounded))
+}
+
+export const handler = async (event) => {
   try {
+    if (event.httpMethod !== 'GET') {
+      return {
+        statusCode: 405,
+        body: JSON.stringify({ error: 'Method not allowed' }),
+      }
+    }
+
+    await verifyAuth(event)
+
+    const apiKey = getEnv('ENTSOE_API_KEY')
+    const biddingZone = process.env.ENTSOE_BIDDING_ZONE || '10YNL----------L'
+    const hoursAhead = parseHoursAhead(event)
     const now = new Date()
-    const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000)
-    
-    // ENTSOE requires dates in format YYYYMMDDHHMM
-    const startTime = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}0000`
-    const endTime = `${tomorrow.getFullYear()}${String(tomorrow.getMonth() + 1).padStart(2, '0')}${String(tomorrow.getDate()).padStart(2, '0')}0000`
-    
+    const startUtc = new Date(Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate(),
+      0,
+      0,
+      0,
+      0,
+    ))
+    const endUtc = new Date(startUtc.getTime() + hoursAhead * 60 * 60 * 1000)
+
+    const startTime = formatEntsoeTimestamp(startUtc)
+    const endTime = formatEntsoeTimestamp(endUtc)
+
     const url = new URL('https://web-api.tp.entsoe.eu/api')
     url.searchParams.append('securityToken', apiKey)
-    url.searchParams.append('documentType', 'A44') // Day-ahead prices
+    url.searchParams.append('documentType', 'A44')
     url.searchParams.append('in_Domain', biddingZone)
     url.searchParams.append('out_Domain', biddingZone)
     url.searchParams.append('periodStart', startTime)
     url.searchParams.append('periodEnd', endTime)
 
-    // eslint-disable-next-line no-console
-    console.log('[ENTSOE] Fetching prices for', biddingZone, startTime, '-', endTime)
-
     const response = await fetch(url.toString())
     if (!response.ok) {
       const text = await response.text()
-      // eslint-disable-next-line no-console
-      console.error('[ENTSOE] Error:', response.status, text)
       return {
         statusCode: response.status,
-        body: JSON.stringify({ error: 'Failed to fetch ENTSOE prices', details: text }),
+        body: JSON.stringify({
+          error: 'Failed to fetch ENTSOE prices',
+          details: text,
+        }),
       }
     }
 
-    // Parse XML response (basic parsing)
     const xml = await response.text()
     const prices = parseENTSOEXML(xml)
-
-    // eslint-disable-next-line no-console
-    console.log('[ENTSOE] Got', prices.length, 'price points')
+    const current = pickCurrentPrice(prices)
 
     return {
       statusCode: 200,
       body: JSON.stringify({
         prices,
+        current: current
+          ? {
+            time: current.time,
+            eurPerMWh: current.price,
+            eurPerKwh: current.eurPerKwh,
+          }
+          : null,
         currency: 'EUR',
         unit: 'MWh',
         biddingZone,
+        hoursAhead,
+        periodStart: startUtc.toISOString(),
+        periodEnd: endUtc.toISOString(),
         timestamp: new Date().toISOString(),
       }),
     }
   } catch (error) {
-    // eslint-disable-next-line no-console
-    console.error('[ENTSOE] Fetch error:', error)
+    const message = error instanceof Error ? error.message : 'Unknown error'
+    const statusCode = message === 'Missing token' ? 401 : 500
     return {
-      statusCode: 500,
+      statusCode,
       body: JSON.stringify({
         error: 'Unable to fetch ENTSOE prices',
-        message: error instanceof Error ? error.message : 'Unknown error',
+        message,
       }),
     }
   }
 }
-
-function parseENTSOEXML(xml) {
-  const prices = []
-  
-  // Simple XML parsing for price points
-  // Format: <price>12345</price> (in 0.1 EUR/MWh, so divide by 10 for EUR/MWh)
-  const regex = /<price>(\d+(?:\.\d+)?)<\/price>/g
-  const timeSeriesRegex = /<TimeSeries>([\s\S]*?)<\/TimeSeries>/g
-  
-  let timeSeriesMatch
-  let timeIndex = 0
-  
-  while ((timeSeriesMatch = timeSeriesRegex.exec(xml)) !== null) {
-    const timeSeries = timeSeriesMatch[1]
-    const startMatch = timeSeries.match(/<start>(.*?)<\/start>/)
-    const startTime = startMatch ? new Date(startMatch[1]) : null
-    
-    let priceMatch
-    let periodIndex = 0
-    while ((priceMatch = regex.exec(timeSeries)) !== null) {
-      if (startTime && periodIndex < 24) {
-        const priceTime = new Date(startTime.getTime() + periodIndex * 60 * 60 * 1000)
-        const priceValue = parseFloat(priceMatch[1]) / 10 // Convert from 0.1 EUR/MWh to EUR/MWh
-        prices.push({
-          time: priceTime.toISOString(),
-          hour: periodIndex,
-          price: parseFloat(priceValue.toFixed(2)),
-        })
-      }
-      periodIndex++
-    }
-  }
-
-  return prices
-}
-
-exports.handler = handler

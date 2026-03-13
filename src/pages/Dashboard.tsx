@@ -47,6 +47,46 @@ interface HaMetricsSnapshot {
 
 const GAS_METER_ENTITY_ID = 'sensor.gas_meter_gas_consumption'
 
+const parseEntsoeBasePrice = (input: unknown): number | null => {
+  if (!input || typeof input !== 'object') {
+    return null
+  }
+
+  const payload = input as {
+    current?: { eurPerKwh?: unknown }
+    prices?: Array<{ eurPerKwh?: unknown; price?: unknown }>
+  }
+
+  const currentPerKwh = Number(payload?.current?.eurPerKwh)
+  if (Number.isFinite(currentPerKwh) && currentPerKwh >= 0) {
+    return currentPerKwh
+  }
+
+  const points = Array.isArray(payload?.prices) ? payload.prices : []
+  if (points.length === 0) {
+    return null
+  }
+
+  const values = points
+    .map((point) => {
+      const direct = Number(point?.eurPerKwh)
+      if (Number.isFinite(direct)) {
+        return direct
+      }
+
+      const eurPerMWh = Number(point?.price)
+      return Number.isFinite(eurPerMWh) ? eurPerMWh / 1000 : NaN
+    })
+    .filter((value) => Number.isFinite(value) && value >= 0)
+
+  if (values.length === 0) {
+    return null
+  }
+
+  const total = values.reduce((sum, value) => sum + value, 0)
+  return total / values.length
+}
+
 const parseNumericValue = (value: unknown) => {
   if (typeof value === 'number') {
     return Number.isFinite(value) ? value : NaN
@@ -218,6 +258,7 @@ export default function Dashboard({
   const [showPriceModal, setShowPriceModal] = useState(false)
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false)
   const [pricingConfig, setPricingConfig] = useState<EnergyPricingConfig | null>(null)
+  const [dynamicConsumerPriceKwh, setDynamicConsumerPriceKwh] = useState<number | null>(null)
   // Sensor connection status: 'connecting' | 'connected' | 'error'
   const [_haConnectionStatus, setHaConnectionStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   const { isAuthenticated, getIdTokenClaims, getAccessTokenSilently, user } = useAuth0()
@@ -235,6 +276,7 @@ export default function Dashboard({
     return String(source).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80)
   }, [user?.email, user?.sub])
   const haEntitiesCacheKey = `ha_entities_cache_v4_${selectedEnvironment || 'default'}_${userCacheScope}`
+  const dynamicPriceCacheKey = `energy_dynamic_price_${selectedEnvironment || 'default'}`
 
   useEffect(() => {
     const loadEnvironments = async () => {
@@ -437,6 +479,79 @@ export default function Dashboard({
       isMounted = false
     }
   }, [selectedEnvironment, isAuthenticated, getAuthToken])
+
+  useEffect(() => {
+    if (!selectedEnvironment || pricingConfig?.type !== 'dynamic') {
+      setDynamicConsumerPriceKwh(null)
+      return
+    }
+
+    try {
+      const cached = localStorage.getItem(dynamicPriceCacheKey)
+      if (!cached) {
+        return
+      }
+
+      const parsed = JSON.parse(cached)
+      const value = Number(parsed?.value)
+      if (Number.isFinite(value) && value >= 0) {
+        setDynamicConsumerPriceKwh(value)
+      }
+    } catch {
+      // Ignore parse errors and refresh from API.
+    }
+  }, [dynamicPriceCacheKey, pricingConfig?.type, selectedEnvironment])
+
+  useEffect(() => {
+    if (!selectedEnvironment || !isAuthenticated || pricingConfig?.type !== 'dynamic') {
+      return
+    }
+
+    let isMounted = true
+
+    const fetchDynamicPrice = async () => {
+      try {
+        const token = await getAuthToken()
+        const response = await fetch('/.netlify/functions/get-entsoe-prices', {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+
+        if (!response.ok) {
+          return
+        }
+
+        const data = await response.json()
+        const resolved = parseEntsoeBasePrice(data)
+        if (!isMounted || resolved === null || !Number.isFinite(resolved) || resolved < 0) {
+          return
+        }
+
+        setDynamicConsumerPriceKwh(resolved)
+        localStorage.setItem(dynamicPriceCacheKey, JSON.stringify({
+          value: resolved,
+          updatedAt: new Date().toISOString(),
+        }))
+      } catch {
+        // Keep last cached dynamic price when refresh fails.
+      }
+    }
+
+    void fetchDynamicPrice()
+    const intervalId = window.setInterval(() => {
+      void fetchDynamicPrice()
+    }, 15 * 60 * 1000)
+
+    return () => {
+      isMounted = false
+      window.clearInterval(intervalId)
+    }
+  }, [
+    dynamicPriceCacheKey,
+    getAuthToken,
+    isAuthenticated,
+    pricingConfig?.type,
+    selectedEnvironment,
+  ])
 
   useEffect(() => {
     setHaEntities([])
@@ -1154,8 +1269,13 @@ export default function Dashboard({
       ? parseValue(gasFlowEntity.state)
       : gasDailyUsage
 
-    // Calculate energy costs using pricing config
-    const consumerRate = (pricingConfig?.consumerPrice || 0.30) + (pricingConfig?.consumerMargin || 0)
+    // Calculate energy costs using pricing config.
+    // Dynamic mode uses live ENTSOE base price with supplier margin added on top.
+    const configuredConsumerBase = pricingConfig?.consumerPrice || 0.30
+    const consumerBaseRate = pricingConfig?.type === 'dynamic'
+      ? (dynamicConsumerPriceKwh ?? configuredConsumerBase)
+      : configuredConsumerBase
+    const consumerRate = consumerBaseRate + (pricingConfig?.consumerMargin || 0)
     const electricityCostToday = dailyUsage * consumerRate
     const electricityCostMonth = monthlyUsage * consumerRate
     const gasCostToday = gasDailyUsage * gasRatePerM3
@@ -1177,7 +1297,16 @@ export default function Dashboard({
       costToday: parseFloat(totalCostToday.toFixed(2)),
       costMonth: parseFloat(totalCostMonth.toFixed(2)),
     }
-  }, [haEntities, lastKnownHaEntities, haMetricsSnapshot, pricingConfig, selectedEnvironment, gasRatePerM3, powerSamples])
+  }, [
+    haEntities,
+    lastKnownHaEntities,
+    haMetricsSnapshot,
+    pricingConfig,
+    dynamicConsumerPriceKwh,
+    selectedEnvironment,
+    gasRatePerM3,
+    powerSamples,
+  ])
 
   const powerHistoryScope = useMemo(() => {
     const source = haMetricsSnapshot?.powerEntityId || 'fallback'
@@ -2041,7 +2170,7 @@ export default function Dashboard({
             environmentId={selectedEnvironment}
             onClose={() => setShowPriceModal(false)}
             onSave={(config) => setPricingConfig(config)}
-            getAuthToken={getAccessTokenSilently}
+            getAuthToken={getAuthToken}
           />
         )}
       </div>
