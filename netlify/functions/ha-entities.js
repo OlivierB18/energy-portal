@@ -33,6 +33,23 @@ const parseCsvEnv = (value, fallback = []) => {
   return parsed.length > 0 ? parsed : fallback
 }
 
+const parseEnvironmentMap = (rawValue) => {
+  if (!rawValue) {
+    return {}
+  }
+
+  if (typeof rawValue === 'string') {
+    try {
+      const parsed = JSON.parse(rawValue)
+      return parsed && typeof parsed === 'object' ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+
+  return rawValue && typeof rawValue === 'object' ? rawValue : {}
+}
+
 const GAS_TOTAL_ENTITY_ID_CANDIDATES = parseCsvEnv(process.env.HA_GAS_TOTAL_ENTITY_IDS, [
   'sensor.gas_meter_gas_consumption',
   'sensor.gas_meter_gasverbruik',
@@ -870,7 +887,7 @@ const enrichMetricsWithHistoryFallback = async ({
 }
 
 const getHaConfig = (metadata, environmentId) => {
-  const envMap = metadata.environments || {}
+  const envMap = parseEnvironmentMap(metadata.environments)
   const envConfig = envMap[environmentId]
 
   if (envConfig) {

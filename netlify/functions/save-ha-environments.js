@@ -217,6 +217,23 @@ const normalizeEnvironments = (environments) => {
     .filter((env) => env.id && env.name)
 }
 
+const parseEnvironmentMap = (rawValue) => {
+  if (!rawValue) {
+    return {}
+  }
+
+  if (typeof rawValue === 'string') {
+    try {
+      const parsed = JSON.parse(rawValue)
+      return parsed && typeof parsed === 'object' ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+
+  return rawValue && typeof rawValue === 'object' ? rawValue : {}
+}
+
 export const handler = async (event) => {
   try {
     if (event.httpMethod !== 'POST') {
@@ -235,6 +252,7 @@ export const handler = async (event) => {
     const domain = getEnv('AUTH0_DOMAIN')
     const managementToken = await getManagementToken(domain)
     const metadata = await getClientMetadata(domain, managementToken)
+    const currentEnvironmentMap = parseEnvironmentMap(metadata.environments)
 
     const nextMap = environments.reduce((acc, env) => {
       acc[env.id] = {
@@ -252,7 +270,11 @@ export const handler = async (event) => {
 
     await updateClientMetadata(domain, managementToken, {
       ...metadata,
-      environments: nextMap,
+      // Auth0 client_metadata can enforce scalar schemas, so persist as JSON string.
+      environments: JSON.stringify({
+        ...currentEnvironmentMap,
+        ...nextMap,
+      }),
     })
 
     return {

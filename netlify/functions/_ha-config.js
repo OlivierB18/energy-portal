@@ -1,5 +1,22 @@
 const normalizeText = (value) => (typeof value === 'string' ? value.trim() : '')
 
+const parseEnvironmentMap = (rawValue) => {
+  if (!rawValue) {
+    return {}
+  }
+
+  if (typeof rawValue === 'string') {
+    try {
+      const parsed = JSON.parse(rawValue)
+      return parsed && typeof parsed === 'object' ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+
+  return rawValue && typeof rawValue === 'object' ? rawValue : {}
+}
+
 const normalizePricing = (value) => {
   if (!value || typeof value !== 'object') {
     return null
@@ -85,7 +102,7 @@ const mapEnvironmentConfig = (env = {}) => {
 }
 
 export const mapMetadataEnvironments = (metadata = {}) => {
-  const envMap = metadata.environments || {}
+  const envMap = parseEnvironmentMap(metadata.environments)
   return Object.entries(envMap)
     .map(([id, env]) => ({
       id: normalizeText(id),
