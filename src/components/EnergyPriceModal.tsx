@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
-import { X, Download } from 'lucide-react'
+import { X } from 'lucide-react'
 import {
   CartesianGrid,
   Line,
@@ -261,65 +261,73 @@ export default function EnergyPriceModal({
     return { data, points }
   }
 
-  const handleFetchENTSOE = async () => {
-    setEntsoeLoading(true)
-    setError(null)
-
-    try {
-      const { data, points } = await fetchENTSOE(120)
-      if (points.length === 0) {
-        const resolutionInfo = Array.isArray(data?.resolutions) && data.resolutions.length > 0
-          ? ` (resolution: ${data.resolutions.join(', ')})`
-          : ''
-        throw new Error(`No ENTSOE prices available for the selected horizon${resolutionInfo}`)
-      }
-
-      const currentPrice = parseNumber(data?.current?.eurPerKwh, NaN)
-      const averagePrice = points.length > 0
-        ? points.reduce((sum, point) => sum + point.eurPerKwh, 0) / points.length
-        : NaN
-
-      const nextBasePrice = Number.isFinite(currentPrice)
-        ? currentPrice
-        : Number.isFinite(averagePrice)
-          ? averagePrice
-          : NaN
-
-      if (!Number.isFinite(nextBasePrice)) {
-        throw new Error('No valid ENTSOE price returned')
-      }
-
-      setPricingType('dynamic')
-      setConsumerPrice(nextBasePrice.toFixed(4))
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch ENTSOE prices')
-    } finally {
+  useEffect(() => {
+    if (pricingType !== 'dynamic' || !showDynamicChart) {
       setEntsoeLoading(false)
+      return
     }
-  }
+
+    let isMounted = true
+
+    const refreshDynamicData = async () => {
+      if (isMounted) {
+        setEntsoeLoading(true)
+        setError(null)
+      }
+
+      try {
+        const { data, points } = await fetchENTSOE(120)
+        if (!isMounted) {
+          return
+        }
+
+        if (points.length === 0) {
+          const resolutionInfo = Array.isArray(data?.resolutions) && data.resolutions.length > 0
+            ? ` (resolution: ${data.resolutions.join(', ')})`
+            : ''
+          throw new Error(`No ENTSOE prices available for the selected horizon${resolutionInfo}`)
+        }
+
+        const currentPrice = parseNumber(data?.current?.eurPerKwh, NaN)
+        const averagePrice = points.reduce((sum, point) => sum + point.eurPerKwh, 0) / points.length
+
+        const nextBasePrice = Number.isFinite(currentPrice)
+          ? currentPrice
+          : Number.isFinite(averagePrice)
+            ? averagePrice
+            : NaN
+
+        if (!Number.isFinite(nextBasePrice)) {
+          throw new Error('No valid ENTSOE price returned')
+        }
+
+        setConsumerPrice(nextBasePrice.toFixed(4))
+      } catch (err) {
+        if (isMounted) {
+          setError(err instanceof Error ? err.message : 'Failed to fetch ENTSOE prices')
+        }
+      } finally {
+        if (isMounted) {
+          setEntsoeLoading(false)
+        }
+      }
+    }
+
+    void refreshDynamicData()
+    const intervalId = window.setInterval(() => {
+      void refreshDynamicData()
+    }, 15 * 60 * 1000)
+
+    return () => {
+      isMounted = false
+      window.clearInterval(intervalId)
+    }
+  }, [getAuthToken, pricingType, showDynamicChart])
 
   const handleToggleDynamicChart = async () => {
     const nextState = !showDynamicChart
     setShowDynamicChart(nextState)
     persistDynamicChartPreference(nextState)
-
-    if (!nextState || entsoePoints.length > 0) {
-      return
-    }
-
-    setEntsoeLoading(true)
-    setError(null)
-
-    try {
-      const { points } = await fetchENTSOE(120)
-      if (points.length === 0) {
-        throw new Error('No ENTSOE prices available for chart')
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load dynamic price chart')
-    } finally {
-      setEntsoeLoading(false)
-    }
   }
 
   const handleSave = async () => {
@@ -471,14 +479,6 @@ export default function EnergyPriceModal({
           {pricingType === 'dynamic' && (
             <div className="flex flex-col sm:flex-row gap-3">
               <button
-                onClick={handleFetchENTSOE}
-                disabled={entsoeLoading}
-                className="flex-1 flex items-center justify-center gap-2 py-2 px-4 bg-brand-2 hover:bg-brand-3 text-light-2 rounded-lg font-medium transition-all disabled:opacity-60"
-              >
-                <Download className="w-4 h-4" />
-                {entsoeLoading ? 'Loading...' : 'Refresh Dynamic Price (Day + Forecast)'}
-              </button>
-              <button
                 onClick={() => {
                   void handleToggleDynamicChart()
                 }}
@@ -503,7 +503,9 @@ export default function EnergyPriceModal({
 
               {entsoeChartData.length === 0 ? (
                 <p className="text-xs text-light-1 opacity-80">
-                  No dynamic prices available yet. Click refresh to load ENTSOE prices.
+                  {entsoeLoading
+                    ? 'Loading dynamic prices in the background...'
+                    : 'No dynamic prices available yet.'}
                 </p>
               ) : (
                 <>

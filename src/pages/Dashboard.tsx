@@ -635,6 +635,15 @@ export default function Dashboard({
 
         setDynamicPricePoints(points)
         setDynamicPriceUpdatedAt(typeof data?.timestamp === 'string' ? data.timestamp : new Date().toISOString())
+
+        const resolvedPrice = parseEntsoeBasePrice(data)
+        if (resolvedPrice !== null && Number.isFinite(resolvedPrice) && resolvedPrice >= 0) {
+          setDynamicConsumerPriceKwh(resolvedPrice)
+          localStorage.setItem(dynamicPriceCacheKey, JSON.stringify({
+            value: resolvedPrice,
+            updatedAt: new Date().toISOString(),
+          }))
+        }
       } catch (error) {
         if (!isMounted) {
           return
@@ -658,6 +667,7 @@ export default function Dashboard({
       window.clearInterval(intervalId)
     }
   }, [
+    dynamicPriceCacheKey,
     getAuthToken,
     isAuthenticated,
     pricingConfig?.type,
@@ -686,57 +696,6 @@ export default function Dashboard({
       // Ignore parse errors and refresh from API.
     }
   }, [dynamicPriceCacheKey, pricingConfig?.type, selectedEnvironment])
-
-  useEffect(() => {
-    if (!selectedEnvironment || !isAuthenticated || pricingConfig?.type !== 'dynamic') {
-      return
-    }
-
-    let isMounted = true
-
-    const fetchDynamicPrice = async () => {
-      try {
-        const token = await getAuthToken()
-        const response = await fetch('/.netlify/functions/get-entsoe-prices', {
-          headers: { Authorization: `Bearer ${token}` },
-        })
-
-        if (!response.ok) {
-          return
-        }
-
-        const data = await response.json()
-        const resolved = parseEntsoeBasePrice(data)
-        if (!isMounted || resolved === null || !Number.isFinite(resolved) || resolved < 0) {
-          return
-        }
-
-        setDynamicConsumerPriceKwh(resolved)
-        localStorage.setItem(dynamicPriceCacheKey, JSON.stringify({
-          value: resolved,
-          updatedAt: new Date().toISOString(),
-        }))
-      } catch {
-        // Keep last cached dynamic price when refresh fails.
-      }
-    }
-
-    void fetchDynamicPrice()
-    const intervalId = window.setInterval(() => {
-      void fetchDynamicPrice()
-    }, 15 * 60 * 1000)
-
-    return () => {
-      isMounted = false
-      window.clearInterval(intervalId)
-    }
-  }, [
-    dynamicPriceCacheKey,
-    getAuthToken,
-    isAuthenticated,
-    pricingConfig?.type,
-    selectedEnvironment,
-  ])
 
   useEffect(() => {
     setHaEntities([])
