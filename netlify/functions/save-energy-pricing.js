@@ -96,6 +96,23 @@ const verifyAuth = async (event) => {
   await jwtVerify(token, jwks, { issuer: `https://${domain}/` })
 }
 
+const parsePricingMap = (input) => {
+  if (!input) {
+    return {}
+  }
+
+  if (typeof input === 'string') {
+    try {
+      const parsed = JSON.parse(input)
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+
+  return input && typeof input === 'object' && !Array.isArray(input) ? input : {}
+}
+
 const normalizePricingConfig = (input) => {
   if (!input || typeof input !== 'object') {
     return null
@@ -140,15 +157,17 @@ export const handler = async (event) => {
     const domain = getEnv('AUTH0_DOMAIN')
     const managementToken = await getManagementToken(domain)
     const metadata = await getClientMetadata(domain, managementToken)
+    const currentPricingMap = parsePricingMap(metadata.energy_pricing)
 
     const nextPricingMap = {
-      ...(metadata.energy_pricing || {}),
+      ...currentPricingMap,
       [environmentId]: config,
     }
 
     await updateClientMetadata(domain, managementToken, {
       ...metadata,
-      energy_pricing: nextPricingMap,
+      // Auth0 client_metadata can enforce scalar schemas, so persist as JSON string.
+      energy_pricing: JSON.stringify(nextPricingMap),
     })
 
     return {

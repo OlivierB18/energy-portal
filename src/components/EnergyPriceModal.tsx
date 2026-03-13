@@ -111,7 +111,7 @@ export default function EnergyPriceModal({
   const applyPricingConfig = (config: EnergyPricingConfig) => {
     setPricingType(config.type || 'fixed')
     setConsumerPrice((config.consumerPrice || 0.30).toString())
-    setProducerPrice((config.producerPrice || 0.10).toString())
+    setProducerPrice((config.producerPrice ?? config.consumerPrice ?? 0.10).toString())
     setConsumerMargin((config.consumerMargin || 0.05).toString())
     setProducerMargin((config.producerMargin || 0.02).toString())
   }
@@ -324,10 +324,9 @@ export default function EnergyPriceModal({
     }
   }, [getAuthToken, pricingType, showDynamicChart])
 
-  const handleToggleDynamicChart = async () => {
-    const nextState = !showDynamicChart
-    setShowDynamicChart(nextState)
-    persistDynamicChartPreference(nextState)
+  const handleShowChartOnUiChange = (visible: boolean) => {
+    setShowDynamicChart(visible)
+    persistDynamicChartPreference(visible)
   }
 
   const handleSave = async () => {
@@ -335,10 +334,15 @@ export default function EnergyPriceModal({
     setError(null)
 
     try {
+      const dynamicBasePrice = parseNumber(consumerPrice, 0.30)
       const config: EnergyPricingConfig = {
         type: pricingType,
-        consumerPrice: parseNumber(consumerPrice, 0.30),
-        producerPrice: parseNumber(producerPrice, 0.10),
+        consumerPrice: pricingType === 'dynamic'
+          ? dynamicBasePrice
+          : parseNumber(consumerPrice, 0.30),
+        producerPrice: pricingType === 'dynamic'
+          ? dynamicBasePrice
+          : parseNumber(producerPrice, 0.10),
         consumerMargin: parseNumber(consumerMargin, 0.05),
         producerMargin: parseNumber(producerMargin, 0.02),
       }
@@ -396,6 +400,10 @@ export default function EnergyPriceModal({
         <div className="p-6 space-y-6">
           {error && <p className="text-red-300 text-sm">{error}</p>}
 
+          {entsoeLoading && pricingType === 'dynamic' && showDynamicChart && (
+            <p className="text-light-1 text-xs opacity-80">Updating dynamic prices in background...</p>
+          )}
+
           {/* Pricing Type Toggle */}
           <div>
             <label className="block text-light-1 text-sm font-medium mb-3">Pricing Type</label>
@@ -424,30 +432,42 @@ export default function EnergyPriceModal({
           </div>
 
           {/* Pricing Fields */}
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-light-1 text-sm font-medium mb-2">Consumer Price (€/kWh)</label>
-              <input
-                type="number"
-                step="0.001"
-                value={consumerPrice}
-                onChange={(e) => setConsumerPrice(e.target.value)}
-                className="w-full px-3 py-2 bg-dark-2 bg-opacity-50 text-light-2 border border-light-2 border-opacity-20 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-2"
-              />
-              <p className="text-xs text-light-1 opacity-70 mt-1">What you pay when consuming</p>
+          {pricingType === 'fixed' ? (
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-light-1 text-sm font-medium mb-2">Consumer Price (€/kWh)</label>
+                <input
+                  type="number"
+                  step="0.001"
+                  value={consumerPrice}
+                  onChange={(e) => setConsumerPrice(e.target.value)}
+                  className="w-full px-3 py-2 bg-dark-2 bg-opacity-50 text-light-2 border border-light-2 border-opacity-20 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-2"
+                />
+                <p className="text-xs text-light-1 opacity-70 mt-1">What you pay when consuming</p>
+              </div>
+              <div>
+                <label className="block text-light-1 text-sm font-medium mb-2">Producer Price (€/kWh)</label>
+                <input
+                  type="number"
+                  step="0.001"
+                  value={producerPrice}
+                  onChange={(e) => setProducerPrice(e.target.value)}
+                  className="w-full px-3 py-2 bg-dark-2 bg-opacity-50 text-light-2 border border-light-2 border-opacity-20 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-2"
+                />
+                <p className="text-xs text-light-1 opacity-70 mt-1">What you get when producing</p>
+              </div>
             </div>
-            <div>
-              <label className="block text-light-1 text-sm font-medium mb-2">Producer Price (€/kWh)</label>
-              <input
-                type="number"
-                step="0.001"
-                value={producerPrice}
-                onChange={(e) => setProducerPrice(e.target.value)}
-                className="w-full px-3 py-2 bg-dark-2 bg-opacity-50 text-light-2 border border-light-2 border-opacity-20 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-2"
-              />
-              <p className="text-xs text-light-1 opacity-70 mt-1">What you get when producing</p>
+          ) : (
+            <div className="bg-dark-2 bg-opacity-50 rounded-lg p-4 text-sm text-light-1">
+              <p className="font-medium text-light-2">Dynamic base price is automatic</p>
+              <p className="text-xs opacity-80 mt-1">
+                Active dynamic base price: €{parseNumber(consumerPrice, 0.30).toFixed(4)}/kWh
+              </p>
+              <p className="text-xs opacity-70 mt-2">
+                Consumer and producer both use the current dynamic price as base.
+              </p>
             </div>
-          </div>
+          )}
 
           {/* Margin Fields */}
           <div className="grid grid-cols-2 gap-4">
@@ -471,23 +491,26 @@ export default function EnergyPriceModal({
                 onChange={(e) => setProducerMargin(e.target.value)}
                 className="w-full px-3 py-2 bg-dark-2 bg-opacity-50 text-light-2 border border-light-2 border-opacity-20 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-2"
               />
-              <p className="text-xs text-light-1 opacity-70 mt-1">Reduced from payout</p>
+              <p className="text-xs text-light-1 opacity-70 mt-1">Added on top of dynamic producer base</p>
             </div>
           </div>
 
-          {/* ENTSOE Button */}
+          {/* Dynamic Chart Toggle */}
           {pricingType === 'dynamic' && (
-            <div className="flex flex-col sm:flex-row gap-3">
-              <button
-                onClick={() => {
-                  void handleToggleDynamicChart()
-                }}
-                disabled={entsoeLoading}
-                className="flex-1 py-2 px-4 bg-dark-2 bg-opacity-70 text-light-1 hover:bg-opacity-90 rounded-lg font-medium transition-all disabled:opacity-60"
-              >
-                {showDynamicChart ? 'Hide Dynamic Price Chart' : 'Show Dynamic Price Chart'}
-              </button>
-            </div>
+            <label className="flex items-center gap-3 rounded-lg border border-light-2 border-opacity-20 bg-dark-2 bg-opacity-50 px-4 py-3 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={showDynamicChart}
+                onChange={(event) => handleShowChartOnUiChange(event.target.checked)}
+                className="h-4 w-4 accent-emerald-500"
+              />
+              <div>
+                <p className="text-light-2 text-sm font-medium">Show chart on UI</p>
+                <p className="text-xs text-light-1 opacity-75">
+                  Fetches dynamic prices in background only when this is enabled.
+                </p>
+              </div>
+            </label>
           )}
 
           {pricingType === 'dynamic' && showDynamicChart && (
@@ -584,12 +607,25 @@ export default function EnergyPriceModal({
                 Dynamic mode uses ENTSOE base price; supplier margin is added on top.
               </p>
             )}
-            <p>
-              Consumer: €{parseFloat(consumerPrice).toFixed(4)}/kWh + €{parseFloat(consumerMargin).toFixed(4)}/kWh margin
-            </p>
-            <p>
-              Producer: €{parseFloat(producerPrice).toFixed(4)}/kWh - €{parseFloat(producerMargin).toFixed(4)}/kWh margin
-            </p>
+            {pricingType === 'dynamic' ? (
+              <>
+                <p>
+                  Consumer: dynamic base €{parseNumber(consumerPrice, 0.30).toFixed(4)}/kWh + €{parseNumber(consumerMargin, 0.05).toFixed(4)}/kWh margin
+                </p>
+                <p>
+                  Producer: dynamic base €{parseNumber(consumerPrice, 0.30).toFixed(4)}/kWh + €{parseNumber(producerMargin, 0.02).toFixed(4)}/kWh margin
+                </p>
+              </>
+            ) : (
+              <>
+                <p>
+                  Consumer: €{parseNumber(consumerPrice, 0.30).toFixed(4)}/kWh + €{parseNumber(consumerMargin, 0.05).toFixed(4)}/kWh margin
+                </p>
+                <p>
+                  Producer: €{parseNumber(producerPrice, 0.10).toFixed(4)}/kWh - €{parseNumber(producerMargin, 0.02).toFixed(4)}/kWh margin
+                </p>
+              </>
+            )}
           </div>
         </div>
 

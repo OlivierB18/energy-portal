@@ -79,6 +79,23 @@ const verifyAuth = async (event) => {
   await jwtVerify(token, jwks, { issuer: `https://${domain}/` })
 }
 
+const parsePricingMap = (input) => {
+  if (!input) {
+    return {}
+  }
+
+  if (typeof input === 'string') {
+    try {
+      const parsed = JSON.parse(input)
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+
+  return input && typeof input === 'object' && !Array.isArray(input) ? input : {}
+}
+
 const normalizePricingConfig = (input) => {
   if (!input || typeof input !== 'object') {
     return null
@@ -117,7 +134,7 @@ export const handler = async (event) => {
     const managementToken = await getManagementToken(domain)
     const metadata = await getClientMetadata(domain, managementToken)
 
-    const pricingMap = metadata.energy_pricing || {}
+    const pricingMap = parsePricingMap(metadata.energy_pricing)
     const config = normalizePricingConfig(pricingMap[environmentId])
 
     return {
