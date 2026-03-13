@@ -32,15 +32,26 @@ interface EntsoeChartPoint {
   forecastPrice: number | null
 }
 
+const DYNAMIC_PRICE_CHART_EVENT = 'energy-dynamic-chart-visibility-changed'
+
 export default function EnergyPriceModal({
   environmentId,
   onClose,
   onSave,
   getAuthToken,
 }: EnergyPriceModalProps) {
+  const dynamicChartPreferenceKey = `energy_dynamic_chart_visible_${environmentId || 'default'}`
+
   const parseNumber = (raw: unknown, fallback: number) => {
     const parsed = Number(raw)
     return Number.isFinite(parsed) ? parsed : fallback
+  }
+
+  const persistDynamicChartPreference = (visible: boolean) => {
+    localStorage.setItem(dynamicChartPreferenceKey, JSON.stringify({ visible, updatedAt: new Date().toISOString() }))
+    window.dispatchEvent(new CustomEvent(DYNAMIC_PRICE_CHART_EVENT, {
+      detail: { environmentId, visible },
+    }))
   }
 
   const normalizeEntsoePoints = (payload: unknown): EntsoePricePoint[] => {
@@ -202,10 +213,31 @@ export default function EnergyPriceModal({
   }, [environmentId, getAuthToken])
 
   useEffect(() => {
-    if (pricingType !== 'dynamic') {
+    if (pricingType !== 'dynamic' && showDynamicChart) {
       setShowDynamicChart(false)
+      persistDynamicChartPreference(false)
     }
-  }, [pricingType])
+  }, [pricingType, showDynamicChart])
+
+  useEffect(() => {
+    if (pricingType !== 'dynamic') {
+      return
+    }
+
+    try {
+      const stored = localStorage.getItem(dynamicChartPreferenceKey)
+      if (!stored) {
+        return
+      }
+
+      const parsed = JSON.parse(stored)
+      if (typeof parsed?.visible === 'boolean') {
+        setShowDynamicChart(parsed.visible)
+      }
+    } catch {
+      // Ignore malformed preference data.
+    }
+  }, [dynamicChartPreferenceKey, pricingType])
 
   const fetchENTSOE = async (hoursAhead: number) => {
     if (!getAuthToken) {
@@ -266,6 +298,7 @@ export default function EnergyPriceModal({
   const handleToggleDynamicChart = async () => {
     const nextState = !showDynamicChart
     setShowDynamicChart(nextState)
+    persistDynamicChartPreference(nextState)
 
     if (!nextState || entsoePoints.length > 0) {
       return
@@ -529,6 +562,9 @@ export default function EnergyPriceModal({
                   </div>
                   <p className="text-xs text-light-1 opacity-75 mt-3">
                     The chart shows ENTSOE prices as far ahead as currently available from the API.
+                  </p>
+                  <p className="text-xs text-light-1 opacity-75 mt-1">
+                    When enabled, this chart is also shown below the Gas Chart on the dashboard.
                   </p>
                 </>
               )}

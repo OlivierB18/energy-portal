@@ -5,6 +5,15 @@ import HomeAssistantConfig from '../components/HomeAssistantConfig'
 import EnergyPriceModal from '../components/EnergyPriceModal'
 import { Zap, Clock, Home, Settings, DollarSign, Flame, Users as UsersIcon, LogOut } from 'lucide-react'
 import { useAuth0 } from '@auth0/auth0-react'
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts'
 import { HaEntity, EnergyPricingConfig } from '../types'
 
 interface EnvironmentConfig {
@@ -45,7 +54,64 @@ interface HaMetricsSnapshot {
   powerEntityId: string | null
 }
 
+interface DynamicPricePoint {
+  time: string
+  eurPerKwh: number
+  isForecast: boolean
+}
+
+interface DynamicPriceChartPoint {
+  time: string
+  fullTime: string
+  price: number
+  currentPrice: number | null
+  forecastPrice: number | null
+}
+
 const GAS_METER_ENTITY_ID = 'sensor.gas_meter_gas_consumption'
+const DYNAMIC_PRICE_CHART_EVENT = 'energy-dynamic-chart-visibility-changed'
+
+const normalizeDynamicPricePoints = (input: unknown): DynamicPricePoint[] => {
+  if (!input || typeof input !== 'object') {
+    return []
+  }
+
+  const payload = input as {
+    prices?: Array<{ time?: unknown; eurPerKwh?: unknown; price?: unknown }>
+  }
+
+  const rows = Array.isArray(payload?.prices) ? payload.prices : []
+  if (rows.length === 0) {
+    return []
+  }
+
+  const now = Date.now()
+  const byTime = new Map<string, DynamicPricePoint>()
+
+  for (const row of rows) {
+    const rawTime = String(row?.time || '').trim()
+    const parsedTime = Date.parse(rawTime)
+    if (!rawTime || Number.isNaN(parsedTime)) {
+      continue
+    }
+
+    const directPerKwh = Number(row?.eurPerKwh)
+    const convertedPerKwh = Number(row?.price) / 1000
+    const eurPerKwh = Number.isFinite(directPerKwh) ? directPerKwh : convertedPerKwh
+    if (!Number.isFinite(eurPerKwh)) {
+      continue
+    }
+
+    const normalizedTime = new Date(parsedTime).toISOString()
+    byTime.set(normalizedTime, {
+      time: normalizedTime,
+      eurPerKwh,
+      isForecast: parsedTime > now,
+    })
+  }
+
+  return Array.from(byTime.values()).sort((a, b) => Date.parse(a.time) - Date.parse(b.time))
+}
 
 const parseEntsoeBasePrice = (input: unknown): number | null => {
   if (!input || typeof input !== 'object') {
@@ -259,6 +325,11 @@ export default function Dashboard({
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false)
   const [pricingConfig, setPricingConfig] = useState<EnergyPricingConfig | null>(null)
   const [dynamicConsumerPriceKwh, setDynamicConsumerPriceKwh] = useState<number | null>(null)
+  const [showDynamicPriceChart, setShowDynamicPriceChart] = useState(false)
+  const [dynamicPricePoints, setDynamicPricePoints] = useState<DynamicPricePoint[]>([])
+  const [dynamicPriceUpdatedAt, setDynamicPriceUpdatedAt] = useState<string | null>(null)
+  const [dynamicPriceChartLoading, setDynamicPriceChartLoading] = useState(false)
+  const [dynamicPriceChartError, setDynamicPriceChartError] = useState<string | null>(null)
   // Sensor connection status: 'connecting' | 'connected' | 'error'
   const [_haConnectionStatus, setHaConnectionStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   const { isAuthenticated, getIdTokenClaims, getAccessTokenSilently, user } = useAuth0()
@@ -277,6 +348,7 @@ export default function Dashboard({
   }, [user?.email, user?.sub])
   const haEntitiesCacheKey = `ha_entities_cache_v4_${selectedEnvironment || 'default'}_${userCacheScope}`
   const dynamicPriceCacheKey = `energy_dynamic_price_${selectedEnvironment || 'default'}`
+  const dynamicPriceChartPreferenceKey = `energy_dynamic_chart_visible_${selectedEnvironment || 'default'}`
 
   useEffect(() => {
     const loadEnvironments = async () => {
@@ -479,6 +551,119 @@ export default function Dashboard({
       isMounted = false
     }
   }, [selectedEnvironment, isAuthenticated, getAuthToken])
+
+  useEffect(() => {
+    if (!selectedEnvironment || pricingConfig?.type !== 'dynamic') {
+      setShowDynamicPriceChart(false)
+      setDynamicPriceChartError(null)
+      return
+    }
+
+    try {
+      const stored = localStorage.getItem(dynamicPriceChartPreferenceKey)
+      if (!stored) {
+        setShowDynamicPriceChart(false)
+        return
+      }
+
+      const parsed = JSON.parse(stored)
+      setShowDynamicPriceChart(Boolean(parsed?.visible))
+    } catch {
+      setShowDynamicPriceChart(false)
+    }
+  }, [dynamicPriceChartPreferenceKey, pricingConfig?.type, selectedEnvironment])
+
+  useEffect(() => {
+    if (!selectedEnvironment) {
+      return
+    }
+
+    const handleDynamicChartVisibilityChange = (event: Event) => {
+      const detail = (event as CustomEvent<{ environmentId?: string; visible?: boolean }>)?.detail
+      if (!detail || detail.environmentId !== selectedEnvironment) {
+        return
+      }
+
+      const visible = Boolean(detail.visible)
+      setShowDynamicPriceChart(visible)
+      if (!visible) {
+        setDynamicPriceChartError(null)
+      }
+    }
+
+    window.addEventListener(DYNAMIC_PRICE_CHART_EVENT, handleDynamicChartVisibilityChange as EventListener)
+    return () => {
+      window.removeEventListener(DYNAMIC_PRICE_CHART_EVENT, handleDynamicChartVisibilityChange as EventListener)
+    }
+  }, [selectedEnvironment])
+
+  useEffect(() => {
+    if (!selectedEnvironment || !isAuthenticated || pricingConfig?.type !== 'dynamic' || !showDynamicPriceChart) {
+      setDynamicPriceChartLoading(false)
+      return
+    }
+
+    let isMounted = true
+
+    const fetchDynamicPriceChart = async () => {
+      if (isMounted) {
+        setDynamicPriceChartLoading(true)
+        setDynamicPriceChartError(null)
+      }
+
+      try {
+        const token = await getAuthToken()
+        const response = await fetch('/.netlify/functions/get-entsoe-prices?hoursAhead=120', {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+
+        if (!response.ok) {
+          const payload = await response.json().catch(() => null)
+          throw new Error(payload?.error || 'Unable to load dynamic price chart')
+        }
+
+        const data = await response.json()
+        const points = normalizeDynamicPricePoints(data)
+
+        if (!isMounted) {
+          return
+        }
+
+        if (points.length === 0) {
+          throw new Error('No dynamic price points available yet')
+        }
+
+        setDynamicPricePoints(points)
+        setDynamicPriceUpdatedAt(typeof data?.timestamp === 'string' ? data.timestamp : new Date().toISOString())
+      } catch (error) {
+        if (!isMounted) {
+          return
+        }
+
+        setDynamicPriceChartError(error instanceof Error ? error.message : 'Unable to load dynamic price chart')
+      } finally {
+        if (isMounted) {
+          setDynamicPriceChartLoading(false)
+        }
+      }
+    }
+
+    void fetchDynamicPriceChart()
+    const intervalId = window.setInterval(() => {
+      void fetchDynamicPriceChart()
+    }, 15 * 60 * 1000)
+
+    return () => {
+      isMounted = false
+      window.clearInterval(intervalId)
+    }
+  }, [
+    getAuthToken,
+    isAuthenticated,
+    pricingConfig?.type,
+    selectedEnvironment,
+    showDynamicPriceChart,
+  ])
 
   useEffect(() => {
     if (!selectedEnvironment || pricingConfig?.type !== 'dynamic') {
@@ -1752,6 +1937,35 @@ export default function Dashboard({
     })
   }, [bucketGasReadings, selectedRange.startMs, selectedRange.endMs, timeRange])
 
+  const dynamicPriceChartData = useMemo<DynamicPriceChartPoint[]>(() => {
+    return dynamicPricePoints.map((point) => {
+      const date = new Date(point.time)
+      const time = date.toLocaleString([], {
+        day: '2-digit',
+        month: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+      })
+      const fullTime = date.toLocaleString([], {
+        weekday: 'short',
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      })
+      const roundedPrice = Number(point.eurPerKwh.toFixed(4))
+
+      return {
+        time,
+        fullTime,
+        price: roundedPrice,
+        currentPrice: point.isForecast ? null : roundedPrice,
+        forecastPrice: point.isForecast ? roundedPrice : null,
+      }
+    })
+  }, [dynamicPricePoints])
+
   const gasSelectedPeriodTotal = useMemo(() => {
     return parseFloat(
       gasChartData.reduce((sum, item) => sum + Math.max(0, item.power), 0).toFixed(2),
@@ -2095,6 +2309,95 @@ export default function Dashboard({
               chartType="bar"
             />
           </div>
+
+          {/* Dynamic Price Chart */}
+          {pricingConfig?.type === 'dynamic' && showDynamicPriceChart && (
+            <div className="glass-panel rounded-3xl shadow-2xl p-4 sm:p-6 md:p-8">
+              <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <h2 className="text-2xl font-heavy text-dark-1 flex items-center gap-2">
+                  <DollarSign className="w-6 h-6 text-brand-2" />
+                  Dynamic Price Chart
+                </h2>
+                {dynamicPriceUpdatedAt && (
+                  <p className="text-xs text-light-1 opacity-80">
+                    Updated: {new Date(dynamicPriceUpdatedAt).toLocaleString()}
+                  </p>
+                )}
+              </div>
+
+              {dynamicPriceChartLoading && dynamicPriceChartData.length === 0 && (
+                <p className="text-light-1 text-sm mb-4">Loading dynamic price forecast...</p>
+              )}
+
+              {dynamicPriceChartError && (
+                <p className="text-red-300 text-sm mb-4">{dynamicPriceChartError}</p>
+              )}
+
+              {dynamicPriceChartData.length > 0 && (
+                <>
+                  <div className="h-72">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={dynamicPriceChartData} margin={{ top: 12, right: 16, left: 0, bottom: 8 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.12)" />
+                        <XAxis
+                          dataKey="time"
+                          tick={{ fill: 'rgba(255,255,255,0.75)', fontSize: 11 }}
+                          minTickGap={24}
+                        />
+                        <YAxis
+                          tick={{ fill: 'rgba(255,255,255,0.75)', fontSize: 11 }}
+                          tickFormatter={(value: number) => `EUR ${Number(value).toFixed(3)}`}
+                          width={84}
+                        />
+                        <Tooltip
+                          labelFormatter={(label, payload) => {
+                            const first = Array.isArray(payload) && payload.length > 0
+                              ? payload[0]
+                              : null
+                            return typeof first?.payload?.fullTime === 'string' ? first.payload.fullTime : String(label)
+                          }}
+                          formatter={(value: number | string) => {
+                            const numericValue = Number(value)
+                            return [`EUR ${numericValue.toFixed(4)} /kWh`, 'Price']
+                          }}
+                          contentStyle={{
+                            background: 'rgba(15, 23, 42, 0.95)',
+                            border: '1px solid rgba(255,255,255,0.15)',
+                            borderRadius: '0.75rem',
+                            color: '#f8fafc',
+                          }}
+                          itemStyle={{ color: '#f8fafc' }}
+                          labelStyle={{ color: '#f8fafc' }}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="currentPrice"
+                          stroke="#34d399"
+                          strokeWidth={2}
+                          dot={false}
+                          connectNulls
+                          name="Current"
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="forecastPrice"
+                          stroke="#f59e0b"
+                          strokeWidth={2}
+                          strokeDasharray="6 4"
+                          dot={false}
+                          connectNulls
+                          name="Forecast"
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <p className="text-xs text-light-1 opacity-75 mt-3">
+                    Dynamic ENTSOE prices shown for today and available forecast horizon.
+                  </p>
+                </>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Sensors Panel */}
