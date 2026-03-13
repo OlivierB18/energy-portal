@@ -2296,13 +2296,13 @@ export default function Dashboard({
             />
           </div>
 
-          {/* Dynamic Price Chart */}
+          {/* Price Chart */}
           {showDynamicPriceChart && (
             <div className="glass-panel rounded-3xl shadow-2xl p-4 sm:p-6 md:p-8">
               <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <h2 className="text-2xl font-heavy text-dark-1 flex items-center gap-2">
                   <DollarSign className="w-6 h-6 text-brand-2" />
-                  Dynamic Price Chart
+                  Price Chart
                 </h2>
                 <div className="text-right">
                   {dynamicPriceUpdatedAt && (

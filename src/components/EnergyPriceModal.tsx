@@ -531,7 +531,7 @@ export default function EnergyPriceModal({
               <div>
                 <p className="text-light-2 text-sm font-medium">Show chart on UI</p>
                 <p className="text-xs text-light-1 opacity-75">
-                  Fetches dynamic market prices in background only when enabled.
+                  Works for both fixed and dynamic pricing and fetches market prices only when enabled.
                 </p>
               </div>
             </label>
@@ -558,7 +558,7 @@ export default function EnergyPriceModal({
             <div className="bg-dark-2 bg-opacity-50 rounded-lg p-4">
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3">
                 <p className="text-light-2 text-sm font-medium">
-                  Dynamic Price Chart (Today + Forecast)
+                  Price Chart (Today + Forecast)
                 </p>
                 {entsoeUpdatedAt && (
                   <p className="text-xs text-light-1 opacity-80">
