@@ -116,7 +116,7 @@ export default function EnergyChart({
     if (timeRange === 'week') {
       return isMobile ? 28 : 44
     }
-    return isMobile ? 24 : 36
+    return isMobile ? 180 : 320
   }, [chartType, isMobile, timeRange])
 
   const displayData = useMemo(

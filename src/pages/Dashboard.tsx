@@ -1579,7 +1579,7 @@ export default function Dashboard({
   )
 
   const chartData = useMemo(() => {
-    const bucketMs = timeRange === 'today' ? 3_600_000 : 86_400_000
+    const bucketMs = timeRange === 'today' ? 300_000 : 86_400_000
     const aggregationMode = timeRange === 'today' ? 'peak' : 'average'
     const buckets = bucketPowerSamples(
       selectedRange.startMs,
