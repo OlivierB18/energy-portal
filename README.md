@@ -161,7 +161,7 @@ energy-portal/
 | Framework | Next.js 15 (App Router) | Full-stack in één project, snelle iteratie |
 | Taal | TypeScript | Type-veiligheid, betere onderhoudbaarheid |
 | Styling | Tailwind CSS | Snel, consistent, geen CSS-bestanden |
-| Database | SQLite (dev) / PostgreSQL (prod) | Eenvoudig lokaal, schaalbaar in productie |
+| Database | PostgreSQL (Neon / Supabase free tier) | Werkt zowel lokaal als op Netlify serverless |
 | ORM | Prisma 5 | Type-veilige queries, eenvoudige migraties |
 | Authenticatie | NextAuth.js v4 | Volledige controle, geen externe dienst nodig |
 | Wachtwoord-hashing | bcryptjs (factor 12) | Industriestandaard, beschermt bij een datalek |
@@ -169,7 +169,7 @@ energy-portal/
 
 ---
 
-## Aan de slag
+## Aan de slag (lokaal)
 
 ### 1. Afhankelijkheden installeren
 
@@ -183,10 +183,10 @@ npm install
 cp .env.example .env
 ```
 
-Vul `.env` in:
+Vul `.env` in met een PostgreSQL-verbinding (zie `.env.example` voor voorbeelden). Je kunt gratis gebruik maken van [Neon](https://neon.tech) of [Supabase](https://supabase.com) voor een cloud Postgres-database.
 
 ```env
-DATABASE_URL="file:./dev.db"
+DATABASE_URL="postgresql://user:password@host:5432/energy_portal?sslmode=require"
 NEXTAUTH_SECRET="<willekeurig geheim — genereer met: openssl rand -base64 32>"
 NEXTAUTH_URL="http://localhost:3000"
 ```
@@ -221,6 +221,70 @@ npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) — je wordt automatisch doorgestuurd naar de loginpagina.
+
+---
+
+## Deployen naar Netlify
+
+Het project is geconfigureerd voor Netlify via `netlify.toml`. De build-stap voert automatisch `prisma generate` uit en bouwt daarna de Next.js-applicatie. Netlify's **Essential Next.js Plugin** (`@netlify/plugin-nextjs`) zorgt ervoor dat server-side routes, API-routes en middleware correct werken op Netlify's serverless-infrastructuur.
+
+> ⚠️ **SQLite werkt niet op Netlify.** Het bestandssysteem van Netlify is tijdelijk en read-only bij serverless functions. Gebruik altijd een cloud PostgreSQL-database (zie stap 2 hieronder).
+
+### Stap-voor-stap
+
+#### 1. Maak een gratis PostgreSQL-database aan
+
+Gebruik een van de volgende gratis opties:
+
+- **[Neon](https://neon.tech)** — Serverless Postgres, gratis tier beschikbaar. Kopieer de connection string (formaat: `postgresql://...`).
+- **[Supabase](https://supabase.com)** — Open-source Firebase alternatief met gratis Postgres. Kopieer de "Connection string" uit de Database-instellingen.
+
+#### 2. Voer de eerste migratie uit
+
+Verbind tijdelijk met de productiedatabase via een `.env` bestand en voer uit:
+
+```bash
+DATABASE_URL="postgresql://..." npx prisma db push
+```
+
+#### 3. Verbind de GitHub-repository met Netlify
+
+1. Ga naar [app.netlify.com](https://app.netlify.com) → **Add new site** → **Import an existing project**.
+2. Kies **GitHub** en selecteer de `OlivierB18/energy-portal` repository.
+3. Netlify detecteert automatisch het `netlify.toml` bestand — de build-instellingen zijn al correct ingevuld.
+
+#### 4. Stel omgevingsvariabelen in
+
+Ga in Netlify naar **Site configuration → Environment variables** en voeg toe:
+
+| Variabele | Waarde |
+|---|---|
+| `DATABASE_URL` | Je PostgreSQL connection string |
+| `NEXTAUTH_SECRET` | Willekeurig geheim (`openssl rand -base64 32`) |
+| `NEXTAUTH_URL` | De Netlify-URL van je site, bijv. `https://jouw-site.netlify.app` |
+
+#### 5. Deploy
+
+Klik op **Deploy site**. Iedere push naar de `main`-branch triggert vanaf nu automatisch een nieuwe deploy.
+
+### Structuur van `netlify.toml`
+
+```toml
+[build]
+  command   = "npx prisma generate && npm run build"
+  publish   = ".next"
+
+[build.environment]
+  NODE_VERSION            = "20"
+  NEXT_TELEMETRY_DISABLED = "1"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
+```
+
+- **`command`** — Genereert eerst de Prisma-client (nodig voor de build), daarna de Next.js-productie-build.
+- **`publish`** — De `.next`-map bevat de build-output die Netlify serveert.
+- **`@netlify/plugin-nextjs`** — Zorgt voor juiste verwerking van App Router server components, API-routes en middleware.
 
 ---
 
