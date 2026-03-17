@@ -14,7 +14,7 @@ Een Energy Management Systeem (EMS) gebouwd met Next.js, Prisma en NextAuth.
 
 | Laag | Keuze |
 |------|-------|
-| Framework | Next.js 14 (App Router) |
+| Framework | Next.js 15 (App Router) |
 | Taal | TypeScript |
 | Styling | Tailwind CSS |
 | Database | SQLite (dev) / PostgreSQL (prod) |
