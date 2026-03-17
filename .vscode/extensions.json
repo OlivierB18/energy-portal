@@ -1,0 +1,17 @@
+{
+  "recommendations": [
+    // TypeScript & Next.js
+    "dbaeumer.vscode-eslint",
+    "esbenp.prettier-vscode",
+    // Tailwind CSS
+    "bradlc.vscode-tailwindcss",
+    // Prisma ORM
+    "Prisma.prisma",
+    // Git
+    "eamodio.gitlens",
+    // Environment variables
+    "mikestead.dotenv",
+    // Path intellisense for @ aliases
+    "christian-kohler.path-intellisense"
+  ]
+}

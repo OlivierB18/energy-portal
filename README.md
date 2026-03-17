@@ -288,6 +288,50 @@ Klik op **Deploy site**. Iedere push naar de `main`-branch triggert vanaf nu aut
 
 ---
 
+## VS Code instellen
+
+De repository bevat een `.vscode/`-map met kant-en-klare instellingen zodat VS Code direct correct samenwerkt met het project.
+
+### Aanbevolen extensies installeren
+
+Open VS Code in de projectmap:
+
+```bash
+code .
+```
+
+VS Code toont automatisch de melding **"Do you want to install the recommended extensions for this repository?"** — klik op **Install All**.
+
+Worden de aanbevelingen niet automatisch getoond? Open het Command Palette (`Ctrl+Shift+P` / `⌘+Shift+P`) en zoek naar **"Extensions: Show Recommended Extensions"**.
+
+De volgende extensies worden aanbevolen:
+
+| Extensie | Doel |
+|---|---|
+| ESLint | Lint-fouten direct in de editor |
+| Prettier | Automatisch formatteren bij opslaan |
+| Tailwind CSS IntelliSense | Auto-aanvulling voor Tailwind-classes |
+| Prisma | Syntax-highlighting en formatteren van `schema.prisma` |
+| GitLens | Uitgebreide Git-integratie |
+| DotENV | Syntax-highlighting voor `.env`-bestanden |
+| Path Intellisense | Auto-aanvulling voor `@/`-paden |
+
+### Automatisch formatteren
+
+`settings.json` stelt in dat bestanden bij elk opslaan automatisch worden geformatteerd en dat ESLint-fouten automatisch worden opgelost. Geen extra configuratie nodig.
+
+### Debuggen
+
+In de **Run & Debug**-tab (`Ctrl+Shift+D` / `⌘+Shift+D`) staan drie configuraties:
+
+| Configuratie | Wat doet het? |
+|---|---|
+| **Next.js: dev server** | Start `npm run dev` en opent de browser automatisch |
+| **Next.js: debug server-side** | Koppelt aan een al draaiende Node.js-instantie op poort 9229 |
+| **Next.js: debug full stack** | Start de dev-server én opent Chrome DevTools voor client + server |
+
+---
+
 ## Beveiliging
 
 - Alle `/dashboard/*`-routes zijn beveiligd via Next.js middleware (redirect naar `/login` zonder sessie).
