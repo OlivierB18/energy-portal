@@ -3,6 +3,11 @@ param()
 $ErrorActionPreference = 'Stop'
 
 function Get-DefaultBranch {
+  git show-ref --verify --quiet refs/remotes/origin/master
+  if ($LASTEXITCODE -eq 0) {
+    return 'master'
+  }
+
   $ref = git symbolic-ref refs/remotes/origin/HEAD 2>$null
   if ($LASTEXITCODE -eq 0 -and $ref) {
     return ($ref -replace '^refs/remotes/origin/', '').Trim()

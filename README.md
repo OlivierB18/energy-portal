@@ -59,6 +59,10 @@ The build output will be in the `dist` folder.
 
 Use this setup so your work is always backed up on GitHub and agent changes stay easy to merge.
 
+Current repository convention:
+- Canonical branch for this project is `master`.
+- Open Pull Requests into `master`.
+
 1. Sync your local repo with the default branch before starting:
 ```bash
 npm run git:sync
