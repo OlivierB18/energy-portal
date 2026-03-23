@@ -532,6 +532,95 @@ const normalizeHaMetricsSnapshot = (input: unknown): HaMetricsSnapshot | null =>
   }
 }
 
+interface DetectedEnergyEntities {
+  electricityTotalEntityIds: string[]
+  electricityProductionTotalEntityIds: string[]
+  gasTotalEntityId: string | null
+  powerConsumptionEntityId: string | null
+  powerProductionEntityId: string | null
+}
+
+const PRODUCTION_KEYWORDS = [
+  'production', 'solar', 'pv', 'export', 'injection',
+  'teruglever', 'opwek', 'opgewekt', 'yield', 'returned', 'teruggeleverd',
+]
+
+function detectEnergyEntities(entities: HaEntity[]): DetectedEnergyEntities {
+  const sensors = entities.filter((e) => e.domain === 'sensor')
+
+  const hasProductionKeyword = (e: HaEntity) => {
+    const id = e.entity_id.toLowerCase()
+    const name = (e.friendly_name ?? '').toLowerCase()
+    return PRODUCTION_KEYWORDS.some((kw) => id.includes(kw) || name.includes(kw))
+  }
+
+  const hasGasKeyword = (e: HaEntity) => {
+    const id = e.entity_id.toLowerCase()
+    const name = (e.friendly_name ?? '').toLowerCase()
+    return id.includes('gas') || name.includes('gas')
+  }
+
+  const isTotalClass = (e: HaEntity) =>
+    e.state_class === 'total_increasing' || e.state_class === 'total'
+
+  const isEnergyUnit = (e: HaEntity) => {
+    const unit = (e.unit_of_measurement ?? '').toLowerCase()
+    return unit === 'kwh' || unit === 'wh' || unit === 'mwh'
+  }
+
+  const isGasUnit = (e: HaEntity) => {
+    const unit = (e.unit_of_measurement ?? '').toLowerCase()
+    return unit === 'm³' || unit === 'm3' || unit === 'ft³'
+  }
+
+  const isPowerUnit = (e: HaEntity) => {
+    const unit = (e.unit_of_measurement ?? '').toLowerCase()
+    return unit === 'w' || unit === 'kw' || unit === 'va' || unit === 'kva'
+  }
+
+  // Electricity consumption totals (for Electricity usage bar chart)
+  const electricityTotalEntityIds = sensors
+    .filter((e) => {
+      const isEnergy = e.device_class === 'energy' || isEnergyUnit(e)
+      return isEnergy && isTotalClass(e) && !hasProductionKeyword(e) && !hasGasKeyword(e)
+    })
+    .map((e) => e.entity_id)
+
+  // Electricity production totals
+  const electricityProductionTotalEntityIds = sensors
+    .filter((e) => {
+      const isEnergy = e.device_class === 'energy' || isEnergyUnit(e)
+      return isEnergy && isTotalClass(e) && hasProductionKeyword(e)
+    })
+    .map((e) => e.entity_id)
+
+  // Gas total meter
+  const gasEntity = sensors.find((e) => {
+    const isGas = e.device_class === 'gas' || isGasUnit(e)
+    return isGas && isTotalClass(e)
+  })
+
+  // Power consumption entity (for Power sources chart — instantaneous, not total)
+  const powerConsumptionEntity = sensors.find((e) => {
+    const isPower = e.device_class === 'power' || isPowerUnit(e)
+    return isPower && !isTotalClass(e) && !hasProductionKeyword(e)
+  })
+
+  // Power production entity (for Power sources chart)
+  const powerProductionEntity = sensors.find((e) => {
+    const isPower = e.device_class === 'power' || isPowerUnit(e)
+    return isPower && !isTotalClass(e) && hasProductionKeyword(e)
+  })
+
+  return {
+    electricityTotalEntityIds,
+    electricityProductionTotalEntityIds,
+    gasTotalEntityId: gasEntity?.entity_id ?? null,
+    powerConsumptionEntityId: powerConsumptionEntity?.entity_id ?? null,
+    powerProductionEntityId: powerProductionEntity?.entity_id ?? null,
+  }
+}
+
 export default function Dashboard({
   isAdmin,
   selectedEnvironmentId,
@@ -2444,16 +2533,10 @@ export default function Dashboard({
         sources?.electricityTotalEntityId,
       ].filter((id): id is string => typeof id === 'string' && id.length > 0)))
 
-      // If no configured entities, search haEntities for energy consumption meters
+      // If no configured entities, auto-detect using HA's own classification (device_class/state_class/unit)
       if (entityIds.length === 0) {
-        const currentEntities = haEntitiesRef.current
-        const candidates = currentEntities.filter((e) => {
-          const id = e.entity_id.toLowerCase()
-          return id.startsWith('sensor.') &&
-            (id.includes('energy_consumption') || id.includes('energy_meter') || id.includes('kwh')) &&
-            !id.includes('gas') && !id.includes('price') && !id.includes('cost')
-        }).slice(0, 4)
-        entityIds.push(...candidates.map((e) => e.entity_id))
+        const detected = detectEnergyEntities(haEntitiesRef.current)
+        entityIds.push(...detected.electricityTotalEntityIds)
       }
 
       if (entityIds.length === 0) {
@@ -2638,7 +2721,16 @@ export default function Dashboard({
           ? currentHaEntities.find((entity) => entity.entity_id === preferredProductionEntityId)
           : null
 
-        const powerEntity = preferredPowerEntity || currentHaEntities.find(
+        // Auto-detect entities using HA's own classification as reliable fallback
+        const detectedEntities = detectEnergyEntities(currentHaEntities)
+        const detectedPowerEntity = detectedEntities.powerConsumptionEntityId
+          ? currentHaEntities.find((e) => e.entity_id === detectedEntities.powerConsumptionEntityId)
+          : undefined
+        const detectedProductionEntity = detectedEntities.powerProductionEntityId
+          ? currentHaEntities.find((e) => e.entity_id === detectedEntities.powerProductionEntityId)
+          : undefined
+
+        const powerEntity = preferredPowerEntity || detectedPowerEntity || currentHaEntities.find(
             (e) => {
               const id = e.entity_id.toLowerCase()
               // Prioritize electricity meter, exclude binary sensors
@@ -2659,7 +2751,7 @@ export default function Dashboard({
             }
           )
 
-        const productionEntity = preferredProductionEntity || currentHaEntities.find(
+        const productionEntity = preferredProductionEntity || detectedProductionEntity || currentHaEntities.find(
           (e) => {
             const id = e.entity_id.toLowerCase()
             return !id.startsWith('binary_sensor') && id.startsWith('sensor.') && (
@@ -3565,6 +3657,15 @@ export default function Dashboard({
     )
   }, [gasChartData])
 
+  const electricityUsageTotal = useMemo(() => {
+    return parseFloat(
+      electricityUsageBuckets
+        .filter((b) => b.timestamp >= electricityRange.startMs && b.timestamp <= electricityRange.endMs)
+        .reduce((sum, b) => sum + b.kwh, 0)
+        .toFixed(2),
+    )
+  }, [electricityUsageBuckets, electricityRange.startMs, electricityRange.endMs])
+
   // Gas card values: use local meter readings to compute daily/monthly totals
   const gasTodayCardValue = useMemo(() => {
     if (haMetricsSnapshot?.dailyGasM3 !== null && haMetricsSnapshot?.dailyGasM3 !== undefined) {
@@ -3717,10 +3818,15 @@ export default function Dashboard({
     const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
     if (timeRange === 'today' && selectedStartDate === todayKey && selectedEndDate === todayKey) {
       addDriftIssue('Gas chart day total', gasSelectedPeriodTotal, haMetricsSnapshot.dailyGasM3, 'm3', 0.05)
+      addDriftIssue('Electricity usage chart day total', electricityUsageTotal, haMetricsSnapshot.dailyElectricityKwh, 'kWh', 0.5)
+    }
+    if (timeRange === 'month') {
+      addDriftIssue('Electricity usage chart month total', electricityUsageTotal, haMetricsSnapshot.monthlyElectricityKwh, 'kWh', 1.0)
     }
 
     return issues
   }, [
+    electricityUsageTotal,
     gasMonthCardValue,
     gasSelectedPeriodTotal,
     gasTodayCardValue,
@@ -4088,19 +4194,26 @@ export default function Dashboard({
 
           {/* Electricity Usage Chart (kWh per hour/day from statistics) */}
           <div className="glass-panel rounded-3xl shadow-2xl p-4 sm:p-6 md:p-8">
-            <h2 className="text-2xl font-heavy text-dark-1 mb-6 flex items-center gap-2">
-              <Clock className="w-6 h-6 text-brand-2" />
-              Electricity usage
-              {isLoadingUsage && (
-                <span className="ml-3 inline-flex items-center gap-1.5 text-sm font-normal text-brand-2 opacity-75">
-                  <svg className="animate-spin w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
-                  </svg>
-                  Laden…
+            <div className="mb-6 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <h2 className="text-2xl font-heavy text-dark-1 flex items-center gap-2">
+                <Clock className="w-6 h-6 text-brand-2" />
+                Electricity usage
+                {isLoadingUsage && (
+                  <span className="ml-3 inline-flex items-center gap-1.5 text-sm font-normal text-brand-2 opacity-75">
+                    <svg className="animate-spin w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+                    </svg>
+                    Laden…
+                  </span>
+                )}
+              </h2>
+              {!isLoadingUsage && electricityUsageTotal > 0 && (
+                <span className="inline-flex items-center rounded-full bg-brand-2/15 px-3 py-1 text-sm font-semibold text-brand-2">
+                  +{electricityUsageTotal.toFixed(2)} kWh
                 </span>
               )}
-            </h2>
+            </div>
             <EnergyChart
               data={electricityUsageChartData}
               timeRange={timeRange}
@@ -4113,11 +4226,16 @@ export default function Dashboard({
 
           {/* Gas Chart */}
           <div className="glass-panel rounded-3xl shadow-2xl p-4 sm:p-6 md:p-8">
-            <div className="mb-6 flex flex-col gap-4">
+            <div className="mb-6 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <h2 className="text-2xl font-heavy text-dark-1 flex items-center gap-2">
                 <Flame className="w-6 h-6 text-brand-2" />
                 Gas consumption
               </h2>
+              {gasSelectedPeriodTotal > 0 && (
+                <span className="inline-flex items-center rounded-full bg-orange-500/15 px-3 py-1 text-sm font-semibold text-orange-400">
+                  {gasSelectedPeriodTotal.toFixed(2)} m³
+                </span>
+              )}
             </div>
             <EnergyChart
               data={gasChartData}
