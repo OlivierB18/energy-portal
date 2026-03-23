@@ -55,6 +55,40 @@ npm run build
 
 The build output will be in the `dist` folder.
 
+## Recommended Workflow (Local + GitHub Agents)
+
+Use this setup so your work is always backed up on GitHub and agent changes stay easy to merge.
+
+1. Sync your local repo with the default branch before starting:
+```bash
+npm run git:sync
+```
+
+2. Start a feature branch for your work:
+```bash
+npm run git:start -- feature/short-description
+```
+
+3. Commit and push small changes frequently:
+```bash
+git add -A
+git commit -m "feat: short description"
+git push -u origin feature/short-description
+```
+
+4. Let GitHub agents work in separate branches and open Pull Requests.
+
+5. Merge via Pull Request, then sync local again:
+```bash
+npm run git:sync
+```
+
+Rules of thumb:
+- Keep your own work and agent work on different branches.
+- Do not work directly on `master`.
+- Merge everything through Pull Requests.
+- Never commit `.env` files.
+
 ## Project Structure
 
 ```
