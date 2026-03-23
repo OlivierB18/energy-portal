@@ -1,4 +1,5 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose'
+import { getMergedPricingMap, resolvePricingConfig } from './_pricing-storage.js'
 
 const getEnv = (key) => {
   const value = process.env[key]
@@ -79,23 +80,6 @@ const verifyAuth = async (event) => {
   await jwtVerify(token, jwks, { issuer: `https://${domain}/` })
 }
 
-const parsePricingMap = (input) => {
-  if (!input) {
-    return {}
-  }
-
-  if (typeof input === 'string') {
-    try {
-      const parsed = JSON.parse(input)
-      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
-    } catch {
-      return {}
-    }
-  }
-
-  return input && typeof input === 'object' && !Array.isArray(input) ? input : {}
-}
-
 const normalizePricingConfig = (input) => {
   if (!input || typeof input !== 'object') {
     return null
@@ -113,6 +97,9 @@ const normalizePricingConfig = (input) => {
     producerPrice: parseNumber(input.producerPrice, 0.10),
     consumerMargin: parseNumber(input.consumerMargin, 0.05),
     producerMargin: parseNumber(input.producerMargin, 0.02),
+    gasPrice: parseNumber(input.gasPrice, 1.35),
+    gasMargin: parseNumber(input.gasMargin, 0),
+    gasProxyKwhPerM3: parseNumber(input.gasProxyKwhPerM3, 10.55),
     updatedAt: String(input.updatedAt || input.updated_at || ''),
   }
 }
@@ -130,18 +117,38 @@ export const handler = async (event) => {
 
     await verifyAuth(event)
 
-    const domain = getEnv('AUTH0_DOMAIN')
-    const managementToken = await getManagementToken(domain)
-    const metadata = await getClientMetadata(domain, managementToken)
+    let merged = await getMergedPricingMap({
+      event,
+      metadata: {},
+    })
 
-    const pricingMap = parsePricingMap(metadata.energy_pricing)
-    const config = normalizePricingConfig(pricingMap[environmentId])
+    // If blob is empty, fall back to legacy metadata and migrate on read.
+    if (Object.keys(merged.pricingMap).length === 0) {
+      try {
+        const domain = getEnv('AUTH0_DOMAIN')
+        const managementToken = await getManagementToken(domain)
+        const metadata = await getClientMetadata(domain, managementToken)
+        merged = await getMergedPricingMap({
+          event,
+          metadata,
+        })
+      } catch (metadataError) {
+        console.warn('[GET-ENERGY-PRICING] Metadata fallback unavailable:', metadataError instanceof Error ? metadataError.message : metadataError)
+      }
+    }
+
+    const resolvedConfig = resolvePricingConfig({
+      pricingMap: merged.pricingMap,
+      environmentId,
+    })
+    const config = normalizePricingConfig(resolvedConfig)
 
     return {
       statusCode: 200,
       body: JSON.stringify({
         environmentId,
         config,
+        source: merged.source,
       }),
     }
   } catch (error) {

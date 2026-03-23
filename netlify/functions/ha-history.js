@@ -1,9 +1,16 @@
+import { resolveEnvironmentConfig } from './_environment-storage.js'
+
 const getEnv = (key) => {
   const value = process.env[key]
   if (!value) {
     throw new Error(`Missing ${key}`)
   }
   return value
+}
+
+const getOptionalEnv = (key) => {
+  const value = process.env[key]
+  return value && value.trim().length > 0 ? value : null
 }
 
 const HA_ENVIRONMENTS = {
@@ -92,16 +99,101 @@ const getCachedClientMetadata = async (domain, token) => {
 }
 
 const normalizeValue = (value) => (value ? String(value).trim() : '')
+const ENV_METADATA_PREFIX = 'ha_env_v1_'
+
+const parseEnvironmentMap = (input) => {
+  if (!input) {
+    return {}
+  }
+
+  if (typeof input === 'string') {
+    try {
+      const parsed = JSON.parse(input)
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+
+  return input && typeof input === 'object' && !Array.isArray(input) ? input : {}
+}
+
+const parseHaConfig = (input) => {
+  if (!input) {
+    return {}
+  }
+
+  if (typeof input === 'string') {
+    try {
+      const parsed = JSON.parse(input)
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+
+  return input && typeof input === 'object' && !Array.isArray(input) ? input : {}
+}
+
+const decodeEnvironmentId = (encodedId) => {
+  try {
+    return Buffer.from(String(encodedId || ''), 'base64url').toString('utf8').trim()
+  } catch {
+    return ''
+  }
+}
+
+const parseShardedEnvironmentMap = (metadata = {}) => {
+  const entries = Object.keys(metadata || {}).filter(
+    (key) => key.startsWith(ENV_METADATA_PREFIX) && key.endsWith('_url'),
+  )
+
+  return entries.reduce((acc, urlKey) => {
+    const encodedId = urlKey.slice(ENV_METADATA_PREFIX.length, -'_url'.length)
+    const environmentId = decodeEnvironmentId(encodedId)
+    if (!environmentId) {
+      return acc
+    }
+
+    const baseUrl = normalizeValue(metadata[urlKey])
+    const apiKey = normalizeValue(metadata[`${ENV_METADATA_PREFIX}${encodedId}_token`])
+    if (!baseUrl || !apiKey) {
+      return acc
+    }
+
+    acc[environmentId] = {
+      name: normalizeValue(metadata[`${ENV_METADATA_PREFIX}${encodedId}_name`]) || environmentId,
+      type: normalizeValue(metadata[`${ENV_METADATA_PREFIX}${encodedId}_type`]) || 'home_assistant',
+      config: {
+        base_url: baseUrl,
+        api_key: apiKey,
+        site_id: normalizeValue(metadata[`${ENV_METADATA_PREFIX}${encodedId}_site_id`]),
+        notes: normalizeValue(metadata[`${ENV_METADATA_PREFIX}${encodedId}_notes`]),
+      },
+    }
+    return acc
+  }, {})
+}
+
+const getStoredEnvironmentMap = (metadata = {}) => {
+  const haConfig = parseHaConfig(metadata.ha_config)
+
+  return {
+    ...parseEnvironmentMap(metadata.environments),
+    ...parseEnvironmentMap(metadata.ha_environments),
+    ...parseEnvironmentMap(haConfig.__environments),
+    ...parseShardedEnvironmentMap(metadata),
+  }
+}
 
 const getHaConfig = (metadata, environmentId) => {
   const requestedId = normalizeValue(environmentId)
   const lowerRequested = requestedId.toLowerCase()
 
-  const envMap = metadata?.environments || {}
-  const environmentEntry = Object.entries(envMap).find(([id, env]) => (
+  const envMap = getStoredEnvironmentMap(metadata)
+  const environmentEntry = Object.entries(envMap).find(([id]) => (
     id === requestedId ||
-    id.toLowerCase() === lowerRequested ||
-    String(env?.name || '').toLowerCase() === lowerRequested
+    id.toLowerCase() === lowerRequested
   ))
 
   if (environmentEntry) {
@@ -114,11 +206,10 @@ const getHaConfig = (metadata, environmentId) => {
     }
   }
 
-  const legacyMap = metadata?.ha_environments || {}
-  const legacyEntry = Object.entries(legacyMap).find(([id, env]) => (
+  const legacyMap = parseEnvironmentMap(metadata?.ha_environments)
+  const legacyEntry = Object.entries(legacyMap).find(([id]) => (
     id === requestedId ||
-    id.toLowerCase() === lowerRequested ||
-    String(env?.name || '').toLowerCase() === lowerRequested
+    id.toLowerCase() === lowerRequested
   ))
 
   if (legacyEntry) {
@@ -304,7 +395,12 @@ export const handler = async (event) => {
         console.warn('[HA History] Metadata unavailable, using fallback env vars:', metadataError?.message || metadataError)
       }
 
-      haConfig = getHaConfig(metadata, environmentId)
+      haConfig = await resolveEnvironmentConfig({
+        event,
+        metadata,
+        environmentId,
+        getOptionalEnv,
+      })
       console.log('[HA History] Got HA config, URL host:', new URL(haConfig.baseUrl).hostname)
     } catch (err) {
       console.error('[HA History] Failed to get HA config:', err.message || err)
@@ -406,8 +502,10 @@ export const handler = async (event) => {
     if (endTime) {
       historyUrl.searchParams.append('end_time', endTime)
     }
-
-    console.log('[HA History] Fetching from:', historyUrl.toString())
+    // Return all state changes (not just "significant" ones) so the power chart is complete
+    historyUrl.searchParams.append('significant_changes_only', 'false')
+    // Skip attributes to reduce payload size
+    historyUrl.searchParams.append('no_attributes', 'true')
     console.log('[HA History] Entity IDs:', entityIdsList)
 
     let historyResponse

@@ -3,10 +3,17 @@
  * Each hour: current_meter_value - previous_hour_meter_value = consumption
  */
 
+import { resolveEnvironmentConfig } from './_environment-storage.js'
+
 const getEnv = (key) => {
   const value = process.env[key]
   if (!value) throw new Error(`Missing ${key}`)
   return value
+}
+
+const getOptionalEnv = (key) => {
+  const value = process.env[key]
+  return value && value.trim().length > 0 ? value : null
 }
 
 const managementTokenCache = { token: null, expiresAt: 0 }
@@ -88,16 +95,101 @@ const HA_ENVIRONMENTS = {
 }
 
 const normalizeValue = (value) => (value ? String(value).trim() : '')
+const ENV_METADATA_PREFIX = 'ha_env_v1_'
+
+const parseEnvironmentMap = (input) => {
+  if (!input) {
+    return {}
+  }
+
+  if (typeof input === 'string') {
+    try {
+      const parsed = JSON.parse(input)
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+
+  return input && typeof input === 'object' && !Array.isArray(input) ? input : {}
+}
+
+const parseHaConfig = (input) => {
+  if (!input) {
+    return {}
+  }
+
+  if (typeof input === 'string') {
+    try {
+      const parsed = JSON.parse(input)
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+
+  return input && typeof input === 'object' && !Array.isArray(input) ? input : {}
+}
+
+const decodeEnvironmentId = (encodedId) => {
+  try {
+    return Buffer.from(String(encodedId || ''), 'base64url').toString('utf8').trim()
+  } catch {
+    return ''
+  }
+}
+
+const parseShardedEnvironmentMap = (metadata = {}) => {
+  const entries = Object.keys(metadata || {}).filter(
+    (key) => key.startsWith(ENV_METADATA_PREFIX) && key.endsWith('_url'),
+  )
+
+  return entries.reduce((acc, urlKey) => {
+    const encodedId = urlKey.slice(ENV_METADATA_PREFIX.length, -'_url'.length)
+    const environmentId = decodeEnvironmentId(encodedId)
+    if (!environmentId) {
+      return acc
+    }
+
+    const baseUrl = normalizeValue(metadata[urlKey])
+    const apiKey = normalizeValue(metadata[`${ENV_METADATA_PREFIX}${encodedId}_token`])
+    if (!baseUrl || !apiKey) {
+      return acc
+    }
+
+    acc[environmentId] = {
+      name: normalizeValue(metadata[`${ENV_METADATA_PREFIX}${encodedId}_name`]) || environmentId,
+      type: normalizeValue(metadata[`${ENV_METADATA_PREFIX}${encodedId}_type`]) || 'home_assistant',
+      config: {
+        base_url: baseUrl,
+        api_key: apiKey,
+        site_id: normalizeValue(metadata[`${ENV_METADATA_PREFIX}${encodedId}_site_id`]),
+        notes: normalizeValue(metadata[`${ENV_METADATA_PREFIX}${encodedId}_notes`]),
+      },
+    }
+    return acc
+  }, {})
+}
+
+const getStoredEnvironmentMap = (metadata = {}) => {
+  const haConfig = parseHaConfig(metadata.ha_config)
+
+  return {
+    ...parseEnvironmentMap(metadata.environments),
+    ...parseEnvironmentMap(metadata.ha_environments),
+    ...parseEnvironmentMap(haConfig.__environments),
+    ...parseShardedEnvironmentMap(metadata),
+  }
+}
 
 const resolveHaConfigFromMetadata = (metadata, environmentId) => {
   const requestedId = normalizeValue(environmentId)
   const lowerRequested = requestedId.toLowerCase()
 
-  const envMap = metadata?.environments || {}
-  const environmentEntry = Object.entries(envMap).find(([id, env]) => (
+  const envMap = getStoredEnvironmentMap(metadata)
+  const environmentEntry = Object.entries(envMap).find(([id]) => (
     id === requestedId ||
-    id.toLowerCase() === lowerRequested ||
-    String(env?.name || '').toLowerCase() === lowerRequested
+    id.toLowerCase() === lowerRequested
   ))
 
   if (environmentEntry) {
@@ -110,11 +202,10 @@ const resolveHaConfigFromMetadata = (metadata, environmentId) => {
     }
   }
 
-  const legacyMap = metadata?.ha_environments || {}
-  const legacyEntry = Object.entries(legacyMap).find(([id, env]) => (
+  const legacyMap = parseEnvironmentMap(metadata?.ha_environments)
+  const legacyEntry = Object.entries(legacyMap).find(([id]) => (
     id === requestedId ||
-    id.toLowerCase() === lowerRequested ||
-    String(env?.name || '').toLowerCase() === lowerRequested
+    id.toLowerCase() === lowerRequested
   ))
 
   if (legacyEntry) {
@@ -129,7 +220,7 @@ const resolveHaConfigFromMetadata = (metadata, environmentId) => {
   return null
 }
 
-const getHaConfig = async (environmentId) => {
+const getHaConfig = async (event, environmentId) => {
   const domain = getEnv('AUTH0_DOMAIN')
   let metadata = {}
 
@@ -140,19 +231,12 @@ const getHaConfig = async (environmentId) => {
     console.warn('[Gas Hourly] Metadata unavailable, using fallback env vars:', error instanceof Error ? error.message : error)
   }
 
-  const fromMetadata = resolveHaConfigFromMetadata(metadata, environmentId)
-  if (fromMetadata) {
-    return fromMetadata
-  }
-
-  let fallback = HA_ENVIRONMENTS[environmentId]
-  if (!fallback) {
-    const key = Object.keys(HA_ENVIRONMENTS).find((k) => k.toLowerCase() === String(environmentId).toLowerCase())
-    if (key) fallback = HA_ENVIRONMENTS[key]
-  }
-  if (!fallback) throw new Error(`Unknown environment: ${environmentId}`)
-
-  return { baseUrl: getEnv(fallback.urlEnv), token: getEnv(fallback.tokenEnv) }
+  return resolveEnvironmentConfig({
+    event,
+    metadata,
+    environmentId,
+    getOptionalEnv,
+  })
 }
 
 const parseNumericState = (rawValue) => {
@@ -184,7 +268,7 @@ export const handler = async (event) => {
     const entityId = event.queryStringParameters?.entityId || 'sensor.gas_meter_gas_consumption'
     const hoursBack = parseInt(event.queryStringParameters?.hoursBack || '200', 10) // ~8 days back to March 3
 
-    const { baseUrl, token } = await getHaConfig(environmentId)
+    const { baseUrl, token } = await getHaConfig(event, environmentId)
 
     // Calculate time range: from N hours ago to now
     const now = new Date()

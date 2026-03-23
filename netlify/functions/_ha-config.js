@@ -1,4 +1,5 @@
 const normalizeText = (value) => (typeof value === 'string' ? value.trim() : '')
+const ENV_METADATA_PREFIX = 'ha_env_v1_'
 
 const parseEnvironmentMap = (rawValue) => {
   if (!rawValue) {
@@ -8,13 +9,89 @@ const parseEnvironmentMap = (rawValue) => {
   if (typeof rawValue === 'string') {
     try {
       const parsed = JSON.parse(rawValue)
-      return parsed && typeof parsed === 'object' ? parsed : {}
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
     } catch {
       return {}
     }
   }
 
-  return rawValue && typeof rawValue === 'object' ? rawValue : {}
+  return rawValue && typeof rawValue === 'object' && !Array.isArray(rawValue) ? rawValue : {}
+}
+
+const parseHaConfig = (rawValue) => {
+  if (!rawValue) {
+    return {}
+  }
+
+  if (typeof rawValue === 'string') {
+    try {
+      const parsed = JSON.parse(rawValue)
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+
+  return rawValue && typeof rawValue === 'object' && !Array.isArray(rawValue) ? rawValue : {}
+}
+
+const decodeEnvironmentId = (encodedId) => {
+  try {
+    const decoded = Buffer.from(String(encodedId || ''), 'base64url').toString('utf8')
+    return normalizeText(decoded)
+  } catch {
+    return ''
+  }
+}
+
+const parseShardedEnvironmentMap = (metadata = {}) => {
+  const entries = Object.keys(metadata || {}).filter(
+    (key) => key.startsWith(ENV_METADATA_PREFIX) && key.endsWith('_url'),
+  )
+
+  return entries.reduce((acc, urlKey) => {
+    const encodedId = urlKey.slice(ENV_METADATA_PREFIX.length, -'_url'.length)
+    const environmentId = decodeEnvironmentId(encodedId)
+    if (!environmentId) {
+      return acc
+    }
+
+    const tokenKey = `${ENV_METADATA_PREFIX}${encodedId}_token`
+    const nameKey = `${ENV_METADATA_PREFIX}${encodedId}_name`
+    const typeKey = `${ENV_METADATA_PREFIX}${encodedId}_type`
+    const siteIdKey = `${ENV_METADATA_PREFIX}${encodedId}_site_id`
+    const notesKey = `${ENV_METADATA_PREFIX}${encodedId}_notes`
+
+    const baseUrl = normalizeText(metadata[urlKey])
+    const apiKey = normalizeText(metadata[tokenKey])
+    if (!baseUrl || !apiKey) {
+      return acc
+    }
+
+    acc[environmentId] = {
+      name: normalizeText(metadata[nameKey]) || environmentId,
+      type: normalizeText(metadata[typeKey]) || 'home_assistant',
+      config: {
+        base_url: baseUrl,
+        api_key: apiKey,
+        site_id: normalizeText(metadata[siteIdKey]),
+        notes: normalizeText(metadata[notesKey]),
+      },
+    }
+
+    return acc
+  }, {})
+}
+
+const getStoredEnvironmentMap = (metadata = {}) => {
+  const haConfig = parseHaConfig(metadata.ha_config)
+
+  return {
+    ...parseEnvironmentMap(metadata.environments),
+    ...parseEnvironmentMap(metadata.ha_environments),
+    ...parseEnvironmentMap(haConfig.__environments),
+    ...parseShardedEnvironmentMap(metadata),
+  }
 }
 
 const normalizePricing = (value) => {
@@ -102,7 +179,7 @@ const mapEnvironmentConfig = (env = {}) => {
 }
 
 export const mapMetadataEnvironments = (metadata = {}) => {
-  const envMap = parseEnvironmentMap(metadata.environments)
+  const envMap = getStoredEnvironmentMap(metadata)
   return Object.entries(envMap)
     .map(([id, env]) => ({
       id: normalizeText(id),
@@ -114,7 +191,7 @@ export const mapMetadataEnvironments = (metadata = {}) => {
 }
 
 export const mapLegacyHaEnvironments = (metadata = {}) => {
-  const legacyMap = metadata.ha_environments || {}
+  const legacyMap = parseEnvironmentMap(metadata.ha_environments)
   return Object.entries(legacyMap)
     .map(([id, env]) => ({
       id: normalizeText(id),
@@ -131,21 +208,50 @@ export const mapLegacyHaEnvironments = (metadata = {}) => {
 }
 
 export const mergeEnvironments = (...environmentLists) => {
-  const merged = []
-  const seen = new Set()
+  const mergedById = new Map()
 
   for (const list of environmentLists) {
     for (const env of list || []) {
-      if (!env || !env.id || seen.has(env.id)) {
+      if (!env || !env.id) {
         continue
       }
 
-      seen.add(env.id)
-      merged.push(env)
+      const current = mergedById.get(env.id)
+      if (!current) {
+        mergedById.set(env.id, {
+          ...env,
+          config: {
+            baseUrl: normalizeText(env.config?.baseUrl),
+            apiKey: normalizeText(env.config?.apiKey),
+            siteId: normalizeText(env.config?.siteId),
+            notes: normalizeText(env.config?.notes),
+            ...(env.config?.pricing ? { pricing: env.config.pricing } : {}),
+          },
+        })
+        continue
+      }
+
+      const nextConfig = {
+        baseUrl: normalizeText(current.config?.baseUrl) || normalizeText(env.config?.baseUrl),
+        apiKey: normalizeText(current.config?.apiKey) || normalizeText(env.config?.apiKey),
+        siteId: normalizeText(current.config?.siteId) || normalizeText(env.config?.siteId),
+        notes: normalizeText(current.config?.notes) || normalizeText(env.config?.notes),
+      }
+
+      if (current.config?.pricing || env.config?.pricing) {
+        nextConfig.pricing = current.config?.pricing || env.config?.pricing
+      }
+
+      mergedById.set(env.id, {
+        ...current,
+        name: current.name || env.name,
+        type: current.type || env.type,
+        config: nextConfig,
+      })
     }
   }
 
-  return merged
+  return Array.from(mergedById.values())
 }
 
 const findEnvironmentMatch = (environments, environmentId) => {
@@ -158,7 +264,6 @@ const findEnvironmentMatch = (environments, environmentId) => {
 
   return environments.find((env) => env.id === rawId)
     || environments.find((env) => env.id.toLowerCase() === lower)
-    || environments.find((env) => (env.name || '').toLowerCase() === lower)
 }
 
 export const resolveHaConfig = ({ metadata = {}, environmentId, getOptionalEnv }) => {

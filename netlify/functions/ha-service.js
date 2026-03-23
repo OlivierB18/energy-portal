@@ -1,4 +1,5 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose'
+import { resolveEnvironmentConfig } from './_environment-storage.js'
 
 const getEnv = (key) => {
   const value = process.env[key]
@@ -8,12 +9,19 @@ const getEnv = (key) => {
   return value
 }
 
+const getOptionalEnv = (key) => {
+  const value = process.env[key]
+  return value && value.trim().length > 0 ? value : null
+}
+
 const HA_ENVIRONMENTS = {
   vacation: {
     urlEnv: 'HA_BROUWER_TEST_URL',
     tokenEnv: 'HA_BROUWER_TEST_TOKEN',
   },
 }
+
+const ENV_METADATA_PREFIX = 'ha_env_v1_'
 
 const ALLOWED_ACTIONS = {
   switch: ['turn_on', 'turn_off', 'toggle'],
@@ -32,17 +40,85 @@ const parseEnvironmentMap = (rawValue) => {
   if (typeof rawValue === 'string') {
     try {
       const parsed = JSON.parse(rawValue)
-      return parsed && typeof parsed === 'object' ? parsed : {}
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
     } catch {
       return {}
     }
   }
 
-  return rawValue && typeof rawValue === 'object' ? rawValue : {}
+  return rawValue && typeof rawValue === 'object' && !Array.isArray(rawValue) ? rawValue : {}
+}
+
+const parseHaConfig = (rawValue) => {
+  if (!rawValue) {
+    return {}
+  }
+
+  if (typeof rawValue === 'string') {
+    try {
+      const parsed = JSON.parse(rawValue)
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+
+  return rawValue && typeof rawValue === 'object' && !Array.isArray(rawValue) ? rawValue : {}
+}
+
+const decodeEnvironmentId = (encodedId) => {
+  try {
+    return Buffer.from(String(encodedId || ''), 'base64url').toString('utf8').trim()
+  } catch {
+    return ''
+  }
+}
+
+const parseShardedEnvironmentMap = (metadata = {}) => {
+  const entries = Object.keys(metadata || {}).filter(
+    (key) => key.startsWith(ENV_METADATA_PREFIX) && key.endsWith('_url'),
+  )
+
+  return entries.reduce((acc, urlKey) => {
+    const encodedId = urlKey.slice(ENV_METADATA_PREFIX.length, -'_url'.length)
+    const environmentId = decodeEnvironmentId(encodedId)
+    if (!environmentId) {
+      return acc
+    }
+
+    const baseUrl = String(metadata[urlKey] || '').trim()
+    const apiKey = String(metadata[`${ENV_METADATA_PREFIX}${encodedId}_token`] || '').trim()
+    if (!baseUrl || !apiKey) {
+      return acc
+    }
+
+    acc[environmentId] = {
+      name: String(metadata[`${ENV_METADATA_PREFIX}${encodedId}_name`] || environmentId).trim() || environmentId,
+      type: String(metadata[`${ENV_METADATA_PREFIX}${encodedId}_type`] || 'home_assistant').trim() || 'home_assistant',
+      config: {
+        base_url: baseUrl,
+        api_key: apiKey,
+        site_id: String(metadata[`${ENV_METADATA_PREFIX}${encodedId}_site_id`] || '').trim(),
+        notes: String(metadata[`${ENV_METADATA_PREFIX}${encodedId}_notes`] || '').trim(),
+      },
+    }
+    return acc
+  }, {})
+}
+
+const getStoredEnvironmentMap = (metadata = {}) => {
+  const haConfig = parseHaConfig(metadata.ha_config)
+
+  return {
+    ...parseEnvironmentMap(metadata.environments),
+    ...parseEnvironmentMap(metadata.ha_environments),
+    ...parseEnvironmentMap(haConfig.__environments),
+    ...parseShardedEnvironmentMap(metadata),
+  }
 }
 
 const getHaConfig = (metadata, environmentId) => {
-  const envMap = parseEnvironmentMap(metadata.environments)
+  const envMap = getStoredEnvironmentMap(metadata)
   const envConfig = envMap[environmentId]
 
   if (envConfig) {
@@ -58,7 +134,7 @@ const getHaConfig = (metadata, environmentId) => {
     }
   }
 
-  const legacyMap = metadata.ha_environments || {}
+  const legacyMap = parseEnvironmentMap(metadata.ha_environments)
   const legacy = legacyMap[environmentId]
   if (legacy) {
     const baseUrl = legacy.base_url || legacy.url
@@ -139,7 +215,7 @@ const getClientMetadata = async (domain, token) => {
 }
 
 const getVisibleEntityIds = (metadata, environmentId) => {
-  const haConfig = metadata.ha_config || {}
+  const haConfig = parseHaConfig(metadata.ha_config)
   const envConfig = haConfig[environmentId] || {}
   const visibleEntityIds = envConfig.visible_entity_ids
   return Array.isArray(visibleEntityIds) ? visibleEntityIds : []
@@ -314,7 +390,12 @@ export const handler = async (event) => {
       }
     }
 
-    const { baseUrl, token } = getHaConfig(resolvedMetadata, environmentId)
+    const { baseUrl, token } = await resolveEnvironmentConfig({
+      event,
+      metadata: resolvedMetadata,
+      environmentId,
+      getOptionalEnv,
+    })
 
     const response = await fetch(`${baseUrl}/api/services/${entityDomain}/${action}`, {
       method: 'POST',

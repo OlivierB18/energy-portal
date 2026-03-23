@@ -8,6 +8,7 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
+  ReferenceLine,
 } from 'recharts'
 import { useEffect, useMemo, useState } from 'react'
 
@@ -34,6 +35,42 @@ const sampleChartData = <T,>(points: T[], maxPoints: number): T[] => {
   }
 
   return result
+}
+
+const smoothLineData = (
+  points: Array<{ time: string; power: number | null }>,
+  windowSize: number,
+): Array<{ time: string; power: number | null }> => {
+  if (windowSize < 2 || points.length < 3) {
+    return points
+  }
+
+  const radius = Math.floor(windowSize / 2)
+
+  return points.map((point, index) => {
+    if (typeof point.power !== 'number') {
+      return point
+    }
+
+    let sum = 0
+    let count = 0
+    for (let offset = -radius; offset <= radius; offset += 1) {
+      const neighbor = points[index + offset]
+      if (neighbor && typeof neighbor.power === 'number') {
+        sum += neighbor.power
+        count += 1
+      }
+    }
+
+    if (count === 0) {
+      return point
+    }
+
+    return {
+      ...point,
+      power: Number((sum / count).toFixed(3)),
+    }
+  })
 }
 
 // Custom tick component for multiline labels (handles "time\ndate" format)
@@ -65,7 +102,7 @@ function CustomTick(props: any) {
 interface EnergyChartProps {
   data: Array<{
     time: string
-    power: number
+    power: number | null
   }>
   timeRange: 'today' | 'week' | 'month'
   unit?: string
@@ -73,6 +110,7 @@ interface EnergyChartProps {
   rangeLabel?: string
   chartType?: 'line' | 'bar'
   lineType?: 'monotone' | 'linear' | 'step'
+  signed?: boolean
 }
 
 export default function EnergyChart({
@@ -83,6 +121,7 @@ export default function EnergyChart({
   rangeLabel,
   chartType = 'line',
   lineType = 'monotone',
+  signed = false,
 }: EnergyChartProps) {
   const [isMobile, setIsMobile] = useState(() =>
     typeof window !== 'undefined' ? window.innerWidth < 640 : false,
@@ -110,19 +149,62 @@ export default function EnergyChart({
       return isMobile ? 16 : 24
     }
 
-    if (timeRange === 'month') {
-      return isMobile ? 32 : 52
-    }
-    if (timeRange === 'week') {
-      return isMobile ? 28 : 44
-    }
-    return isMobile ? 180 : 320
+    return Number.MAX_SAFE_INTEGER
   }, [chartType, isMobile, timeRange])
 
   const displayData = useMemo(
-    () => sampleChartData(data, targetPointCount),
-    [data, targetPointCount],
+    () => chartType === 'line' ? data : sampleChartData(data, targetPointCount),
+    [chartType, data, targetPointCount],
   )
+
+  const smoothingWindow = useMemo(() => {
+    if (chartType !== 'line') return 1
+    if (signed) return 1
+    if (timeRange === 'today') return 3
+    if (timeRange === 'week') return 5
+    return 5
+  }, [chartType, signed, timeRange])
+
+  const lineDisplayData = useMemo(
+    () => (chartType === 'line' ? smoothLineData(displayData, smoothingWindow) : displayData),
+    [chartType, displayData, smoothingWindow],
+  )
+
+  const signedDisplayData = useMemo(() => {
+    if (!signed) return lineDisplayData
+
+    const splitSeries = lineDisplayData.map((point) => {
+      const value = typeof point.power === 'number' ? point.power : null
+      return {
+        ...point,
+        powerPos: value !== null && value > 0 ? value : null,
+        powerNeg: value !== null && value < 0 ? value : null,
+      }
+    })
+
+    // Bridge sign changes through y=0 so green/yellow lines visually connect.
+    for (let index = 1; index < splitSeries.length; index += 1) {
+      const previous = splitSeries[index - 1]
+      const current = splitSeries[index]
+
+      const previousValue = typeof previous.power === 'number' ? previous.power : null
+      const currentValue = typeof current.power === 'number' ? current.power : null
+
+      if (previousValue === null || currentValue === null) {
+        continue
+      }
+
+      if (previousValue > 0 && currentValue < 0) {
+        previous.powerNeg = 0
+        current.powerPos = 0
+      } else if (previousValue < 0 && currentValue > 0) {
+        previous.powerPos = 0
+        current.powerNeg = 0
+      }
+    }
+
+    return splitSeries
+  }, [lineDisplayData, signed])
 
   const xTickInterval = useMemo(() => {
     if (displayData.length <= 7) {
@@ -147,7 +229,15 @@ export default function EnergyChart({
       borderRadius: '0.5rem',
       boxShadow: '0 10px 25px rgba(0, 0, 0, 0.4)',
     },
-    formatter: (value: number) => [`${value.toFixed(decimals)} ${unit}`, seriesLabel],
+    formatter: (value: unknown, name: string) => {
+      const numericValue = typeof value === 'number' ? value : Number(value)
+      if (!Number.isFinite(numericValue)) {
+        return ['-', seriesLabel]
+      }
+      if (name === 'powerPos') return [`${numericValue.toFixed(decimals)} ${unit}`, 'Verbruik']
+      if (name === 'powerNeg') return [`${numericValue.toFixed(decimals)} ${unit}`, 'Teruglevering']
+      return [`${numericValue.toFixed(decimals)} ${unit}`, seriesLabel]
+    },
     labelStyle: { color: 'rgb(234, 233, 229)' },
   }
 
@@ -191,7 +281,7 @@ export default function EnergyChart({
             />
           </BarChart>
         ) : (
-          <LineChart data={displayData} margin={{ top: 8, right: isMobile ? 2 : 14, left: isMobile ? -8 : 4, bottom: 56 }}>
+          <LineChart data={signedDisplayData} margin={{ top: 8, right: isMobile ? 2 : 14, left: isMobile ? -8 : 4, bottom: 56 }}>
             <defs>
               <linearGradient id="colorPower" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor="rgb(2, 125, 94)" stopOpacity={0.8} />
@@ -214,17 +304,46 @@ export default function EnergyChart({
               label={isMobile ? undefined : { value: unit, angle: -90, position: 'insideLeft' }}
             />
             <Tooltip {...commonTooltipProps} />
-            <Line
-              type={lineType}
-              dataKey="power"
-              stroke="rgb(2, 125, 94)"
-              strokeWidth={isMobile ? 2.8 : 3.2}
-              dot={false}
-              activeDot={{ r: isMobile ? 4.5 : 6.5 }}
-              fillOpacity={1}
-              fill="url(#colorPower)"
-              isAnimationActive={false}
-            />
+            {signed ? (
+              <>
+                <ReferenceLine y={0} stroke="rgba(255, 255, 255, 0.25)" strokeDasharray="4 4" />
+                <Line
+                  type={lineType}
+                  dataKey="powerPos"
+                  stroke="rgb(2, 125, 94)"
+                  strokeWidth={isMobile ? 2.8 : 3.2}
+                  dot={false}
+                  activeDot={{ r: isMobile ? 4.5 : 6.5, fill: 'rgb(2, 125, 94)' }}
+                  isAnimationActive={false}
+                  connectNulls={false}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="powerNeg"
+                  stroke="rgb(250, 204, 21)"
+                  strokeWidth={isMobile ? 2.8 : 3.2}
+                  strokeOpacity={0.95}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  dot={false}
+                  activeDot={{ r: isMobile ? 4.5 : 6.5, fill: 'rgb(250, 204, 21)' }}
+                  isAnimationActive={false}
+                  connectNulls={false}
+                />
+              </>
+            ) : (
+              <Line
+                type={lineType}
+                dataKey="power"
+                stroke="rgb(2, 125, 94)"
+                strokeWidth={isMobile ? 2.8 : 3.2}
+                dot={false}
+                activeDot={{ r: isMobile ? 4.5 : 6.5 }}
+                fillOpacity={1}
+                fill="url(#colorPower)"
+                isAnimationActive={false}
+              />
+            )}
           </LineChart>
         )}
       </ResponsiveContainer>

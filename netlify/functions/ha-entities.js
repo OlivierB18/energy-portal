@@ -1,4 +1,5 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose'
+import { resolveEnvironmentConfig } from './_environment-storage.js'
 
 const getEnv = (key) => {
   const value = process.env[key]
@@ -8,12 +9,19 @@ const getEnv = (key) => {
   return value
 }
 
+const getOptionalEnv = (key) => {
+  const value = process.env[key]
+  return value && value.trim().length > 0 ? value : null
+}
+
 const HA_ENVIRONMENTS = {
   vacation: {
     urlEnv: 'HA_BROUWER_TEST_URL',
     tokenEnv: 'HA_BROUWER_TEST_TOKEN',
   },
 }
+
+const ENV_METADATA_PREFIX = 'ha_env_v1_'
 
 const managementTokenCache = { token: null, expiresAt: 0 }
 const metadataCache = { value: null, expiresAt: 0 }
@@ -41,13 +49,81 @@ const parseEnvironmentMap = (rawValue) => {
   if (typeof rawValue === 'string') {
     try {
       const parsed = JSON.parse(rawValue)
-      return parsed && typeof parsed === 'object' ? parsed : {}
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
     } catch {
       return {}
     }
   }
 
-  return rawValue && typeof rawValue === 'object' ? rawValue : {}
+  return rawValue && typeof rawValue === 'object' && !Array.isArray(rawValue) ? rawValue : {}
+}
+
+const parseHaConfig = (rawValue) => {
+  if (!rawValue) {
+    return {}
+  }
+
+  if (typeof rawValue === 'string') {
+    try {
+      const parsed = JSON.parse(rawValue)
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+
+  return rawValue && typeof rawValue === 'object' && !Array.isArray(rawValue) ? rawValue : {}
+}
+
+const decodeEnvironmentId = (encodedId) => {
+  try {
+    return Buffer.from(String(encodedId || ''), 'base64url').toString('utf8').trim()
+  } catch {
+    return ''
+  }
+}
+
+const parseShardedEnvironmentMap = (metadata = {}) => {
+  const entries = Object.keys(metadata || {}).filter(
+    (key) => key.startsWith(ENV_METADATA_PREFIX) && key.endsWith('_url'),
+  )
+
+  return entries.reduce((acc, urlKey) => {
+    const encodedId = urlKey.slice(ENV_METADATA_PREFIX.length, -'_url'.length)
+    const environmentId = decodeEnvironmentId(encodedId)
+    if (!environmentId) {
+      return acc
+    }
+
+    const baseUrl = String(metadata[urlKey] || '').trim()
+    const apiKey = String(metadata[`${ENV_METADATA_PREFIX}${encodedId}_token`] || '').trim()
+    if (!baseUrl || !apiKey) {
+      return acc
+    }
+
+    acc[environmentId] = {
+      name: String(metadata[`${ENV_METADATA_PREFIX}${encodedId}_name`] || environmentId).trim() || environmentId,
+      type: String(metadata[`${ENV_METADATA_PREFIX}${encodedId}_type`] || 'home_assistant').trim() || 'home_assistant',
+      config: {
+        base_url: baseUrl,
+        api_key: apiKey,
+        site_id: String(metadata[`${ENV_METADATA_PREFIX}${encodedId}_site_id`] || '').trim(),
+        notes: String(metadata[`${ENV_METADATA_PREFIX}${encodedId}_notes`] || '').trim(),
+      },
+    }
+    return acc
+  }, {})
+}
+
+const getStoredEnvironmentMap = (metadata = {}) => {
+  const haConfig = parseHaConfig(metadata.ha_config)
+
+  return {
+    ...parseEnvironmentMap(metadata.environments),
+    ...parseEnvironmentMap(metadata.ha_environments),
+    ...parseEnvironmentMap(haConfig.__environments),
+    ...parseShardedEnvironmentMap(metadata),
+  }
 }
 
 const GAS_TOTAL_ENTITY_ID_CANDIDATES = parseCsvEnv(process.env.HA_GAS_TOTAL_ENTITY_IDS, [
@@ -56,6 +132,12 @@ const GAS_TOTAL_ENTITY_ID_CANDIDATES = parseCsvEnv(process.env.HA_GAS_TOTAL_ENTI
   'sensor.gas_total',
   'sensor.gas_consumption_total',
 ])
+
+const ELECTRICITY_TOTAL_ENTITY_ID_CANDIDATES = parseCsvEnv(process.env.HA_ELECTRICITY_TOTAL_ENTITY_IDS, [])
+const ELECTRICITY_PRODUCTION_TOTAL_ENTITY_ID_CANDIDATES = parseCsvEnv(
+  process.env.HA_ELECTRICITY_PRODUCTION_TOTAL_ENTITY_IDS,
+  [],
+)
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -130,7 +212,7 @@ const getCachedClientMetadata = async (domain, token) => {
 }
 
 const getVisibleEntityIds = (metadata, environmentId) => {
-  const haConfig = metadata.ha_config || {}
+  const haConfig = parseHaConfig(metadata.ha_config)
   const envConfig = haConfig[environmentId] || {}
   const visibleEntityIds = envConfig.visible_entity_ids
   return Array.isArray(visibleEntityIds) ? visibleEntityIds : []
@@ -138,7 +220,7 @@ const getVisibleEntityIds = (metadata, environmentId) => {
 
 const getUserVisibleEntityIds = (userMetadata, environmentId) => {
   if (!userMetadata) return null
-  const haConfig = userMetadata.ha_config || {}
+  const haConfig = parseHaConfig(userMetadata.ha_config)
   const envConfig = haConfig[environmentId] || {}
   const visibleEntityIds = envConfig.visible_entity_ids
   return Array.isArray(visibleEntityIds) ? visibleEntityIds : null
@@ -221,6 +303,20 @@ const convertPowerToKw = (rawValue, unit) => {
 
 const toMetricValue = (value) => (Number.isFinite(value) ? Number(value) : null)
 
+const PRODUCTION_KEYWORDS = [
+  'production',
+  'producer',
+  'solar',
+  'pv',
+  'generation',
+  'yield',
+  'opwek',
+  'opgewekt',
+  'export',
+  'injection',
+  'teruglever',
+]
+
 const getDashboardMetrics = (entities) => {
   if (!Array.isArray(entities) || entities.length === 0) {
     return null
@@ -256,15 +352,41 @@ const getDashboardMetrics = (entities) => {
       Number.isFinite(parseNumericValue(entity.state))
     ))
 
-  const pickElectricityPeriodEntity = (period) => {
+  const productionPowerEntity =
+    findEntityByKeywords(
+      entities,
+      PRODUCTION_KEYWORDS,
+      ['today', 'daily', 'month', 'monthly', 'total', 'kwh', 'energy', 'gas', 'price', 'cost', 'tariff'],
+    ) ||
+    entities.find((entity) => {
+      if (entity.domain !== 'sensor') {
+        return false
+      }
+
+      const searchable = toSearchable(entity)
+      return (
+        isPowerUnit(entity.unit_of_measurement) &&
+        includesAny(searchable, PRODUCTION_KEYWORDS) &&
+        Number.isFinite(parseNumericValue(entity.state))
+      )
+    })
+
+  const pickElectricityPeriodEntity = (period, kind = 'consumption') => {
+    const isProduction = kind === 'production'
     const isDaily = period === 'daily'
     const periodKeywords = isDaily
       ? ['today', 'daily', 'day', 'vandaag', 'dag']
       : ['month', 'monthly', 'this_month', 'maand']
-    const energyContextKeywords = ['electricity', 'energy', 'consumption', 'meter', 'kwh', 'verbruik']
-    const preciseKeywords = isDaily
-      ? ['energy_today', 'today_energy', 'daily_energy', 'consumption_today', 'verbruik_vandaag']
-      : ['energy_month', 'month_energy', 'monthly_energy', 'consumption_month', 'verbruik_maand']
+    const energyContextKeywords = isProduction
+      ? ['electricity', 'energy', 'production', 'producer', 'solar', 'pv', 'yield', 'opwek', 'opgewekt', 'kwh', 'export', 'injection', 'teruglever']
+      : ['electricity', 'energy', 'consumption', 'meter', 'kwh', 'verbruik', 'import', 'net', 'grid']
+    const preciseKeywords = isProduction
+      ? (isDaily
+          ? ['production_today', 'today_production', 'daily_production', 'solar_today', 'pv_today', 'opwek_vandaag', 'opgewekt_vandaag']
+          : ['production_month', 'month_production', 'monthly_production', 'solar_month', 'pv_month', 'opwek_maand', 'opgewekt_maand'])
+      : (isDaily
+          ? ['energy_today', 'today_energy', 'daily_energy', 'consumption_today', 'verbruik_vandaag']
+          : ['energy_month', 'month_energy', 'monthly_energy', 'consumption_month', 'verbruik_maand'])
     const tariffKeywords = ['tariff', 'tarif', 'tarief', 'peak', 'offpeak', 'dal', 'hoog', 'laag', 't1', 't2', 'normal', 'low', 'high']
 
     const candidates = entities
@@ -275,6 +397,14 @@ const getDashboardMetrics = (entities) => {
 
         const searchable = toSearchable(entity)
         if (includesAny(searchable, ['gas', 'price', 'cost', 'tariff', 'tarif', 'tarief'])) {
+          return false
+        }
+
+        if (!isProduction && includesAny(searchable, PRODUCTION_KEYWORDS)) {
+          return false
+        }
+
+        if (isProduction && !includesAny(searchable, PRODUCTION_KEYWORDS)) {
           return false
         }
 
@@ -294,7 +424,7 @@ const getDashboardMetrics = (entities) => {
         let score = 0
 
         if (includesAny(searchable, preciseKeywords)) score += 5
-        if (includesAny(searchable, ['total', 'main', 'meter', 'consumption'])) score += 2
+        if (includesAny(searchable, isProduction ? ['production', 'producer', 'solar', 'pv', 'yield', 'export', 'injection', 'opwek'] : ['total', 'main', 'meter', 'consumption', 'verbruik', 'grid', 'net'])) score += 2
         if (isEnergyUnit(entity.unit_of_measurement)) score += 2
         if (deviceClass === 'energy') score += 2
         if (stateClass === 'measurement') score += 1
@@ -310,6 +440,10 @@ const getDashboardMetrics = (entities) => {
   const dailyElectricityEntity = pickElectricityPeriodEntity('daily')
 
   const monthlyElectricityEntity = pickElectricityPeriodEntity('monthly')
+
+  const dailyProductionEntity = pickElectricityPeriodEntity('daily', 'production')
+
+  const monthlyProductionEntity = pickElectricityPeriodEntity('monthly', 'production')
 
   const dailyGasEntity = findEntityByKeywords(
     entities,
@@ -327,12 +461,24 @@ const getDashboardMetrics = (entities) => {
     ? convertPowerToKw(parseNumericValue(powerEntity.state), powerEntity.unit_of_measurement)
     : NaN
 
+  const currentProductionKw = productionPowerEntity
+    ? convertPowerToKw(parseNumericValue(productionPowerEntity.state), productionPowerEntity.unit_of_measurement)
+    : NaN
+
   const dailyElectricityKwh = dailyElectricityEntity
     ? parseNumericValue(dailyElectricityEntity.state)
     : NaN
 
   const monthlyElectricityKwh = monthlyElectricityEntity
     ? parseNumericValue(monthlyElectricityEntity.state)
+    : NaN
+
+  const dailyProductionKwh = dailyProductionEntity
+    ? parseNumericValue(dailyProductionEntity.state)
+    : NaN
+
+  const monthlyProductionKwh = monthlyProductionEntity
+    ? parseNumericValue(monthlyProductionEntity.state)
     : NaN
 
   const dailyGasM3 = dailyGasEntity
@@ -345,14 +491,20 @@ const getDashboardMetrics = (entities) => {
 
   return {
     currentPowerKw: toMetricValue(currentPowerKw),
+    currentProductionKw: toMetricValue(currentProductionKw),
     dailyElectricityKwh: toMetricValue(dailyElectricityKwh),
     monthlyElectricityKwh: toMetricValue(monthlyElectricityKwh),
+    dailyProductionKwh: toMetricValue(dailyProductionKwh),
+    monthlyProductionKwh: toMetricValue(monthlyProductionKwh),
     dailyGasM3: toMetricValue(dailyGasM3),
     monthlyGasM3: toMetricValue(monthlyGasM3),
     sources: {
       currentPowerEntityId: powerEntity?.entity_id || null,
+      currentProductionEntityId: productionPowerEntity?.entity_id || null,
       dailyElectricityEntityId: dailyElectricityEntity?.entity_id || null,
       monthlyElectricityEntityId: monthlyElectricityEntity?.entity_id || null,
+      dailyProductionEntityId: dailyProductionEntity?.entity_id || null,
+      monthlyProductionEntityId: monthlyProductionEntity?.entity_id || null,
       dailyGasEntityId: dailyGasEntity?.entity_id || null,
       monthlyGasEntityId: monthlyGasEntity?.entity_id || null,
     },
@@ -374,6 +526,16 @@ const isGasUnit = (unit) => {
 const getEntitySearchFlags = (searchable) => {
   const isDailyLike = includesAny(searchable, ['today', 'daily', 'day'])
   const isMonthlyLike = includesAny(searchable, ['month', 'monthly'])
+  const isNetLike = includesAny(searchable, [
+    'net',
+    'netto',
+    'grid total',
+    'grid_total',
+    'total net',
+    'totaal net',
+    'net_consumption',
+    'netto verbruik',
+  ])
   const isTariffLike = includesAny(searchable, [
     'tariff',
     'tarif',
@@ -401,12 +563,38 @@ const getEntitySearchFlags = (searchable) => {
   return {
     isDailyLike,
     isMonthlyLike,
+    isNetLike,
     isTariffLike,
     isAggregateLike,
   }
 }
 
 const pickTotalElectricityCandidates = (entities) => {
+  const normalizedMap = new Map(
+    entities.map((entity) => [String(entity.entity_id || '').trim().toLowerCase(), entity]),
+  )
+
+  const explicitMatchId = ELECTRICITY_TOTAL_ENTITY_ID_CANDIDATES.find((candidateId) => normalizedMap.has(candidateId))
+  if (explicitMatchId) {
+    const explicitEntity = normalizedMap.get(explicitMatchId)
+    const explicitRawValue = parseNumericValue(explicitEntity?.state)
+    const explicitValueKwh = convertEnergyToKwh(explicitRawValue, explicitEntity?.unit_of_measurement)
+
+    if (explicitEntity && Number.isFinite(explicitValueKwh)) {
+      return [{
+        entity: explicitEntity,
+        score: Number.MAX_SAFE_INTEGER,
+        stateClass: String(explicitEntity.state_class || '').toLowerCase(),
+        isPhaseLike: false,
+        currentValueKwh: explicitValueKwh,
+        isDailyLike: false,
+        isMonthlyLike: false,
+        isTariffLike: false,
+        isAggregateLike: true,
+      }]
+    }
+  }
+
   const candidates = entities
     .filter((entity) => {
       if (entity.domain !== 'sensor') {
@@ -422,8 +610,30 @@ const pickTotalElectricityCandidates = (entities) => {
         return false
       }
 
+      if (includesAny(searchable, ['power', 'watt', 'actueel vermogen', 'current_power'])) {
+        return false
+      }
+
+      const unit = String(entity.unit_of_measurement || '').trim().toLowerCase()
+      const deviceClass = String(entity.device_class || '').toLowerCase()
+      const stateClass = String(entity.state_class || '').toLowerCase()
+
+      if (isPowerUnit(unit) || deviceClass === 'power') {
+        return false
+      }
+
       const numericState = Number.isFinite(parseNumericValue(entity.state))
       if (!numericState) {
+        return false
+      }
+
+      const hasCumulativeSemantics =
+        stateClass === 'total_increasing' ||
+        stateClass === 'total' ||
+        deviceClass === 'energy' ||
+        isEnergyUnit(unit)
+
+      if (!hasCumulativeSemantics) {
         return false
       }
 
@@ -444,6 +654,118 @@ const pickTotalElectricityCandidates = (entities) => {
       if (deviceClass === 'energy') score += 5
       if (stateClass === 'total_increasing') score += 5
       if (stateClass === 'total') score += 4
+      if (flags.isNetLike) score += 6
+      if (flags.isAggregateLike) score += 3
+      if (isEnergyUnit(entity.unit_of_measurement)) score += 2
+      if (flags.isDailyLike || flags.isMonthlyLike) score -= 8
+      if (flags.isTariffLike) score -= 1
+      if (isPhaseLike) score -= 1
+
+      const rawState = parseNumericValue(entity.state)
+      const currentValueKwh = convertEnergyToKwh(rawState, entity.unit_of_measurement)
+
+      return {
+        entity,
+        score,
+        stateClass,
+        isPhaseLike,
+        currentValueKwh,
+        ...flags,
+      }
+    })
+    .filter((candidate) => !candidate.isDailyLike && !candidate.isMonthlyLike)
+    .sort((a, b) => b.score - a.score)
+
+  return candidates
+}
+
+const pickTotalElectricityProductionCandidates = (entities) => {
+  const normalizedMap = new Map(
+    entities.map((entity) => [String(entity.entity_id || '').trim().toLowerCase(), entity]),
+  )
+
+  const explicitMatchId = ELECTRICITY_PRODUCTION_TOTAL_ENTITY_ID_CANDIDATES.find((candidateId) => normalizedMap.has(candidateId))
+  if (explicitMatchId) {
+    const explicitEntity = normalizedMap.get(explicitMatchId)
+    const explicitRawValue = parseNumericValue(explicitEntity?.state)
+    const explicitValueKwh = convertEnergyToKwh(explicitRawValue, explicitEntity?.unit_of_measurement)
+
+    if (explicitEntity && Number.isFinite(explicitValueKwh)) {
+      return [{
+        entity: explicitEntity,
+        score: Number.MAX_SAFE_INTEGER,
+        stateClass: String(explicitEntity.state_class || '').toLowerCase(),
+        isPhaseLike: false,
+        currentValueKwh: explicitValueKwh,
+        isDailyLike: false,
+        isMonthlyLike: false,
+        isTariffLike: false,
+        isAggregateLike: true,
+      }]
+    }
+  }
+
+  const candidates = entities
+    .filter((entity) => {
+      if (entity.domain !== 'sensor') {
+        return false
+      }
+
+      const searchable = toSearchable(entity)
+      if (includesAny(searchable, ['gas', 'price', 'cost'])) {
+        return false
+      }
+
+      if (!includesAny(searchable, PRODUCTION_KEYWORDS)) {
+        return false
+      }
+
+      if (includesAny(searchable, ['power', 'watt', 'actueel vermogen', 'current_power'])) {
+        return false
+      }
+
+      const unit = String(entity.unit_of_measurement || '').trim().toLowerCase()
+      const deviceClass = String(entity.device_class || '').toLowerCase()
+      const stateClass = String(entity.state_class || '').toLowerCase()
+
+      if (isPowerUnit(unit) || deviceClass === 'power') {
+        return false
+      }
+
+      const numericState = Number.isFinite(parseNumericValue(entity.state))
+      if (!numericState) {
+        return false
+      }
+
+      const hasCumulativeSemantics =
+        stateClass === 'total_increasing' ||
+        stateClass === 'total' ||
+        deviceClass === 'energy' ||
+        isEnergyUnit(unit)
+
+      if (!hasCumulativeSemantics) {
+        return false
+      }
+
+      return (
+        isEnergyUnit(entity.unit_of_measurement) ||
+        String(entity.device_class || '').toLowerCase() === 'energy' ||
+        includesAny(searchable, ['energy', 'production', 'export', 'injection', 'kwh'])
+      )
+    })
+    .map((entity) => {
+      const searchable = toSearchable(entity)
+      const stateClass = String(entity.state_class || '').toLowerCase()
+      const deviceClass = String(entity.device_class || '').toLowerCase()
+      const flags = getEntitySearchFlags(searchable)
+      const isPhaseLike = includesAny(searchable, ['l1', 'l2', 'l3', 'phase', 'fase'])
+      let score = 0
+
+      if (deviceClass === 'energy') score += 5
+      if (stateClass === 'total_increasing') score += 5
+      if (stateClass === 'total') score += 4
+      if (includesAny(searchable, ['production', 'producer', 'solar', 'pv', 'yield', 'opwek', 'opgewekt'])) score += 6
+      if (includesAny(searchable, ['export', 'injection', 'teruglever'])) score += 5
       if (flags.isAggregateLike) score += 3
       if (isEnergyUnit(entity.unit_of_measurement)) score += 2
       if (flags.isDailyLike || flags.isMonthlyLike) score -= 8
@@ -687,22 +1009,29 @@ const enrichMetricsWithHistoryFallback = async ({
 
   const needsElectricityFallback =
     metrics.dailyElectricityKwh === null || metrics.monthlyElectricityKwh === null
+  const needsProductionFallback =
+    metrics.dailyProductionKwh === null || metrics.monthlyProductionKwh === null
   const needsGasFallback =
     metrics.dailyGasM3 === null || metrics.monthlyGasM3 === null
 
+  // Source of truth for electricity day/month should come from the cumulative
+  // net meter history to align with HA Energy dashboard totals.
   const shouldDeriveElectricityFromTotalHistory = true
+  const shouldDeriveProductionFromTotalHistory = true
   const shouldDeriveGasFromTotalHistory = false
 
   if (
     !shouldDeriveElectricityFromTotalHistory &&
+    !shouldDeriveProductionFromTotalHistory &&
     !shouldDeriveGasFromTotalHistory &&
     !needsElectricityFallback &&
+    !needsProductionFallback &&
     !needsGasFallback
   ) {
     return metrics
   }
 
-  const cacheKey = String(environmentId || 'default')
+  const cacheKey = `v2:${String(environmentId || 'default')}`
   const nowMs = Date.now()
   const cached = metricsHistoryCache.get(cacheKey)
   if (cached && nowMs < cached.expiresAt) {
@@ -716,6 +1045,14 @@ const enrichMetricsWithHistoryFallback = async ({
         shouldDeriveElectricityFromTotalHistory
           ? cached.values.monthlyElectricityKwh ?? metrics.monthlyElectricityKwh ?? null
           : metrics.monthlyElectricityKwh ?? cached.values.monthlyElectricityKwh ?? null,
+      dailyProductionKwh:
+        shouldDeriveProductionFromTotalHistory
+          ? cached.values.dailyProductionKwh ?? metrics.dailyProductionKwh ?? null
+          : metrics.dailyProductionKwh ?? cached.values.dailyProductionKwh ?? null,
+      monthlyProductionKwh:
+        shouldDeriveProductionFromTotalHistory
+          ? cached.values.monthlyProductionKwh ?? metrics.monthlyProductionKwh ?? null
+          : metrics.monthlyProductionKwh ?? cached.values.monthlyProductionKwh ?? null,
       dailyGasM3:
         shouldDeriveGasFromTotalHistory
           ? cached.values.dailyGasM3 ?? metrics.dailyGasM3 ?? null
@@ -738,6 +1075,8 @@ const enrichMetricsWithHistoryFallback = async ({
   const fallbackValues = {
     dailyElectricityKwh: null,
     monthlyElectricityKwh: null,
+    dailyProductionKwh: null,
+    monthlyProductionKwh: null,
     dailyGasM3: null,
     monthlyGasM3: null,
   }
@@ -754,7 +1093,12 @@ const enrichMetricsWithHistoryFallback = async ({
 
       const strongestAggregate = aggregateCandidates
         .filter((candidate) => Number.isFinite(candidate.currentValueKwh))
-        .sort((a, b) => b.currentValueKwh - a.currentValueKwh)[0]
+        .sort((a, b) => {
+          if (b.score !== a.score) {
+            return b.score - a.score
+          }
+          return b.currentValueKwh - a.currentValueKwh
+        })[0]
 
       const phaseCandidates = electricityCandidates.filter((candidate) => candidate.isPhaseLike)
       const tariffCandidates = electricityCandidates.filter((candidate) => candidate.isTariffLike)
@@ -827,6 +1171,103 @@ const enrichMetricsWithHistoryFallback = async ({
     }
   }
 
+  // ALWAYS ensure electricityTotalEntityIds is set so the electricity usage statistics chart
+  // can fetch kWh data even when the daily/monthly fallback path was not triggered.
+  if (!fallbackSources.electricityTotalEntityIds || fallbackSources.electricityTotalEntityIds.length === 0) {
+    const candidates = pickTotalElectricityCandidates(entities)
+    const cumulativeCandidates = candidates.filter(
+      (c) => c.stateClass === 'total_increasing' || c.stateClass === 'total' || String(c.entity?.device_class || '').toLowerCase() === 'energy',
+    )
+    const chosen = (cumulativeCandidates.length > 0 ? cumulativeCandidates : candidates).slice(0, 4)
+    if (chosen.length > 0) {
+      const ids = chosen.map((c) => c.entity.entity_id)
+      fallbackSources.electricityTotalEntityIds = ids
+      if (!fallbackSources.electricityTotalEntityId) {
+        fallbackSources.electricityTotalEntityId = ids[0]
+      }
+      console.log('[HA-ENTITIES] Computed electricityTotalEntityIds (always-set):', ids)
+    }
+  }
+
+  if (shouldDeriveProductionFromTotalHistory || needsProductionFallback) {
+    const productionCandidates = pickTotalElectricityProductionCandidates(entities)
+
+    if (productionCandidates.length > 0) {
+      const aggregateCandidates = productionCandidates.filter(
+        (candidate) => candidate.isAggregateLike && !candidate.isTariffLike && !candidate.isPhaseLike,
+      )
+
+      const strongestAggregate = aggregateCandidates
+        .filter((candidate) => Number.isFinite(candidate.currentValueKwh))
+        .sort((a, b) => {
+          if (b.score !== a.score) {
+            return b.score - a.score
+          }
+          return b.currentValueKwh - a.currentValueKwh
+        })[0]
+
+      const phaseCandidates = productionCandidates.filter((candidate) => candidate.isPhaseLike)
+      const hasTrustedAggregate = Boolean(
+        strongestAggregate &&
+        (strongestAggregate.stateClass === 'total_increasing' || strongestAggregate.stateClass === 'total'),
+      )
+
+      const selectedCandidates = hasTrustedAggregate
+        ? [strongestAggregate]
+        : phaseCandidates.length >= 2
+          ? phaseCandidates.slice(0, 3)
+          : [productionCandidates[0]]
+
+      let dailySum = 0
+      let monthlySum = 0
+      let hasDaily = false
+      let hasMonthly = false
+      const usedEntityIds = []
+
+      for (const candidate of selectedCandidates) {
+        const sourceEntity = {
+          ...candidate.entity,
+          kind: 'energy',
+        }
+
+        const productionSeries = await fetchEntityHistorySeries(
+          baseUrl,
+          token,
+          sourceEntity,
+          startIso,
+          nowIso,
+        )
+        const liveValue = Number.isFinite(candidate.currentValueKwh) ? candidate.currentValueKwh : null
+        const deltas = deriveDailyMonthlyDeltas(productionSeries, liveValue, nowMs)
+
+        if (deltas.daily !== null) {
+          dailySum += deltas.daily
+          hasDaily = true
+        }
+        if (deltas.monthly !== null) {
+          monthlySum += deltas.monthly
+          hasMonthly = true
+        }
+
+        usedEntityIds.push(candidate.entity.entity_id)
+      }
+
+      fallbackValues.dailyProductionKwh = hasDaily ? Number(dailySum.toFixed(3)) : null
+      fallbackValues.monthlyProductionKwh = hasMonthly ? Number(monthlySum.toFixed(3)) : null
+      fallbackSources.electricityProductionTotalEntityIds = usedEntityIds
+      fallbackSources.electricityProductionTotalEntityId = usedEntityIds[0] || null
+
+      console.log(
+        '[HA-ENTITIES] Production fallback derived from:',
+        usedEntityIds,
+        'daily:',
+        fallbackValues.dailyProductionKwh,
+        'monthly:',
+        fallbackValues.monthlyProductionKwh,
+      )
+    }
+  }
+
   if (shouldDeriveGasFromTotalHistory || needsGasFallback) {
     const gasTotalEntity = pickTotalGasEntity(entities)
     if (gasTotalEntity?.entity_id) {
@@ -871,6 +1312,14 @@ const enrichMetricsWithHistoryFallback = async ({
       shouldDeriveElectricityFromTotalHistory
         ? fallbackValues.monthlyElectricityKwh ?? metrics.monthlyElectricityKwh ?? null
         : metrics.monthlyElectricityKwh ?? fallbackValues.monthlyElectricityKwh ?? null,
+    dailyProductionKwh:
+      shouldDeriveProductionFromTotalHistory
+        ? fallbackValues.dailyProductionKwh ?? metrics.dailyProductionKwh ?? null
+        : metrics.dailyProductionKwh ?? fallbackValues.dailyProductionKwh ?? null,
+    monthlyProductionKwh:
+      shouldDeriveProductionFromTotalHistory
+        ? fallbackValues.monthlyProductionKwh ?? metrics.monthlyProductionKwh ?? null
+        : metrics.monthlyProductionKwh ?? fallbackValues.monthlyProductionKwh ?? null,
     dailyGasM3:
       shouldDeriveGasFromTotalHistory
         ? fallbackValues.dailyGasM3 ?? metrics.dailyGasM3 ?? null
@@ -887,7 +1336,7 @@ const enrichMetricsWithHistoryFallback = async ({
 }
 
 const getHaConfig = (metadata, environmentId) => {
-  const envMap = parseEnvironmentMap(metadata.environments)
+  const envMap = getStoredEnvironmentMap(metadata)
   const envConfig = envMap[environmentId]
 
   if (envConfig) {
@@ -903,7 +1352,7 @@ const getHaConfig = (metadata, environmentId) => {
     }
   }
 
-  const legacyMap = metadata.ha_environments || {}
+  const legacyMap = parseEnvironmentMap(metadata.ha_environments)
   const legacy = legacyMap[environmentId]
   if (legacy) {
     const baseUrl = legacy.base_url || legacy.url
@@ -1086,7 +1535,12 @@ export const handler = async (event) => {
       console.warn('ha-entities metadata warning:', metadataError instanceof Error ? metadataError.message : metadataError)
     }
 
-    const { baseUrl, token } = getHaConfig(metadata, environmentId)
+    const { baseUrl, token } = await resolveEnvironmentConfig({
+      event,
+      metadata,
+      environmentId,
+      getOptionalEnv,
+    })
     
     console.log('Fetching from Home Assistant:', baseUrl);
     const response = await fetch(`${baseUrl}/api/states`, {

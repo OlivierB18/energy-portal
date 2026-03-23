@@ -1,4 +1,5 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose'
+import { stripShardedEnvironmentMetadata } from './_environment-storage.js'
 
 const getEnv = (key) => {
   const value = process.env[key]
@@ -204,6 +205,51 @@ const verifyAdmin = async (event) => {
   throw err
 }
 
+const parseEnvironmentMap = (input) => {
+  if (!input) {
+    return {}
+  }
+
+  if (typeof input === 'string') {
+    try {
+      const parsed = JSON.parse(input)
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+
+  return input && typeof input === 'object' && !Array.isArray(input) ? input : {}
+}
+
+const parseHaConfig = (input) => {
+  if (!input) {
+    return {}
+  }
+
+  if (typeof input === 'string') {
+    try {
+      const parsed = JSON.parse(input)
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+
+  return input && typeof input === 'object' && !Array.isArray(input) ? input : {}
+}
+
+const sanitizeClientMetadata = (metadata) => {
+  const haConfig = parseHaConfig(metadata?.ha_config)
+
+  return {
+    ...stripShardedEnvironmentMetadata(metadata),
+    environments: null,
+    ha_environments: null,
+    ha_config: JSON.stringify(haConfig),
+  }
+}
+
 export const handler = async (event) => {
   try {
     if (event.httpMethod !== 'POST') {
@@ -225,7 +271,7 @@ export const handler = async (event) => {
     const domain = getEnv('AUTH0_DOMAIN')
     const managementToken = await getManagementToken(domain)
     const metadata = await getClientMetadata(domain, managementToken)
-    const haConfig = metadata.ha_config || {}
+    const haConfig = parseHaConfig(metadata.ha_config)
 
     const nextConfig = {
       ...haConfig,
@@ -236,8 +282,8 @@ export const handler = async (event) => {
     }
 
     await updateClientMetadata(domain, managementToken, {
-      ...metadata,
-      ha_config: nextConfig,
+      ...sanitizeClientMetadata(metadata),
+      ha_config: JSON.stringify(nextConfig),
     })
 
     return {

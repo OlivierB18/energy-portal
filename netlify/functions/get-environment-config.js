@@ -54,6 +54,23 @@ const verifyAuth = async (event) => {
   await jwtVerify(token, jwks, { issuer: `https://${domain}/` })
 }
 
+const parseHaConfig = (rawValue) => {
+  if (!rawValue) {
+    return {}
+  }
+
+  if (typeof rawValue === 'string') {
+    try {
+      const parsed = JSON.parse(rawValue)
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+
+  return rawValue && typeof rawValue === 'object' && !Array.isArray(rawValue) ? rawValue : {}
+}
+
 export const handler = async (event) => {
   try {
     if (event.httpMethod !== 'GET') {
@@ -70,7 +87,7 @@ export const handler = async (event) => {
     const domain = getEnv('AUTH0_DOMAIN')
     const managementToken = await getManagementToken(domain)
     const metadata = await getClientMetadata(domain, managementToken)
-    const haConfig = metadata.ha_config || {}
+    const haConfig = parseHaConfig(metadata.ha_config)
     const envConfig = haConfig[environmentId] || {}
     const visibleEntityIds = Array.isArray(envConfig.visible_entity_ids)
       ? envConfig.visible_entity_ids

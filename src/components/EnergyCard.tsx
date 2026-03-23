@@ -46,7 +46,7 @@ export default function EnergyCard({ title, value, unit, cost, icon, status }: E
       </div>
       {cost !== null && (
         <div className="pt-4 border-t border-dark-2 border-opacity-10">
-          <p className="text-xl font-heavy text-light-2">€{cost.toFixed(2)}</p>
+          <p className="text-xl font-heavy text-light-2">EUR {cost.toFixed(2)}</p>
         </div>
       )}
     </div>

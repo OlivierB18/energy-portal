@@ -35,6 +35,18 @@ interface EntsoeChartPoint {
 }
 
 const DYNAMIC_PRICE_CHART_EVENT = 'energy-dynamic-chart-visibility-changed'
+const configuredDefaultGasPrice = Number(import.meta.env.VITE_DEFAULT_GAS_PRICE_EUR_PER_M3)
+const DEFAULT_GAS_PRICE_PER_M3 = Number.isFinite(configuredDefaultGasPrice) && configuredDefaultGasPrice > 0
+  ? configuredDefaultGasPrice
+  : 1.35
+const configuredDefaultGasMargin = Number(import.meta.env.VITE_DEFAULT_GAS_MARGIN_EUR_PER_M3)
+const DEFAULT_GAS_MARGIN_PER_M3 = Number.isFinite(configuredDefaultGasMargin)
+  ? configuredDefaultGasMargin
+  : 0
+const configuredDynamicGasProxy = Number(import.meta.env.VITE_DYNAMIC_GAS_KWH_PER_M3)
+const DEFAULT_DYNAMIC_GAS_KWH_PER_M3 = Number.isFinite(configuredDynamicGasProxy) && configuredDynamicGasProxy > 0
+  ? configuredDynamicGasProxy
+  : 10.55
 
 export default function EnergyPriceModal({
   environmentId,
@@ -117,6 +129,9 @@ export default function EnergyPriceModal({
       producerPrice: parseNumber(value.producerPrice, 0.10),
       consumerMargin: parseNumber(value.consumerMargin, 0.05),
       producerMargin: parseNumber(value.producerMargin, 0.02),
+      gasPrice: parseNumber(value.gasPrice, DEFAULT_GAS_PRICE_PER_M3),
+      gasMargin: parseNumber(value.gasMargin, DEFAULT_GAS_MARGIN_PER_M3),
+      gasProxyKwhPerM3: parseNumber(value.gasProxyKwhPerM3, DEFAULT_DYNAMIC_GAS_KWH_PER_M3),
     }
   }
 
@@ -126,6 +141,9 @@ export default function EnergyPriceModal({
     setProducerPrice((config.producerPrice ?? config.consumerPrice ?? 0.10).toString())
     setConsumerMargin((config.consumerMargin || 0.05).toString())
     setProducerMargin((config.producerMargin || 0.02).toString())
+    setGasPrice((config.gasPrice || DEFAULT_GAS_PRICE_PER_M3).toString())
+    setGasMargin((config.gasMargin || DEFAULT_GAS_MARGIN_PER_M3).toString())
+    setGasProxyKwhPerM3((config.gasProxyKwhPerM3 || DEFAULT_DYNAMIC_GAS_KWH_PER_M3).toString())
   }
 
   const [pricingType, setPricingType] = useState<EnergyPricingType>('fixed')
@@ -133,6 +151,9 @@ export default function EnergyPriceModal({
   const [producerPrice, setProducerPrice] = useState<string>('0.10')
   const [consumerMargin, setConsumerMargin] = useState<string>('0.05')
   const [producerMargin, setProducerMargin] = useState<string>('0.02')
+  const [gasPrice, setGasPrice] = useState<string>(DEFAULT_GAS_PRICE_PER_M3.toString())
+  const [gasMargin, setGasMargin] = useState<string>(DEFAULT_GAS_MARGIN_PER_M3.toString())
+  const [gasProxyKwhPerM3, setGasProxyKwhPerM3] = useState<string>(DEFAULT_DYNAMIC_GAS_KWH_PER_M3.toString())
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [entsoeLoading, setEntsoeLoading] = useState(false)
@@ -279,7 +300,7 @@ export default function EnergyPriceModal({
   }
 
   useEffect(() => {
-    if (!showDynamicChart) {
+    if (!showDynamicChart && pricingType !== 'dynamic') {
       setEntsoeLoading(false)
       return
     }
@@ -318,8 +339,15 @@ export default function EnergyPriceModal({
           throw new Error('No valid ENTSOE price returned')
         }
 
+        const configuredProxy = parseNumber(gasProxyKwhPerM3, DEFAULT_DYNAMIC_GAS_KWH_PER_M3)
+        const dynamicGasProxy = configuredProxy > 0
+          ? configuredProxy
+          : DEFAULT_DYNAMIC_GAS_KWH_PER_M3
+        const nextGasPricePerM3 = nextBasePrice * dynamicGasProxy
+
         if (pricingType === 'dynamic') {
           setConsumerPrice(nextBasePrice.toFixed(4))
+          setGasPrice(nextGasPricePerM3.toFixed(4))
         }
       } catch (err) {
         if (isMounted) {
@@ -341,7 +369,7 @@ export default function EnergyPriceModal({
       isMounted = false
       window.clearInterval(intervalId)
     }
-  }, [getAuthToken, pricingType, showDynamicChart])
+  }, [gasProxyKwhPerM3, getAuthToken, pricingType, showDynamicChart])
 
   const handleShowChartOnUiChange = (visible: boolean) => {
     setShowDynamicChart(visible)
@@ -369,6 +397,9 @@ export default function EnergyPriceModal({
           : parseNumber(producerPrice, 0.10),
         consumerMargin: parseNumber(consumerMargin, 0.05),
         producerMargin: parseNumber(producerMargin, 0.02),
+        gasPrice: parseNumber(gasPrice, DEFAULT_GAS_PRICE_PER_M3),
+        gasMargin: parseNumber(gasMargin, DEFAULT_GAS_MARGIN_PER_M3),
+        gasProxyKwhPerM3: parseNumber(gasProxyKwhPerM3, DEFAULT_DYNAMIC_GAS_KWH_PER_M3),
       }
 
       const key = `energy_pricing_${environmentId}`
@@ -424,7 +455,7 @@ export default function EnergyPriceModal({
         <div className="p-6 space-y-6">
           {error && <p className="text-red-300 text-sm">{error}</p>}
 
-          {entsoeLoading && showDynamicChart && (
+          {entsoeLoading && (showDynamicChart || pricingType === 'dynamic') && (
             <p className="text-light-1 text-xs opacity-80">Updating dynamic prices in background...</p>
           )}
 
@@ -457,7 +488,7 @@ export default function EnergyPriceModal({
 
           {/* Pricing Fields */}
           {pricingType === 'fixed' ? (
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div>
                 <label className="block text-light-1 text-sm font-medium mb-2">Consumer Price (€/kWh)</label>
                 <input
@@ -480,6 +511,17 @@ export default function EnergyPriceModal({
                 />
                 <p className="text-xs text-light-1 opacity-70 mt-1">What you get when producing</p>
               </div>
+              <div>
+                <label className="block text-light-1 text-sm font-medium mb-2">Gas Price (€/m³)</label>
+                <input
+                  type="number"
+                  step="0.001"
+                  value={gasPrice}
+                  onChange={(e) => setGasPrice(e.target.value)}
+                  className="w-full px-3 py-2 bg-dark-2 bg-opacity-50 text-light-2 border border-light-2 border-opacity-20 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-2"
+                />
+                <p className="text-xs text-light-1 opacity-70 mt-1">Used for gas cost calculation</p>
+              </div>
             </div>
           ) : (
             <div className="bg-dark-2 bg-opacity-50 rounded-lg p-4 text-sm text-light-1">
@@ -487,14 +529,47 @@ export default function EnergyPriceModal({
               <p className="text-xs opacity-80 mt-1">
                 Active dynamic base price: €{parseNumber(consumerPrice, 0.30).toFixed(4)}/kWh
               </p>
+              <p className="text-xs opacity-80 mt-1">
+                Active dynamic gas price: €{parseNumber(gasPrice, DEFAULT_GAS_PRICE_PER_M3).toFixed(4)}/m³
+              </p>
+              <p className="text-xs opacity-80 mt-1">
+                Dynamic gas consumer tariff: €{(parseNumber(gasPrice, DEFAULT_GAS_PRICE_PER_M3) + parseNumber(gasMargin, DEFAULT_GAS_MARGIN_PER_M3)).toFixed(4)}/m³
+              </p>
               <p className="text-xs opacity-70 mt-2">
-                Consumer and producer both use the current dynamic price as base.
+                Gas price is imported from ENTSOE electricity base price using {parseNumber(gasProxyKwhPerM3, DEFAULT_DYNAMIC_GAS_KWH_PER_M3).toFixed(2)} kWh/m³.
               </p>
             </div>
           )}
 
+          {pricingType === 'dynamic' && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-light-1 text-sm font-medium mb-2">Dynamic Gas Base (€/m³)</label>
+                <input
+                  type="number"
+                  step="0.001"
+                  value={parseNumber(gasPrice, DEFAULT_GAS_PRICE_PER_M3).toFixed(4)}
+                  readOnly
+                  className="w-full px-3 py-2 bg-dark-2 bg-opacity-50 text-light-2 border border-light-2 border-opacity-20 rounded-lg opacity-80"
+                />
+                <p className="text-xs text-light-1 opacity-70 mt-1">Auto-updated from ENTSOE and saved as fallback value.</p>
+              </div>
+              <div>
+                <label className="block text-light-1 text-sm font-medium mb-2">Gas Proxy Factor (kWh/m³)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={gasProxyKwhPerM3}
+                  onChange={(e) => setGasProxyKwhPerM3(e.target.value)}
+                  className="w-full px-3 py-2 bg-dark-2 bg-opacity-50 text-light-2 border border-light-2 border-opacity-20 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-2"
+                />
+                <p className="text-xs text-light-1 opacity-70 mt-1">Conversion factor used for ENTSOE electricity → gas proxy.</p>
+              </div>
+            </div>
+          )}
+
           {/* Margin Fields */}
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div>
               <label className="block text-light-1 text-sm font-medium mb-2">Consumer Margin (€/kWh)</label>
               <input
@@ -516,6 +591,17 @@ export default function EnergyPriceModal({
                 className="w-full px-3 py-2 bg-dark-2 bg-opacity-50 text-light-2 border border-light-2 border-opacity-20 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-2"
               />
               <p className="text-xs text-light-1 opacity-70 mt-1">Added on top of dynamic producer base</p>
+            </div>
+            <div>
+              <label className="block text-light-1 text-sm font-medium mb-2">Gas Consumer Margin (€/m³)</label>
+              <input
+                type="number"
+                step="0.001"
+                value={gasMargin}
+                onChange={(e) => setGasMargin(e.target.value)}
+                className="w-full px-3 py-2 bg-dark-2 bg-opacity-50 text-light-2 border border-light-2 border-opacity-20 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-2"
+              />
+              <p className="text-xs text-light-1 opacity-70 mt-1">Added on top of gas base tariff.</p>
             </div>
           </div>
 
@@ -692,7 +778,7 @@ export default function EnergyPriceModal({
             <p className="font-medium mb-2">Summary:</p>
             {pricingType === 'dynamic' && (
               <p className="mb-2 text-xs text-light-1 opacity-80">
-                Dynamic mode uses ENTSOE base price; supplier margin is added on top.
+                Dynamic mode uses ENTSOE base price; electricity and gas consumer margins are added on top.
               </p>
             )}
             {pricingType === 'dynamic' ? (
@@ -701,7 +787,10 @@ export default function EnergyPriceModal({
                   Consumer: dynamic base €{parseNumber(consumerPrice, 0.30).toFixed(4)}/kWh + €{parseNumber(consumerMargin, 0.05).toFixed(4)}/kWh margin
                 </p>
                 <p>
-                  Producer: dynamic base €{parseNumber(consumerPrice, 0.30).toFixed(4)}/kWh + €{parseNumber(producerMargin, 0.02).toFixed(4)}/kWh margin
+                  Producer: dynamic base €{parseNumber(consumerPrice, 0.30).toFixed(4)}/kWh - €{parseNumber(producerMargin, 0.02).toFixed(4)}/kWh margin
+                </p>
+                <p>
+                  Gas consumer: dynamic base €{parseNumber(gasPrice, DEFAULT_GAS_PRICE_PER_M3).toFixed(4)}/m³ + €{parseNumber(gasMargin, DEFAULT_GAS_MARGIN_PER_M3).toFixed(4)}/m³ margin = €{(parseNumber(gasPrice, DEFAULT_GAS_PRICE_PER_M3) + parseNumber(gasMargin, DEFAULT_GAS_MARGIN_PER_M3)).toFixed(4)}/m³
                 </p>
               </>
             ) : (
@@ -711,6 +800,9 @@ export default function EnergyPriceModal({
                 </p>
                 <p>
                   Producer: €{parseNumber(producerPrice, 0.10).toFixed(4)}/kWh - €{parseNumber(producerMargin, 0.02).toFixed(4)}/kWh margin
+                </p>
+                <p>
+                  Gas consumer: €{parseNumber(gasPrice, DEFAULT_GAS_PRICE_PER_M3).toFixed(4)}/m³ + €{parseNumber(gasMargin, DEFAULT_GAS_MARGIN_PER_M3).toFixed(4)}/m³ margin = €{(parseNumber(gasPrice, DEFAULT_GAS_PRICE_PER_M3) + parseNumber(gasMargin, DEFAULT_GAS_MARGIN_PER_M3)).toFixed(4)}/m³
                 </p>
               </>
             )}

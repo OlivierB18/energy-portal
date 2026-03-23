@@ -6,6 +6,71 @@ import { useAuth0 } from '@auth0/auth0-react'
 
 const OVERVIEW_TEXT_STORAGE_KEY = 'overview_text_config_v1'
 const HA_ENVIRONMENTS_CACHE_KEY = 'ha_environments_cache_v1'
+const OVERVIEW_STATUS_CACHE_KEY = 'overview_status_cache_v2'
+const OVERVIEW_REFRESH_INTERVAL_MS = 10_000
+const OVERVIEW_OFFLINE_THRESHOLD = 6
+const OVERVIEW_STALE_AFTER_MS = OVERVIEW_REFRESH_INTERVAL_MS * OVERVIEW_OFFLINE_THRESHOLD
+
+interface OverviewStatusSnapshot {
+  status: Environment['status']
+  currentPower?: number
+  dailyUsage?: number
+  lastUpdate?: string
+  lastSeenAt?: number
+}
+
+const readOverviewStatusCache = (): Record<string, OverviewStatusSnapshot> => {
+  try {
+    const stored = localStorage.getItem(OVERVIEW_STATUS_CACHE_KEY)
+    if (!stored) {
+      return {}
+    }
+
+    const parsed = JSON.parse(stored)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, OverviewStatusSnapshot>
+      : {}
+  } catch {
+    return {}
+  }
+}
+
+const writeOverviewStatusCache = (cache: Record<string, OverviewStatusSnapshot>) => {
+  try {
+    localStorage.setItem(OVERVIEW_STATUS_CACHE_KEY, JSON.stringify(cache))
+  } catch {
+    // Ignore local cache write failures.
+  }
+}
+
+const updateOverviewStatusCache = (
+  environmentId: string,
+  updates: Partial<OverviewStatusSnapshot>,
+) => {
+  const cache = readOverviewStatusCache()
+  const existing = cache[environmentId] || { status: 'offline' as const }
+  cache[environmentId] = {
+    ...existing,
+    ...updates,
+  }
+  writeOverviewStatusCache(cache)
+}
+
+const getCachedOverviewStatus = (environmentId: string): OverviewStatusSnapshot | null => {
+  const cache = readOverviewStatusCache()
+  const snapshot = cache[environmentId]
+  if (!snapshot) {
+    return null
+  }
+
+  const lastSeenAt = typeof snapshot.lastSeenAt === 'number' ? snapshot.lastSeenAt : 0
+  const isFresh = lastSeenAt > 0 && (Date.now() - lastSeenAt) <= OVERVIEW_STALE_AFTER_MS
+
+  return {
+    ...snapshot,
+    status: isFresh ? 'online' : 'offline',
+  }
+}
 
 interface OverviewTextConfig {
   title: string
@@ -146,20 +211,64 @@ export default function MultiEnvironmentOverview({
         const loaded: HaEnvironmentPayload[] = Array.isArray(data?.environments)
           ? data.environments
           : []
-        const nextEnvironments: Environment[] = loaded.map((env: HaEnvironmentPayload) => ({
-          id: String(env.id),
-          name: String(env.name || env.id),
-          type: (env.type as Environment['type']) || 'home_assistant',
-          config: {
-            baseUrl: env.config?.baseUrl || '',
-            apiKey: env.config?.apiKey || '',
-            siteId: env.config?.siteId || '',
-            notes: env.config?.notes || '',
-          },
-          status: 'connecting',
-          lastUpdate: '-',
-        }))
-        setEnvironments(nextEnvironments)
+
+        // Build a map of current environments to preserve their status across reloads
+        const currentById = new Map(environments.map((env) => [String(env.id), env]))
+
+        const nextEnvironments: Environment[] = loaded.map((env: HaEnvironmentPayload) => {
+          const envId = String(env.id)
+          const existing = currentById.get(envId)
+          const cachedStatus = getCachedOverviewStatus(envId)
+          const resolvedStatus = existing?.status && existing.status !== 'connecting'
+            ? existing.status
+            : cachedStatus?.status ?? 'offline'
+
+          return {
+            id: envId,
+            name: String(env.name || env.id),
+            type: (env.type as Environment['type']) || 'home_assistant',
+            config: {
+              baseUrl: env.config?.baseUrl || '',
+              apiKey: env.config?.apiKey || '',
+              siteId: env.config?.siteId || '',
+              notes: env.config?.notes || '',
+            },
+            status: resolvedStatus,
+            currentPower: existing?.currentPower ?? cachedStatus?.currentPower,
+            dailyUsage: existing?.dailyUsage ?? cachedStatus?.dailyUsage,
+            lastUpdate: existing?.lastUpdate ?? cachedStatus?.lastUpdate ?? '-',
+          }
+        })
+
+        const dedupedEnvironments: Environment[] = []
+        const seenIdKeys = new Set<string>()
+        const seenSignatureKeys = new Set<string>()
+
+        for (const env of nextEnvironments) {
+          const idKey = String(env.id || '').trim().toLowerCase()
+          if (!idKey || seenIdKeys.has(idKey)) {
+            continue
+          }
+
+          const signatureKey = [
+            String(env.name || '').trim().toLowerCase(),
+            String(env.type || '').trim().toLowerCase(),
+            String(env.config?.baseUrl || '').trim().toLowerCase(),
+          ].join('|')
+
+          if (signatureKey !== '||' && seenSignatureKeys.has(signatureKey)) {
+            continue
+          }
+
+          seenIdKeys.add(idKey)
+          if (signatureKey !== '||') {
+            seenSignatureKeys.add(signatureKey)
+          }
+
+          dedupedEnvironments.push(env)
+        }
+
+        setEnvironments(dedupedEnvironments)
       } catch (error) {
         setEnvError(error instanceof Error ? error.message : 'Unable to load environments')
         setEnvironments([])
@@ -221,105 +330,268 @@ export default function MultiEnvironmentOverview({
   }, [getAccessTokenSilently, getIdTokenClaims, isAuthenticated, isAdmin])
 
   useEffect(() => {
-    const parseValue = (value?: string): number => {
-      const parsed = parseFloat(value || '')
+    type LiveEntity = {
+      entity_id: string
+      state: string
+      domain: string
+      unit_of_measurement?: string
+    }
+
+    type LiveMetrics = {
+      currentPowerKw?: number | string | null
+      dailyElectricityKwh?: number | string | null
+    }
+
+    const parseValue = (value?: string | number | null): number => {
+      if (typeof value === 'number') {
+        return Number.isFinite(value) ? value : 0
+      }
+
+      const parsed = parseFloat(typeof value === 'string' ? value : '')
       return Number.isNaN(parsed) ? 0 : parsed
     }
 
-    const findSensorByKeywords = (entities: Array<{ entity_id: string; state: string; domain: string }>, keywords: string[]) => {
+    const parseMetricValue = (value?: number | string | null): number | null => {
+      if (typeof value === 'number') {
+        return Number.isFinite(value) ? value : null
+      }
+
+      if (typeof value === 'string') {
+        const parsed = parseFloat(value)
+        return Number.isNaN(parsed) ? null : parsed
+      }
+
+      return null
+    }
+
+    const normalizePowerToKw = (power: number, unit?: string) => {
+      const normalizedUnit = String(unit || '').trim().toLowerCase()
+      if (normalizedUnit === 'w' || normalizedUnit === 'watt' || normalizedUnit === 'watts') {
+        return power / 1000
+      }
+
+      if (normalizedUnit === 'kw' || normalizedUnit === 'kilowatt' || normalizedUnit === 'kilowatts') {
+        return power
+      }
+
+      return power > 100 ? power / 1000 : power
+    }
+
+    const findSensorByKeywords = (
+      entities: LiveEntity[],
+      includeKeywords: string[],
+      excludeKeywords: string[] = [],
+    ) => {
       return entities.find((entity) =>
         entity.domain === 'sensor' &&
-        keywords.some((keyword) => entity.entity_id.toLowerCase().includes(keyword.toLowerCase())),
+        includeKeywords.some((keyword) => entity.entity_id.toLowerCase().includes(keyword.toLowerCase())) &&
+        !excludeKeywords.some((keyword) => entity.entity_id.toLowerCase().includes(keyword.toLowerCase())),
       )
     }
 
-    const deriveLiveData = (entities: Array<{ entity_id: string; state: string; domain: string }>) => {
-      const powerEntity = findSensorByKeywords(entities, ['power', 'watt', 'current_power', 'active_power'])
-      const dailyEntity = findSensorByKeywords(entities, ['energy_today', 'daily_energy', 'today', 'day_energy'])
+    const deriveLiveData = (entities: LiveEntity[], metrics: LiveMetrics | null) => {
+      const serverPower = parseMetricValue(metrics?.currentPowerKw)
+      const serverDailyUsage = parseMetricValue(metrics?.dailyElectricityKwh)
 
-      let currentPower = parseValue(powerEntity?.state)
-      if (currentPower > 100) {
-        currentPower = currentPower / 1000
-      }
+      const powerEntity = findSensorByKeywords(
+        entities,
+        ['power', 'watt', 'current_power', 'active_power', 'vermogen'],
+        ['energy', 'kwh', 'daily', 'today', 'day', 'month'],
+      )
+      const dailyEntity = findSensorByKeywords(
+        entities,
+        [
+          'energy_today',
+          'daily_energy',
+          'today_energy',
+          'day_energy',
+          'consumption_today',
+          'day_consumption',
+          'verbruik_dag',
+          'daily',
+          'today',
+        ],
+        ['gas', 'price', 'cost', 'tariff', 'euro'],
+      )
+
+      const currentPower =
+        serverPower ??
+        normalizePowerToKw(parseValue(powerEntity?.state), powerEntity?.unit_of_measurement)
+      const dailyUsage = serverDailyUsage ?? parseValue(dailyEntity?.state)
+
+      const normalizedCurrentPower = Number.isFinite(currentPower) ? currentPower : 0
+      const normalizedDailyUsage = Math.max(0, dailyUsage)
 
       return {
-        currentPower: Number(currentPower.toFixed(2)),
-        dailyUsage: Number(parseValue(dailyEntity?.state).toFixed(2)),
+        currentPower: Number(normalizedCurrentPower.toFixed(2)),
+        dailyUsage: Number(normalizedDailyUsage.toFixed(2)),
       }
     }
 
     const environmentIds = environmentIdsSignature ? environmentIdsSignature.split('|') : []
+    let latestRefreshRequestId = 0
+    let isDisposed = false
+
+    // Track consecutive failures per environment so a single transient error
+    // does not flash the card offline while it still has valid last-known data.
+    // NOT persisted across component remounts (e.g., navigating away and back),
+    // so the failure counter resets but the data (status, lastUpdate) is preserved.
+    const failureCounts: Record<string, number> = {}
+
+    const applyRefreshResult = (result: {
+      environmentId: string
+      status: 'online' | 'offline'
+      currentPower?: number
+      dailyUsage?: number
+      lastUpdate?: string
+    }) => {
+      if (result.status === 'online') {
+        failureCounts[result.environmentId] = 0
+        updateOverviewStatusCache(result.environmentId, {
+          status: 'online',
+          currentPower: result.currentPower,
+          dailyUsage: result.dailyUsage,
+          lastUpdate: result.lastUpdate,
+          lastSeenAt: Date.now(),
+        })
+      } else {
+        failureCounts[result.environmentId] = (failureCounts[result.environmentId] ?? 0) + 1
+      }
+
+      setEnvironments((prev) =>
+        prev.map((env) => {
+          if (env.id !== result.environmentId) {
+            return env
+          }
+
+          // If the refresh failed but the card was already online, keep showing
+          // the last-known data until we've seen enough consecutive failures.
+          if (result.status === 'offline' && env.status === 'online') {
+            const consecutive = failureCounts[result.environmentId] ?? 0
+            if (consecutive < OVERVIEW_OFFLINE_THRESHOLD) {
+              return env
+            }
+          }
+
+          if (result.status === 'offline') {
+            updateOverviewStatusCache(result.environmentId, {
+              status: 'offline',
+            })
+          }
+
+          return {
+            ...env,
+            status: result.status,
+            currentPower: result.currentPower ?? env.currentPower,
+            dailyUsage: result.dailyUsage ?? env.dailyUsage,
+            lastUpdate: result.lastUpdate ?? env.lastUpdate,
+          }
+        }),
+      )
+    }
+
+    const fetchEnvironmentStatus = async (environmentId: string, token: string) => {
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 6000)
+
+      try {
+        const response = await fetch(`/.netlify/functions/ha-entities?environmentId=${environmentId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: controller.signal,
+        })
+
+        if (!response.ok) {
+          return {
+            environmentId,
+            status: 'offline' as const,
+          }
+        }
+
+        const data = await response.json()
+        const entities: LiveEntity[] = Array.isArray(data?.entities) ? data.entities : []
+        const metrics: LiveMetrics | null =
+          data && typeof data === 'object' && data.metrics && typeof data.metrics === 'object'
+            ? (data.metrics as LiveMetrics)
+            : null
+        const liveData = deriveLiveData(entities, metrics)
+
+        return {
+          environmentId,
+          status: 'online' as const,
+          currentPower: liveData.currentPower,
+          dailyUsage: liveData.dailyUsage,
+          lastUpdate: new Date().toLocaleTimeString(),
+        }
+      } catch {
+        return {
+          environmentId,
+          status: 'offline' as const,
+        }
+      } finally {
+        clearTimeout(timeout)
+      }
+    }
 
     const refreshEnvironmentStatuses = async () => {
       if (!isAuthenticated || environmentIds.length === 0) {
         return
       }
 
+      const refreshRequestId = ++latestRefreshRequestId
+
       try {
         const token = await getAuthToken()
+        if (isDisposed || refreshRequestId !== latestRefreshRequestId) {
+          return
+        }
 
-        const refreshResults = await Promise.all(
-          environmentIds.map(async (environmentId) => {
-            try {
-              const response = await fetch(`/.netlify/functions/ha-entities?environmentId=${environmentId}`, {
-                headers: { Authorization: `Bearer ${token}` },
-              })
+        const refreshTasks = environmentIds.map(async (environmentId) => {
+          const result = await fetchEnvironmentStatus(environmentId, token)
 
-              if (!response.ok) {
-                return {
-                  environmentId,
-                  status: 'offline' as const,
-                }
-              }
+          if (isDisposed || refreshRequestId !== latestRefreshRequestId) {
+            return
+          }
 
-              const data = await response.json()
-              const entities = Array.isArray(data?.entities) ? data.entities : []
-              const liveData = deriveLiveData(entities)
+          applyRefreshResult(result)
+        })
 
-              return {
-                environmentId,
-                status: 'online' as const,
-                currentPower: liveData.currentPower,
-                dailyUsage: liveData.dailyUsage,
-                lastUpdate: new Date().toLocaleTimeString(),
-              }
-            } catch {
-              return {
-                environmentId,
-                status: 'offline' as const,
-              }
-            }
-          }),
-        )
+        await Promise.all(refreshTasks)
+      } catch {
+        if (isDisposed || refreshRequestId !== latestRefreshRequestId) {
+          return
+        }
 
-        const refreshById = new Map(refreshResults.map((result) => [result.environmentId, result]))
+        // Auth token failure counts as a failure for every environment.
+        // Use the same threshold so a brief auth hiccup doesn't flash all cards.
+        environmentIds.forEach((id) => {
+          failureCounts[id] = (failureCounts[id] ?? 0) + 1
+        })
+        
         setEnvironments((prev) =>
           prev.map((env) => {
-            const refreshed = refreshById.get(env.id)
-            if (!refreshed) {
+            const consecutive = failureCounts[env.id] ?? 0
+            if (env.status === 'online' && consecutive < OVERVIEW_OFFLINE_THRESHOLD) {
               return env
             }
-
-            return {
-              ...env,
-              status: refreshed.status,
-              currentPower: refreshed.currentPower ?? env.currentPower,
-              dailyUsage: refreshed.dailyUsage ?? env.dailyUsage,
-              lastUpdate: refreshed.lastUpdate ?? env.lastUpdate,
-            }
+            updateOverviewStatusCache(env.id, {
+              status: 'offline',
+            })
+            return { ...env, status: 'offline' as const }
           }),
         )
-      } catch {
-        setEnvironments((prev) => prev.map((env) => ({ ...env, status: 'offline' as const })))
       }
     }
 
     void refreshEnvironmentStatuses()
     const interval = setInterval(() => {
       void refreshEnvironmentStatuses()
-    }, 10000)
+    }, OVERVIEW_REFRESH_INTERVAL_MS)
 
-    return () => clearInterval(interval)
+    return () => {
+      isDisposed = true
+      latestRefreshRequestId += 1
+      clearInterval(interval)
+    }
   }, [environmentIdsSignature, getAccessTokenSilently, isAuthenticated])
 
   useEffect(() => {

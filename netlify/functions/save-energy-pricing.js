@@ -1,4 +1,6 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose'
+import { stripShardedEnvironmentMetadata } from './_environment-storage.js'
+import { getMergedPricingMap, saveBlobPricingMap } from './_pricing-storage.js'
 
 const getEnv = (key) => {
   const value = process.env[key]
@@ -113,6 +115,52 @@ const parsePricingMap = (input) => {
   return input && typeof input === 'object' && !Array.isArray(input) ? input : {}
 }
 
+const parseEnvironmentMap = (input) => {
+  if (!input) {
+    return {}
+  }
+
+  if (typeof input === 'string') {
+    try {
+      const parsed = JSON.parse(input)
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+
+  return input && typeof input === 'object' && !Array.isArray(input) ? input : {}
+}
+
+const parseHaConfig = (input) => {
+  if (!input) {
+    return {}
+  }
+
+  if (typeof input === 'string') {
+    try {
+      const parsed = JSON.parse(input)
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+
+  return input && typeof input === 'object' && !Array.isArray(input) ? input : {}
+}
+
+const sanitizeClientMetadata = (metadata) => {
+  const haConfig = parseHaConfig(metadata?.ha_config)
+
+  return {
+    ...stripShardedEnvironmentMetadata(metadata),
+    environments: null,
+    ha_environments: null,
+    energy_pricing: null,
+    ha_config: JSON.stringify(haConfig),
+  }
+}
+
 const normalizePricingConfig = (input) => {
   if (!input || typeof input !== 'object') {
     return null
@@ -130,6 +178,9 @@ const normalizePricingConfig = (input) => {
     producerPrice: parseNumber(input.producerPrice, 0.10),
     consumerMargin: parseNumber(input.consumerMargin, 0.05),
     producerMargin: parseNumber(input.producerMargin, 0.02),
+    gasPrice: parseNumber(input.gasPrice, 1.35),
+    gasMargin: parseNumber(input.gasMargin, 0),
+    gasProxyKwhPerM3: parseNumber(input.gasProxyKwhPerM3, 10.55),
     updatedAt: new Date().toISOString(),
   }
 }
@@ -154,21 +205,33 @@ export const handler = async (event) => {
       return { statusCode: 400, body: JSON.stringify({ error: 'Missing or invalid pricing config' }) }
     }
 
-    const domain = getEnv('AUTH0_DOMAIN')
-    const managementToken = await getManagementToken(domain)
-    const metadata = await getClientMetadata(domain, managementToken)
-    const currentPricingMap = parsePricingMap(metadata.energy_pricing)
+    const { pricingMap: currentPricingMap } = await getMergedPricingMap({
+      event,
+      metadata: {},
+    })
 
     const nextPricingMap = {
       ...currentPricingMap,
       [environmentId]: config,
     }
 
-    await updateClientMetadata(domain, managementToken, {
-      ...metadata,
-      // Auth0 client_metadata can enforce scalar schemas, so persist as JSON string.
-      energy_pricing: JSON.stringify(nextPricingMap),
-    })
+    await saveBlobPricingMap(event, nextPricingMap)
+
+    let metadataCleanupWarning = null
+
+    // Best effort: clean legacy metadata field to avoid Auth0 schema errors.
+    try {
+      const domain = getEnv('AUTH0_DOMAIN')
+      const managementToken = await getManagementToken(domain)
+      const metadata = await getClientMetadata(domain, managementToken)
+
+      await updateClientMetadata(domain, managementToken, sanitizeClientMetadata(metadata))
+    } catch (cleanupError) {
+      metadataCleanupWarning = cleanupError instanceof Error
+        ? cleanupError.message
+        : 'Unable to compact Auth0 pricing metadata'
+      console.warn('[SAVE-ENERGY-PRICING] Metadata cleanup warning:', metadataCleanupWarning)
+    }
 
     return {
       statusCode: 200,
@@ -176,6 +239,7 @@ export const handler = async (event) => {
         success: true,
         environmentId,
         config,
+        ...(metadataCleanupWarning ? { warning: metadataCleanupWarning } : {}),
       }),
     }
   } catch (error) {

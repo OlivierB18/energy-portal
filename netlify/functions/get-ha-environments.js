@@ -1,10 +1,5 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose'
-import {
-  getFallbackEnvironments as getFallbackEnvironmentsFromConfig,
-  mapLegacyHaEnvironments as mapLegacyHaEnvironmentsFromConfig,
-  mapMetadataEnvironments as mapMetadataEnvironmentsFromConfig,
-  mergeEnvironments as mergeEnvironmentsFromConfig,
-} from './_ha-config.js'
+import { getMergedEnvironments } from './_environment-storage.js'
 
 const getEnv = (key) => {
   const value = process.env[key]
@@ -19,35 +14,54 @@ const getOptionalEnv = (key) => {
   return value && value.trim().length > 0 ? value : null
 }
 
-const HA_ENVIRONMENTS = {
-  vacation: {
-    name: 'Brouwer TEST',
-    urlEnv: 'HA_BROUWER_TEST_URL',
-    tokenEnv: 'HA_BROUWER_TEST_TOKEN',
-  },
+const normalizeConfigValue = (value) => (value ? String(value) : '')
+
+const parseHaConfig = (rawValue) => {
+  if (!rawValue) {
+    return {}
+  }
+
+  if (typeof rawValue === 'string') {
+    try {
+      const parsed = JSON.parse(rawValue)
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+
+  return rawValue && typeof rawValue === 'object' && !Array.isArray(rawValue) ? rawValue : {}
 }
 
-const getFallbackEnvironments = () =>
-  Object.entries(HA_ENVIRONMENTS)
-    .map(([id, env]) => {
-      const url = getOptionalEnv(env.urlEnv)
-      const token = getOptionalEnv(env.tokenEnv)
-      if (!url || !token) {
-        return null
-      }
-      return {
-        id,
-        name: env.name || id,
-        type: 'home_assistant',
-        config: {
-          baseUrl: url,
-          apiKey: token,
-        },
-      }
-    })
-    .filter(Boolean)
+const getEnvironmentNames = (metadata = {}) => {
+  const haConfig = parseHaConfig(metadata.ha_config)
+  const rawMap = haConfig.environment_names
 
-const normalizeConfigValue = (value) => (value ? String(value) : '')
+  if (!rawMap) {
+    return {}
+  }
+
+  const map = typeof rawMap === 'string'
+    ? (() => {
+        try {
+          const parsed = JSON.parse(rawMap)
+          return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+        } catch {
+          return {}
+        }
+      })()
+    : (rawMap && typeof rawMap === 'object' && !Array.isArray(rawMap) ? rawMap : {})
+
+  return Object.entries(map).reduce((acc, [id, name]) => {
+    const normalizedId = String(id || '').trim()
+    const normalizedName = String(name || '').trim()
+    if (!normalizedId || !normalizedName) {
+      return acc
+    }
+    acc[normalizedId] = normalizedName
+    return acc
+  }, {})
+}
 
 const mapMetadataEnvironments = (metadata) => {
   const envMap = metadata?.environments || {}
@@ -273,29 +287,29 @@ export const handler = async (event) => {
       console.warn('get-ha-environments metadata warning:', metadataWarning)
     }
 
-    const metadataEnvironments = mapMetadataEnvironmentsFromConfig(metadata)
-    const legacyEnvironments = mapLegacyHaEnvironmentsFromConfig(metadata)
-    const fallbackEnvironments = getFallbackEnvironmentsFromConfig(getOptionalEnv)
+    const { environments, source } = await getMergedEnvironments({
+      event,
+      metadata,
+      getOptionalEnv,
+    })
 
-    const environments = mergeEnvironmentsFromConfig(
-      metadataEnvironments,
-      legacyEnvironments,
-      fallbackEnvironments,
-    )
+    const environmentNames = getEnvironmentNames(metadata)
+    const environmentsWithNames = environments.map((env) => ({
+      ...env,
+      name: env.name || environmentNames[env.id] || env.id,
+    }))
 
-    if (environments.length === 0) {
+    if (environmentsWithNames.length === 0) {
       throw new Error('No environments configured')
     }
 
-    console.log('Returning environments:', environments.length)
+    console.log('Returning environments:', environmentsWithNames.length)
 
     return {
       statusCode: 200,
       body: JSON.stringify({
-        environments,
-        source: metadataEnvironments.length > 0 || legacyEnvironments.length > 0
-          ? 'metadata'
-          : 'fallback',
+        environments: environmentsWithNames,
+        source,
         ...(metadataWarning ? { warning: metadataWarning } : {}),
       }),
     }

@@ -45,13 +45,39 @@ interface PowerSample {
   power: number
 }
 
+interface HistoryArchivePayload {
+  fetchTime: number
+  powerSamples: PowerSample[]
+  productionSamples: PowerSample[]
+}
+
+interface HaMetricSources {
+  currentPowerEntityId: string | null
+  currentProductionEntityId: string | null
+  dailyElectricityEntityId: string | null
+  monthlyElectricityEntityId: string | null
+  dailyProductionEntityId: string | null
+  monthlyProductionEntityId: string | null
+  dailyGasEntityId: string | null
+  monthlyGasEntityId: string | null
+  electricityTotalEntityId: string | null
+  electricityTotalEntityIds: string[] | null
+  electricityProductionTotalEntityId: string | null
+  electricityProductionTotalEntityIds: string[] | null
+  gasTotalEntityId: string | null
+}
+
 interface HaMetricsSnapshot {
   currentPowerKw: number | null
+  currentProductionKw: number | null
   dailyElectricityKwh: number | null
   monthlyElectricityKwh: number | null
+  dailyProductionKwh: number | null
+  monthlyProductionKwh: number | null
   dailyGasM3: number | null
   monthlyGasM3: number | null
   powerEntityId: string | null
+  sources: HaMetricSources
 }
 
 interface DynamicPricePoint {
@@ -73,6 +99,89 @@ interface DynamicPriceChartPoint {
 const GAS_METER_ENTITY_ID = 'sensor.gas_meter_gas_consumption'
 const DYNAMIC_PRICE_CHART_EVENT = 'energy-dynamic-chart-visibility-changed'
 const HA_ENVIRONMENTS_UPDATED_EVENT = 'ha-environments-updated'
+const MAX_LIVE_SAMPLE_POINTS = 8000
+const MAX_ARCHIVE_HOURLY_POINTS = 60000
+const ARCHIVE_LOOKBACK_DAYS = 365 * 6
+const ARCHIVE_REFRESH_TTL_MS = 12 * 60 * 60_000
+const configuredDefaultGasPrice = Number(import.meta.env.VITE_DEFAULT_GAS_PRICE_EUR_PER_M3)
+const DEFAULT_GAS_PRICE_PER_M3 = Number.isFinite(configuredDefaultGasPrice) && configuredDefaultGasPrice > 0
+  ? configuredDefaultGasPrice
+  : 1.35
+const configuredDefaultGasMargin = Number(import.meta.env.VITE_DEFAULT_GAS_MARGIN_EUR_PER_M3)
+const DEFAULT_GAS_MARGIN_PER_M3 = Number.isFinite(configuredDefaultGasMargin)
+  ? configuredDefaultGasMargin
+  : 0
+const configuredDynamicGasProxy = Number(import.meta.env.VITE_DYNAMIC_GAS_KWH_PER_M3)
+const DEFAULT_DYNAMIC_GAS_KWH_PER_M3 = Number.isFinite(configuredDynamicGasProxy) && configuredDynamicGasProxy > 0
+  ? configuredDynamicGasProxy
+  : 10.55
+
+const storeLocalJson = (key: string, value: unknown) => {
+  try {
+    localStorage.setItem(key, JSON.stringify(value))
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.warn('[Storage] Failed to persist local cache for key:', key, error)
+  }
+}
+
+const mergePowerSamples = (
+  seriesList: Array<PowerSample[]>,
+  {
+    resolutionMs = 10_000,
+    maxPoints,
+  }: { resolutionMs?: number; maxPoints?: number } = {},
+): PowerSample[] => {
+  const uniqueMap = new Map<number, PowerSample>()
+
+  seriesList.forEach((series) => {
+    series.forEach((sample) => {
+      if (
+        !sample ||
+        typeof sample.timestamp !== 'number' ||
+        typeof sample.power !== 'number' ||
+        !Number.isFinite(sample.timestamp) ||
+        !Number.isFinite(sample.power)
+      ) {
+        return
+      }
+
+      const key = Math.floor(sample.timestamp / resolutionMs) * resolutionMs
+      const existing = uniqueMap.get(key)
+      if (!existing || sample.timestamp > existing.timestamp) {
+        uniqueMap.set(key, sample)
+      }
+    })
+  })
+
+  const merged = Array.from(uniqueMap.values()).sort((a, b) => a.timestamp - b.timestamp)
+  if (typeof maxPoints === 'number' && maxPoints > 0 && merged.length > maxPoints) {
+    return merged.slice(-maxPoints)
+  }
+
+  return merged
+}
+
+const sanitizePowerSampleArray = (input: unknown): PowerSample[] => {
+  if (!Array.isArray(input)) {
+    return []
+  }
+
+  return mergePowerSamples(
+    [
+      input.filter(
+        (sample): sample is PowerSample =>
+          typeof sample === 'object' &&
+          sample !== null &&
+          typeof (sample as PowerSample).timestamp === 'number' &&
+          typeof (sample as PowerSample).power === 'number' &&
+          Number.isFinite((sample as PowerSample).timestamp) &&
+          Number.isFinite((sample as PowerSample).power),
+      ) as PowerSample[],
+    ],
+    { resolutionMs: 10_000 },
+  )
+}
 
 const normalizeEnvironmentConfigs = (input: unknown): EnvironmentConfig[] => {
   if (!Array.isArray(input)) {
@@ -173,6 +282,22 @@ const parseEntsoeBasePrice = (input: unknown): number | null => {
   return total / values.length
 }
 
+const parseEntsoeGasProxyPrice = (
+  input: unknown,
+  proxyKwhPerM3: number = DEFAULT_DYNAMIC_GAS_KWH_PER_M3,
+): number | null => {
+  const basePerKwh = parseEntsoeBasePrice(input)
+  if (basePerKwh === null || !Number.isFinite(basePerKwh) || basePerKwh < 0) {
+    return null
+  }
+
+  const factor = Number.isFinite(proxyKwhPerM3) && proxyKwhPerM3 > 0
+    ? proxyKwhPerM3
+    : DEFAULT_DYNAMIC_GAS_KWH_PER_M3
+
+  return basePerKwh * factor
+}
+
 const parseNumericValue = (value: unknown) => {
   if (typeof value === 'number') {
     return Number.isFinite(value) ? value : NaN
@@ -204,6 +329,33 @@ const parseNumericValue = (value: unknown) => {
   normalized = normalized.replace(/[^0-9+\-.]/g, '')
   const parsed = Number(normalized)
   return Number.isFinite(parsed) ? parsed : NaN
+}
+
+const convertEnergyToKwh = (value: number, unit: unknown) => {
+  if (!Number.isFinite(value)) {
+    return NaN
+  }
+
+  const normalized = String(unit || '').trim().toLowerCase()
+  if (normalized === 'wh') {
+    return value / 1000
+  }
+  if (normalized === 'mwh') {
+    return value * 1000
+  }
+  return value
+}
+
+const convertGasToM3 = (value: number, unit: unknown) => {
+  if (!Number.isFinite(value)) {
+    return NaN
+  }
+
+  const normalized = String(unit || '').trim().toLowerCase()
+  if (normalized === 'l' || normalized === 'liter' || normalized === 'liters') {
+    return value / 1000
+  }
+  return value
 }
 
 const findGasConsumptionEntity = (entities: HaEntity[]) => {
@@ -240,20 +392,55 @@ const findGasConsumptionEntity = (entities: HaEntity[]) => {
 // Format chart labels: time on top, date below (e.g. "14:00\n10-03")
 const formatChartAxisLabel = (timestamp: number, range: 'today' | 'week' | 'month'): string => {
   const date = new Date(timestamp)
-  
+  const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  const dateStr = date.toLocaleDateString([], { day: '2-digit', month: '2-digit' })
+
   if (range === 'today') {
-    // For today: show time on top line, date on bottom
-    const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    const dateStr = date.toLocaleDateString([], { day: '2-digit', month: '2-digit' })
     return `${time}\n${dateStr}`
-  } else if (range === 'week') {
-    // For week: show date with weekday
-    const dateStr = date.toLocaleDateString([], { day: '2-digit', month: '2-digit' })
+  }
+
+  if (range === 'week') {
     const dayStr = date.toLocaleDateString([], { weekday: 'short' })
-    return `${dayStr}\n${dateStr}`
-  } else {
-    // For month: just date
-    return date.toLocaleDateString([], { day: '2-digit', month: '2-digit' })
+    return `${time}\n${dayStr} ${dateStr}`
+  }
+
+  return `${time}\n${dateStr}`
+}
+
+const parseInputDate = (value: string): Date | null => {
+  const [year, month, day] = value.split('-').map(Number)
+  const isValidDate = Number.isFinite(year) && Number.isFinite(month) && Number.isFinite(day)
+  if (!isValidDate) {
+    return null
+  }
+
+  return new Date(year, month - 1, day)
+}
+
+const getBoundsFromInputDates = (
+  startDateInput: string,
+  endDateInput: string,
+): { startMs: number; endMs: number } => {
+  const fallbackDate = new Date()
+  const parsedStart = parseInputDate(startDateInput) || fallbackDate
+  const parsedEnd = parseInputDate(endDateInput) || fallbackDate
+
+  const start = new Date(parsedStart)
+  const end = new Date(parsedEnd)
+
+  start.setHours(0, 0, 0, 0)
+  end.setHours(23, 59, 59, 999)
+
+  if (start.getTime() > end.getTime()) {
+    return {
+      startMs: end.getTime(),
+      endMs: start.getTime(),
+    }
+  }
+
+  return {
+    startMs: start.getTime(),
+    endMs: end.getTime(),
   }
 }
 
@@ -275,6 +462,9 @@ const normalizePricingConfig = (input: unknown): EnergyPricingConfig | null => {
     producerPrice: parseNumber(value.producerPrice, 0.10),
     consumerMargin: parseNumber(value.consumerMargin, 0.05),
     producerMargin: parseNumber(value.producerMargin, 0.02),
+    gasPrice: parseNumber(value.gasPrice, DEFAULT_GAS_PRICE_PER_M3),
+    gasMargin: parseNumber(value.gasMargin, DEFAULT_GAS_MARGIN_PER_M3),
+    gasProxyKwhPerM3: parseNumber(value.gasProxyKwhPerM3, DEFAULT_DYNAMIC_GAS_KWH_PER_M3),
   }
 }
 
@@ -293,16 +483,52 @@ const normalizeHaMetricsSnapshot = (input: unknown): HaMetricsSnapshot | null =>
     return Number.isFinite(parsed) ? parsed : null
   }
 
+  const toStringOrNull = (raw: unknown) => {
+    if (typeof raw !== 'string') {
+      return null
+    }
+
+    const trimmed = raw.trim()
+    return trimmed.length > 0 ? trimmed : null
+  }
+
+  const rawSources = typeof value?.sources === 'object' && value?.sources !== null
+    ? (value.sources as Record<string, unknown>)
+    : {}
+
+  const toStringArrayOrNull = (raw: unknown): string[] | null => {
+    if (!Array.isArray(raw)) return null
+    const arr = raw.map((v) => toStringOrNull(v)).filter((v): v is string => v !== null)
+    return arr.length > 0 ? arr : null
+  }
+
+  const sources: HaMetricSources = {
+    currentPowerEntityId: toStringOrNull(rawSources.currentPowerEntityId),
+    currentProductionEntityId: toStringOrNull(rawSources.currentProductionEntityId),
+    dailyElectricityEntityId: toStringOrNull(rawSources.dailyElectricityEntityId),
+    monthlyElectricityEntityId: toStringOrNull(rawSources.monthlyElectricityEntityId),
+    dailyProductionEntityId: toStringOrNull(rawSources.dailyProductionEntityId),
+    monthlyProductionEntityId: toStringOrNull(rawSources.monthlyProductionEntityId),
+    dailyGasEntityId: toStringOrNull(rawSources.dailyGasEntityId),
+    monthlyGasEntityId: toStringOrNull(rawSources.monthlyGasEntityId),
+    electricityTotalEntityId: toStringOrNull(rawSources.electricityTotalEntityId),
+    electricityTotalEntityIds: toStringArrayOrNull(rawSources.electricityTotalEntityIds),
+    electricityProductionTotalEntityId: toStringOrNull(rawSources.electricityProductionTotalEntityId),
+    electricityProductionTotalEntityIds: toStringArrayOrNull(rawSources.electricityProductionTotalEntityIds),
+    gasTotalEntityId: toStringOrNull(rawSources.gasTotalEntityId),
+  }
+
   return {
     currentPowerKw: toNumberOrNull(value.currentPowerKw),
+    currentProductionKw: toNumberOrNull(value.currentProductionKw),
     dailyElectricityKwh: toNumberOrNull(value.dailyElectricityKwh),
     monthlyElectricityKwh: toNumberOrNull(value.monthlyElectricityKwh),
+    dailyProductionKwh: toNumberOrNull(value.dailyProductionKwh),
+    monthlyProductionKwh: toNumberOrNull(value.monthlyProductionKwh),
     dailyGasM3: toNumberOrNull(value.dailyGasM3),
     monthlyGasM3: toNumberOrNull(value.monthlyGasM3),
-    powerEntityId: typeof value?.sources === 'object' && value?.sources !== null &&
-      typeof (value.sources as Record<string, unknown>).currentPowerEntityId === 'string'
-      ? String((value.sources as Record<string, unknown>).currentPowerEntityId)
-      : null,
+    powerEntityId: sources.currentPowerEntityId,
+    sources,
   }
 }
 
@@ -323,7 +549,9 @@ export default function Dashboard({
 
   const [selectedEnvironment, setSelectedEnvironment] = useState<string>(selectedEnvironmentId ?? '')
   const [timeRange, setTimeRange] = useState<'today' | 'week' | 'month'>('today')
-  const [selectedChartDate, setSelectedChartDate] = useState<string>(formatDateForInput(new Date()))
+  const todayInput = formatDateForInput(new Date())
+  const [selectedStartDate, setSelectedStartDate] = useState<string>(todayInput)
+  const [selectedEndDate, setSelectedEndDate] = useState<string>(todayInput)
   const [allowedEnvironmentIds, setAllowedEnvironmentIds] = useState<string[] | null>(null)
   const [isCheckingPermissions, setIsCheckingPermissions] = useState(true)
   const [environments, setEnvironments] = useState<EnvironmentConfig[]>([])
@@ -340,20 +568,40 @@ export default function Dashboard({
   const [showHaConfig, setShowHaConfig] = useState(false)
   const [haRefreshKey, setHaRefreshKey] = useState(0)
   const [powerSamples, setPowerSamples] = useState<PowerSample[]>([])
+  const [productionSamples, setProductionSamples] = useState<PowerSample[]>([])
+  const [historicalRangeSamples, setHistoricalRangeSamples] = useState<PowerSample[]>([])
+  const [historicalProductionRangeSamples, setHistoricalProductionRangeSamples] = useState<PowerSample[]>([])
+  const [archivedPowerSamples, setArchivedPowerSamples] = useState<PowerSample[]>([])
+  const [archivedProductionSamples, setArchivedProductionSamples] = useState<PowerSample[]>([])
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false)
+  const [electricityUsageBuckets, setElectricityUsageBuckets] = useState<Array<{ timestamp: number; kwh: number }>>([])
+  const [isLoadingUsage, setIsLoadingUsage] = useState(false)
   const [gasMeterReadings, setGasMeterReadings] = useState<Array<{ timestamp: number; value: number }>>([])
   const [showPriceModal, setShowPriceModal] = useState(false)
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false)
   const [pricingConfig, setPricingConfig] = useState<EnergyPricingConfig | null>(null)
   const [dynamicConsumerPriceKwh, setDynamicConsumerPriceKwh] = useState<number | null>(null)
+  const [dynamicGasPricePerM3, setDynamicGasPricePerM3] = useState<number | null>(null)
   const [showDynamicPriceChart, setShowDynamicPriceChart] = useState(false)
   const [dynamicPricePoints, setDynamicPricePoints] = useState<DynamicPricePoint[]>([])
   const [dynamicPriceUpdatedAt, setDynamicPriceUpdatedAt] = useState<string | null>(null)
   const [dynamicPriceChartLoading, setDynamicPriceChartLoading] = useState(false)
   const [dynamicPriceChartError, setDynamicPriceChartError] = useState<string | null>(null)
   const [showFixedPriceLinesOnChart, setShowFixedPriceLinesOnChart] = useState(true)
+  const [environmentInstalledOnMs, setEnvironmentInstalledOnMs] = useState<number | null>(null)
   // Sensor connection status: 'connecting' | 'connected' | 'error'
-  const [_haConnectionStatus, setHaConnectionStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
+  const [haConnectionStatus, setHaConnectionStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   const { isAuthenticated, getIdTokenClaims, getAccessTokenSilently, user } = useAuth0()
+
+  const handleStartDateChange = useCallback((nextStartDate: string) => {
+    setSelectedStartDate(nextStartDate)
+    setSelectedEndDate((currentEndDate) => (nextStartDate > currentEndDate ? nextStartDate : currentEndDate))
+  }, [])
+
+  const handleEndDateChange = useCallback((nextEndDate: string) => {
+    setSelectedEndDate(nextEndDate)
+    setSelectedStartDate((currentStartDate) => (nextEndDate < currentStartDate ? nextEndDate : currentStartDate))
+  }, [])
 
   const getAuthToken = useCallback(async () => {
     const audience = import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined
@@ -368,6 +616,7 @@ export default function Dashboard({
     return String(source).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80)
   }, [user?.email, user?.sub])
   const haEntitiesCacheKey = `ha_entities_cache_v4_${selectedEnvironment || 'default'}_${userCacheScope}`
+  const userEnvironmentIdsCacheKey = `user_environment_ids_cache_v1_${userCacheScope}`
   const dynamicPriceCacheKey = `energy_dynamic_price_${selectedEnvironment || 'default'}`
   const dynamicPriceChartPreferenceKey = `energy_dynamic_chart_visible_${selectedEnvironment || 'default'}`
   const dynamicPriceFixedLinesPreferenceKey = `energy_dynamic_chart_show_fixed_lines_${selectedEnvironment || 'default'}`
@@ -490,16 +739,7 @@ export default function Dashboard({
   }, [haEnvironmentsCacheKey])
 
   useEffect(() => {
-    const getAuthToken = async () => {
-      const audience = import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined
-      return getAccessTokenSilently({
-        authorizationParams: { audience },
-      })
-    }
-
     const loadAssignments = async () => {
-      setIsCheckingPermissions(true)
-      
       if (!isAuthenticated) {
         setAllowedEnvironmentIds(null)
         setIsCheckingPermissions(false)
@@ -512,6 +752,25 @@ export default function Dashboard({
         return
       }
 
+      let hasCachedAssignments = false
+      try {
+        const cached = localStorage.getItem(userEnvironmentIdsCacheKey)
+        if (cached) {
+          const parsed = JSON.parse(cached)
+          if (Array.isArray(parsed)) {
+            const cachedIds = parsed.filter((id) => typeof id === 'string')
+            if (cachedIds.length > 0) {
+              setAllowedEnvironmentIds(cachedIds)
+              hasCachedAssignments = true
+            }
+          }
+        }
+      } catch {
+        // Ignore malformed permission cache.
+      }
+
+      setIsCheckingPermissions(!hasCachedAssignments)
+
       try {
         const claims = await getIdTokenClaims()
         const envClaim = 'https://brouwer-ems/environments'
@@ -519,6 +778,7 @@ export default function Dashboard({
 
         if (envs && envs.length > 0) {
           setAllowedEnvironmentIds(envs)
+          storeLocalJson(userEnvironmentIdsCacheKey, envs)
           setIsCheckingPermissions(false)
           return
         }
@@ -535,15 +795,18 @@ export default function Dashboard({
         const data = await response.json()
         const ids = Array.isArray(data?.environmentIds) ? data.environmentIds : []
         setAllowedEnvironmentIds(ids)
+        storeLocalJson(userEnvironmentIdsCacheKey, ids)
       } catch {
-        setAllowedEnvironmentIds([])
+        if (!hasCachedAssignments) {
+          setAllowedEnvironmentIds([])
+        }
       } finally {
         setIsCheckingPermissions(false)
       }
     }
 
     void loadAssignments()
-  }, [getAccessTokenSilently, getIdTokenClaims, isAuthenticated, isAdmin])
+  }, [getAuthToken, getIdTokenClaims, isAuthenticated, isAdmin, userEnvironmentIdsCacheKey])
 
   const visibleEnvironments = allowedEnvironmentIds
     ? environments.filter((env) => allowedEnvironmentIds.includes(env.id))
@@ -728,10 +991,21 @@ export default function Dashboard({
         setDynamicPriceUpdatedAt(typeof data?.timestamp === 'string' ? data.timestamp : new Date().toISOString())
 
         const resolvedPrice = parseEntsoeBasePrice(data)
+        const proxyFactor = Number.isFinite(pricingConfig?.gasProxyKwhPerM3) && Number(pricingConfig?.gasProxyKwhPerM3) > 0
+          ? Number(pricingConfig?.gasProxyKwhPerM3)
+          : DEFAULT_DYNAMIC_GAS_KWH_PER_M3
+        const resolvedGasPrice = parseEntsoeGasProxyPrice(data, proxyFactor)
+
         if (resolvedPrice !== null && Number.isFinite(resolvedPrice) && resolvedPrice >= 0) {
           setDynamicConsumerPriceKwh(resolvedPrice)
+          if (resolvedGasPrice !== null && Number.isFinite(resolvedGasPrice) && resolvedGasPrice >= 0) {
+            setDynamicGasPricePerM3(resolvedGasPrice)
+          }
+
           localStorage.setItem(dynamicPriceCacheKey, JSON.stringify({
             value: resolvedPrice,
+            electricityValue: resolvedPrice,
+            gasValue: resolvedGasPrice,
             updatedAt: new Date().toISOString(),
           }))
         }
@@ -759,6 +1033,7 @@ export default function Dashboard({
     }
   }, [
     dynamicPriceCacheKey,
+    pricingConfig?.gasProxyKwhPerM3,
     getAuthToken,
     isAuthenticated,
     selectedEnvironment,
@@ -768,6 +1043,7 @@ export default function Dashboard({
   useEffect(() => {
     if (!selectedEnvironment || pricingConfig?.type !== 'dynamic') {
       setDynamicConsumerPriceKwh(null)
+      setDynamicGasPricePerM3(null)
       return
     }
 
@@ -778,9 +1054,14 @@ export default function Dashboard({
       }
 
       const parsed = JSON.parse(cached)
-      const value = Number(parsed?.value)
-      if (Number.isFinite(value) && value >= 0) {
-        setDynamicConsumerPriceKwh(value)
+      const electricityValue = Number(parsed?.electricityValue ?? parsed?.value)
+      if (Number.isFinite(electricityValue) && electricityValue >= 0) {
+        setDynamicConsumerPriceKwh(electricityValue)
+      }
+
+      const gasValue = Number(parsed?.gasValue)
+      if (Number.isFinite(gasValue) && gasValue >= 0) {
+        setDynamicGasPricePerM3(gasValue)
       }
     } catch {
       // Ignore parse errors and refresh from API.
@@ -788,12 +1069,10 @@ export default function Dashboard({
   }, [dynamicPriceCacheKey, pricingConfig?.type, selectedEnvironment])
 
   useEffect(() => {
-    setHaEntities([])
-    setLastKnownHaEntities([])
-    setHaMetricsSnapshot(null)
-    setIsInitialLoading(true)
-
+    // Keep current data visible while switching environment.
+    // Fresh data is loaded in the background to avoid visible flashes.
     if (!selectedEnvironment) {
+      setIsInitialLoading(false)
       return
     }
 
@@ -815,6 +1094,7 @@ export default function Dashboard({
 
       if (cachedMetrics) {
         setHaMetricsSnapshot(cachedMetrics)
+        setIsInitialLoading(false)
       }
 
       if (!Array.isArray(cachedEntities) || cachedEntities.length === 0) {
@@ -857,7 +1137,12 @@ export default function Dashboard({
   }, [showSettingsDropdown])
 
   useEffect(() => {
+    let isDisposed = false
+    let latestRequestId = 0
+
     const loadHaEntities = async (silent = false) => {
+      const requestId = ++latestRequestId
+
       if (!isAuthenticated) {
         if (!silent) {
           setHaConnectionStatus('error')
@@ -879,12 +1164,20 @@ export default function Dashboard({
       
       try {
         const token = await getAuthToken()
+        if (isDisposed || requestId !== latestRequestId) {
+          return
+        }
+
         // eslint-disable-next-line no-console
         console.log(`[HA] ${silent ? '🔄 SILENT' : '📥 INITIAL'} refresh starting...`)
         
         const response = await fetch(`/.netlify/functions/ha-entities?environmentId=${selectedEnvironment}`, {
           headers: { Authorization: `Bearer ${token}` },
         })
+
+        if (isDisposed || requestId !== latestRequestId) {
+          return
+        }
         
         // eslint-disable-next-line no-console
         console.log(`[HA] Response status: ${response.status}`)
@@ -896,12 +1189,17 @@ export default function Dashboard({
           if (!silent) {
             setHaConnectionStatus('error')
             setHaError(data?.error || 'Unable to load sensor data')
+            setIsInitialLoading(false)
           }
           // NEVER clear entities on error - keep showing last known data
           return
         }
         
         const data = await response.json()
+        if (isDisposed || requestId !== latestRequestId) {
+          return
+        }
+
         const entities = Array.isArray(data?.entities) ? data.entities : []
         const metrics = normalizeHaMetricsSnapshot(data?.metrics)
         // eslint-disable-next-line no-console
@@ -911,14 +1209,18 @@ export default function Dashboard({
         setHaEntities(entities)
         setLastKnownHaEntities(entities)
         setHaMetricsSnapshot(metrics)
-        localStorage.setItem(haEntitiesCacheKey, JSON.stringify({ entities, metrics }))
+        storeLocalJson(haEntitiesCacheKey, { entities, metrics })
+        setHaConnectionStatus('connected')
+        setHaError(null)
         
         if (!silent) {
-          setHaConnectionStatus('connected')
-          setHaError(null)
           setIsInitialLoading(false) // Only set false on successful initial load
         }
       } catch (error) {
+        if (isDisposed || requestId !== latestRequestId) {
+          return
+        }
+
         // eslint-disable-next-line no-console
         console.error('[HA] Fetch error:', error);
         if (!silent) {
@@ -944,8 +1246,12 @@ export default function Dashboard({
       void loadHaEntities(true)
     }, 10000)
     
-    return () => clearInterval(interval)
-  }, [getAccessTokenSilently, haEntitiesCacheKey, isAuthenticated, selectedEnvironment, haRefreshKey])
+    return () => {
+      isDisposed = true
+      latestRequestId += 1
+      clearInterval(interval)
+    }
+  }, [getAuthToken, haEntitiesCacheKey, isAuthenticated, selectedEnvironment, haRefreshKey])
 
   const getControlActions = (domain: string) => {
     switch (domain) {
@@ -1000,10 +1306,7 @@ export default function Dashboard({
         setHaEntities(refreshedEntities)
         setLastKnownHaEntities(refreshedEntities)
         setHaMetricsSnapshot(refreshedMetrics)
-        localStorage.setItem(
-          haEntitiesCacheKey,
-          JSON.stringify({ entities: refreshedEntities, metrics: refreshedMetrics }),
-        )
+        storeLocalJson(haEntitiesCacheKey, { entities: refreshedEntities, metrics: refreshedMetrics })
       }
     } catch (error) {
       setHaError(error instanceof Error ? error.message : 'Unable to run action')
@@ -1012,8 +1315,19 @@ export default function Dashboard({
     }
   }
 
-  const configuredGasPrice = Number(import.meta.env.VITE_DEFAULT_GAS_PRICE_EUR_PER_M3)
-  const gasRatePerM3 = Number.isFinite(configuredGasPrice) && configuredGasPrice > 0 ? configuredGasPrice : 1.35
+  const configuredGasPrice = Number(pricingConfig?.gasPrice)
+  const configuredGasMargin = Number(pricingConfig?.gasMargin)
+  const fallbackGasPrice = DEFAULT_GAS_PRICE_PER_M3
+  const savedGasRatePerM3 = Number.isFinite(configuredGasPrice) && configuredGasPrice > 0
+    ? configuredGasPrice
+    : fallbackGasPrice
+  const gasBaseRatePerM3 = pricingConfig?.type === 'dynamic' && Number.isFinite(dynamicGasPricePerM3) && Number(dynamicGasPricePerM3) > 0
+    ? Number(dynamicGasPricePerM3)
+    : savedGasRatePerM3
+  const gasMarginPerM3 = Number.isFinite(configuredGasMargin)
+    ? configuredGasMargin
+    : DEFAULT_GAS_MARGIN_PER_M3
+  const gasRatePerM3 = Math.max(0, gasBaseRatePerM3 + gasMarginPerM3)
 
   // Extract real-time energy data from Home Assistant entities
   const realTimeData = useMemo(() => {
@@ -1030,6 +1344,20 @@ export default function Dashboard({
 
     const toSearchable = (entity: HaEntity) =>
       `${entity.entity_id} ${entity.friendly_name || ''}`.toLowerCase()
+
+    const productionKeywords = [
+      'production',
+      'producer',
+      'solar',
+      'pv',
+      'generation',
+      'yield',
+      'opwek',
+      'opgewekt',
+      'export',
+      'injection',
+      'teruglever',
+    ]
 
     // Helper function to find entity by keywords in entity_id/friendly_name
     const findEntity = (keywords: string[], excludedKeywords: string[] = []): HaEntity | undefined => {
@@ -1083,6 +1411,7 @@ export default function Dashboard({
         'price',
         'cost',
         'tariff',
+        ...productionKeywords,
       ]
 
       const candidates = entities.filter((entity) => {
@@ -1118,7 +1447,68 @@ export default function Dashboard({
           return false
         }
 
+        const searchable = toSearchable(entity)
+        if (productionKeywords.some((keyword) => searchable.includes(keyword))) {
+          return false
+        }
+
         return isPowerUnit(entity.unit_of_measurement) && Number.isFinite(parseNumericValue(entity.state))
+      })
+    }
+
+    const findProductionPowerEntity = (): HaEntity | undefined => {
+      const excludedKeywords = [
+        'today',
+        'daily',
+        'month',
+        'monthly',
+        'total',
+        'kwh',
+        'energy',
+        'gas',
+        'price',
+        'cost',
+        'tariff',
+      ]
+
+      const candidates = entities.filter((entity) => {
+        if (entity.domain !== 'sensor') {
+          return false
+        }
+
+        const searchable = toSearchable(entity)
+        return (
+          productionKeywords.some((keyword) => searchable.includes(keyword)) &&
+          !excludedKeywords.some((keyword) => searchable.includes(keyword))
+        )
+      })
+
+      const deviceClassMatch = candidates.find((entity) => {
+        const deviceClass = String(entity.device_class || '').toLowerCase()
+        return deviceClass === 'power' && Number.isFinite(parseNumericValue(entity.state))
+      })
+      if (deviceClassMatch) {
+        return deviceClassMatch
+      }
+
+      const powerUnitMatch = candidates.find((entity) => (
+        isPowerUnit(entity.unit_of_measurement) && Number.isFinite(parseNumericValue(entity.state))
+      ))
+      if (powerUnitMatch) {
+        return powerUnitMatch
+      }
+
+      return entities.find((entity) => {
+        if (entity.domain !== 'sensor') {
+          return false
+        }
+
+        const searchable = toSearchable(entity)
+        return (
+          productionKeywords.some((keyword) => searchable.includes(keyword)) &&
+          isPowerUnit(entity.unit_of_measurement) &&
+          Number.isFinite(parseNumericValue(entity.state))
+        )
       })
     }
 
@@ -1167,117 +1557,12 @@ export default function Dashboard({
       return Number.isFinite(derivedKw) && derivedKw > 0 ? derivedKw : 0
     }
 
-    // Helper function to track energy usage locally when no sensor available
-    const trackEnergyLocally = (currentPower: number): { daily: number; monthly: number } => {
-      const now = new Date()
-      const today = now.toDateString()
-      const thisMonth = `${now.getFullYear()}-${now.getMonth() + 1}`
-      
-      // Get stored tracking data
-      const keys = {
-        daily: `energy_daily_${environmentKey}`,
-        monthly: `energy_monthly_${environmentKey}`,
-        date: `energy_date_${environmentKey}`,
-        month: `energy_month_${environmentKey}`,
-        lastUpdate: `energy_last_update_${environmentKey}`,
-      }
-
-      const storedDaily = localStorage.getItem(keys.daily)
-      const storedMonthly = localStorage.getItem(keys.monthly)
-      const storedDate = localStorage.getItem(keys.date)
-      const storedMonth = localStorage.getItem(keys.month)
-      const lastUpdate = localStorage.getItem(keys.lastUpdate)
-      
-      let dailyTotal = 0
-      let monthlyTotal = 0
-      
-      // Reset daily if new day
-      if (storedDate !== today) {
-        localStorage.setItem(keys.date, today)
-        localStorage.setItem(keys.daily, '0')
-        dailyTotal = 0
-      } else {
-        dailyTotal = storedDaily ? parseFloat(storedDaily) : 0
-      }
-      
-      // Reset monthly if new month
-      if (storedMonth !== thisMonth) {
-        localStorage.setItem(keys.month, thisMonth)
-        localStorage.setItem(keys.monthly, '0')
-        monthlyTotal = 0
-      } else {
-        monthlyTotal = storedMonthly ? parseFloat(storedMonthly) : 0
-      }
-      
-      // Calculate energy used since last update (Power in kW × time in hours = kWh)
-      if (lastUpdate && currentPower > 0) {
-        const lastTime = new Date(lastUpdate).getTime()
-        const nowTime = now.getTime()
-        const hoursElapsed = (nowTime - lastTime) / (1000 * 60 * 60)
-        
-        // Only add if less than 1 hour elapsed (prevents big jumps on page reload)
-        if (hoursElapsed < 1) {
-          const energyUsed = currentPower * hoursElapsed
-          dailyTotal += energyUsed
-          monthlyTotal += energyUsed
-          
-          localStorage.setItem(keys.daily, dailyTotal.toString())
-          localStorage.setItem(keys.monthly, monthlyTotal.toString())
-        }
-      }
-      
-      // Update last timestamp
-      localStorage.setItem(keys.lastUpdate, now.toISOString())
-      
-      return {
-        daily: dailyTotal,
-        monthly: monthlyTotal,
-      }
-    }
-
-    const trackEnergyFromMeter = (meterTotal: number): { daily: number; monthly: number } => {
-      const now = new Date()
-      const today = now.toDateString()
-      const thisMonth = `${now.getFullYear()}-${now.getMonth() + 1}`
-      const keys = {
-        dailyDate: `energy_meter_daily_date_${environmentKey}`,
-        dailyBase: `energy_meter_daily_base_${environmentKey}`,
-        monthValue: `energy_meter_month_${environmentKey}`,
-        monthBase: `energy_meter_month_base_${environmentKey}`,
-      }
-
-      const storedDailyDate = localStorage.getItem(keys.dailyDate)
-      const storedDailyBase = parseFloat(localStorage.getItem(keys.dailyBase) || '0')
-      const storedMonthValue = localStorage.getItem(keys.monthValue)
-      const storedMonthBase = parseFloat(localStorage.getItem(keys.monthBase) || '0')
-
-      let dailyBase = storedDailyBase
-      let monthBase = storedMonthBase
-
-      if (storedDailyDate !== today || !Number.isFinite(storedDailyBase)) {
-        dailyBase = meterTotal
-        localStorage.setItem(keys.dailyDate, today)
-        localStorage.setItem(keys.dailyBase, meterTotal.toString())
-      }
-
-      if (storedMonthValue !== thisMonth || !Number.isFinite(storedMonthBase)) {
-        monthBase = meterTotal
-        localStorage.setItem(keys.monthValue, thisMonth)
-        localStorage.setItem(keys.monthBase, meterTotal.toString())
-      }
-
-      return {
-        daily: Math.max(0, meterTotal - dailyBase),
-        monthly: Math.max(0, meterTotal - monthBase),
-      }
-    }
-
-    const calculateUsageFromPowerSamples = (startMs: number, endMs: number) => {
-      if (powerSamples.length < 2) {
+    const calculateUsageFromPowerSamples = (samples: PowerSample[], startMs: number, endMs: number) => {
+      if (samples.length < 2) {
         return 0
       }
 
-      const sorted = [...powerSamples]
+      const sorted = [...samples]
         .filter((sample) => Number.isFinite(sample.timestamp) && Number.isFinite(sample.power))
         .sort((a, b) => a.timestamp - b.timestamp)
 
@@ -1345,31 +1630,56 @@ export default function Dashboard({
 
     // Find power sensor (current usage in W or kW)
     const powerEntity = findPowerEntity()
-    let currentPower = powerEntity ? parseValue(powerEntity.state) : 0
+    const productionPowerEntity = findProductionPowerEntity()
+    const rawCurrentPower = powerEntity ? parseNumericValue(powerEntity.state) : NaN
+    const rawCurrentProduction = productionPowerEntity ? parseNumericValue(productionPowerEntity.state) : NaN
+    let currentPower = Number.isFinite(rawCurrentPower) ? rawCurrentPower : NaN
+    let currentProduction = Number.isFinite(rawCurrentProduction) ? rawCurrentProduction : 0
     
     // eslint-disable-next-line no-console
     console.log('[Energy] Power entity:', powerEntity?.entity_id, '=', powerEntity?.state)
     
     currentPower = convertPowerToKw(currentPower, powerEntity?.unit_of_measurement)
+    currentProduction = convertPowerToKw(currentProduction, productionPowerEntity?.unit_of_measurement)
 
     // Find daily/monthly/total electricity sensors (in kWh)
     const dailyEntity = findEntity(
       ['energy_today', 'daily_energy', 'today_energy', 'day_energy', 'daily', 'today'],
-      ['gas', 'price', 'cost', 'tariff'],
+      ['gas', 'price', 'cost', 'tariff', ...productionKeywords],
     )
     const monthlyEntity = findEntity(
       ['energy_month', 'monthly_energy', 'month_energy', 'monthly', 'this_month', 'month'],
-      ['gas', 'price', 'cost', 'tariff'],
+      ['gas', 'price', 'cost', 'tariff', ...productionKeywords],
     )
     const totalEnergyEntity = findEntity(
       ['energy_total', 'total_energy', 'total_consumption', 'kwh_total', 'consumption_total'],
+      ['gas', 'price', 'cost', 'tariff', ...productionKeywords],
+    )
+    const dailyProductionEntity = findEntity(
+      ['production_today', 'today_production', 'daily_production', 'opwek_vandaag', 'opgewekt_vandaag', 'solar_today', 'pv_today'],
+      ['gas', 'price', 'cost', 'tariff'],
+    )
+    const monthlyProductionEntity = findEntity(
+      ['production_month', 'month_production', 'monthly_production', 'opwek_maand', 'opgewekt_maand', 'solar_month', 'pv_month'],
       ['gas', 'price', 'cost', 'tariff'],
     )
 
     if (serverMetrics?.currentPowerKw !== null && serverMetrics?.currentPowerKw !== undefined) {
       currentPower = serverMetrics.currentPowerKw
-    } else if (currentPower <= 0 && totalEnergyEntity) {
+    } else if (!Number.isFinite(currentPower) && totalEnergyEntity) {
       currentPower = derivePowerFromEnergyMeter(parseValue(totalEnergyEntity.state))
+    }
+
+    if (serverMetrics?.currentProductionKw !== null && serverMetrics?.currentProductionKw !== undefined) {
+      currentProduction = serverMetrics.currentProductionKw
+    }
+
+    if (!Number.isFinite(currentPower)) {
+      currentPower = 0
+    }
+
+    if (!Number.isFinite(currentProduction)) {
+      currentProduction = 0
     }
 
     // eslint-disable-next-line no-console
@@ -1380,6 +1690,10 @@ export default function Dashboard({
       monthlyEntity?.entity_id,
       'Total:',
       totalEnergyEntity?.entity_id,
+      'Production daily:',
+      dailyProductionEntity?.entity_id,
+      'Production monthly:',
+      monthlyProductionEntity?.entity_id,
     )
 
     const gasDailyEntity = findEntity([
@@ -1406,6 +1720,8 @@ export default function Dashboard({
     // Use sensor data if available, otherwise track locally
     let dailyUsage: number
     let monthlyUsage: number
+    let dailyProduction: number
+    let monthlyProduction: number
 
     const nowTime = Date.now()
     const nowDate = new Date(nowTime)
@@ -1420,58 +1736,79 @@ export default function Dashboard({
     ).getTime()
     const startOfMonth = new Date(nowDate.getFullYear(), nowDate.getMonth(), 1, 0, 0, 0, 0).getTime()
 
-    const sampledDailyUsage = calculateUsageFromPowerSamples(startOfToday, nowTime)
-    const sampledMonthlyUsage = calculateUsageFromPowerSamples(startOfMonth, nowTime)
+    const sampledDailyUsage = calculateUsageFromPowerSamples(powerSamples, startOfToday, nowTime)
+    const sampledMonthlyUsage = calculateUsageFromPowerSamples(powerSamples, startOfMonth, nowTime)
+    const sampledDailyProduction = calculateUsageFromPowerSamples(productionSamples, startOfToday, nowTime)
+    const sampledMonthlyProduction = calculateUsageFromPowerSamples(productionSamples, startOfMonth, nowTime)
     
-    if (dailyEntity && monthlyEntity) {
-      // Use sensor data
-      dailyUsage = parseValue(dailyEntity.state)
-      monthlyUsage = parseValue(monthlyEntity.state)
+    const hasServerDailyMetric = Number.isFinite(serverMetrics?.dailyElectricityKwh)
+    const hasServerMonthlyMetric = Number.isFinite(serverMetrics?.monthlyElectricityKwh)
+    const hasServerDailyProductionMetric = Number.isFinite(serverMetrics?.dailyProductionKwh)
+    const hasServerMonthlyProductionMetric = Number.isFinite(serverMetrics?.monthlyProductionKwh)
+
+    if (hasServerDailyMetric || hasServerMonthlyMetric) {
+      dailyUsage = hasServerDailyMetric
+        ? Number(serverMetrics?.dailyElectricityKwh)
+        : dailyEntity
+          ? parseValue(dailyEntity.state)
+          : sampledDailyUsage
+
+      monthlyUsage = hasServerMonthlyMetric
+        ? Number(serverMetrics?.monthlyElectricityKwh)
+        : monthlyEntity
+          ? parseValue(monthlyEntity.state)
+          : sampledMonthlyUsage
 
       // eslint-disable-next-line no-console
-      console.log('[Energy] Using daily+monthly sensors - Daily:', dailyUsage, 'kWh, Monthly:', monthlyUsage, 'kWh')
-    } else if (totalEnergyEntity) {
-      const trackedFromMeter = trackEnergyFromMeter(parseValue(totalEnergyEntity.state))
-      dailyUsage = dailyEntity ? parseValue(dailyEntity.state) : trackedFromMeter.daily
-      monthlyUsage = monthlyEntity
-        ? parseValue(monthlyEntity.state)
-        : trackedFromMeter.monthly
+      console.log('[Energy] Using server metrics as source of truth - Daily:', dailyUsage, 'kWh, Monthly:', monthlyUsage, 'kWh')
+    } else if (dailyEntity || monthlyEntity) {
+      dailyUsage = dailyEntity ? parseValue(dailyEntity.state) : sampledDailyUsage
+      monthlyUsage = monthlyEntity ? parseValue(monthlyEntity.state) : sampledMonthlyUsage
 
       // eslint-disable-next-line no-console
-      console.log('[Energy] Using total meter fallback - Daily:', dailyUsage, 'kWh, Monthly:', monthlyUsage, 'kWh')
-    } else if (dailyEntity) {
-      dailyUsage = parseValue(dailyEntity.state)
-
-      if (sampledMonthlyUsage > 0) {
-        monthlyUsage = sampledMonthlyUsage
-      } else {
-        const tracked = trackEnergyLocally(currentPower)
-        monthlyUsage = Math.max(tracked.monthly, dailyUsage)
-      }
-
-      // eslint-disable-next-line no-console
-      console.log('[Energy] Using daily sensor + sample/local monthly fallback - Daily:', dailyUsage, 'kWh, Monthly:', monthlyUsage, 'kWh')
+      console.log('[Energy] Using direct HA sensors - Daily:', dailyUsage, 'kWh, Monthly:', monthlyUsage, 'kWh')
     } else if (sampledDailyUsage > 0 || sampledMonthlyUsage > 0) {
       dailyUsage = sampledDailyUsage
       monthlyUsage = sampledMonthlyUsage
 
       // eslint-disable-next-line no-console
-      console.log('[Energy] Using sampled history fallback - Daily:', dailyUsage, 'kWh, Monthly:', monthlyUsage, 'kWh')
+      console.warn('[Energy] Falling back to sampled usage (no reliable daily/monthly meter source found)')
     } else {
-      // Track locally from power readings
-      const tracked = trackEnergyLocally(currentPower)
-      dailyUsage = tracked.daily
-      monthlyUsage = tracked.monthly
+      dailyUsage = 0
+      monthlyUsage = 0
+
       // eslint-disable-next-line no-console
-      console.log('[Energy] Tracking locally - Daily:', dailyUsage.toFixed(3), 'kWh, Monthly:', monthlyUsage.toFixed(3), 'kWh')
+      console.warn('[Energy] No reliable electricity day/month data source available')
     }
 
-    if (serverMetrics?.dailyElectricityKwh !== null && serverMetrics?.dailyElectricityKwh !== undefined) {
-      dailyUsage = serverMetrics.dailyElectricityKwh
+    dailyUsage = Math.max(0, dailyUsage)
+    monthlyUsage = Math.max(dailyUsage, monthlyUsage)
+
+    if (hasServerDailyProductionMetric || hasServerMonthlyProductionMetric) {
+      dailyProduction = hasServerDailyProductionMetric
+        ? Number(serverMetrics?.dailyProductionKwh)
+        : dailyProductionEntity
+          ? parseValue(dailyProductionEntity.state)
+          : sampledDailyProduction
+
+      monthlyProduction = hasServerMonthlyProductionMetric
+        ? Number(serverMetrics?.monthlyProductionKwh)
+        : monthlyProductionEntity
+          ? parseValue(monthlyProductionEntity.state)
+          : sampledMonthlyProduction
+    } else if (dailyProductionEntity || monthlyProductionEntity) {
+      dailyProduction = dailyProductionEntity ? parseValue(dailyProductionEntity.state) : sampledDailyProduction
+      monthlyProduction = monthlyProductionEntity ? parseValue(monthlyProductionEntity.state) : sampledMonthlyProduction
+    } else if (sampledDailyProduction > 0 || sampledMonthlyProduction > 0) {
+      dailyProduction = sampledDailyProduction
+      monthlyProduction = sampledMonthlyProduction
+    } else {
+      dailyProduction = 0
+      monthlyProduction = 0
     }
-    if (serverMetrics?.monthlyElectricityKwh !== null && serverMetrics?.monthlyElectricityKwh !== undefined) {
-      monthlyUsage = serverMetrics.monthlyElectricityKwh
-    }
+
+    dailyProduction = Math.max(0, dailyProduction)
+    monthlyProduction = Math.max(dailyProduction, monthlyProduction)
 
     let gasDailyUsage = 0
     let gasMonthlyUsage = 0
@@ -1510,22 +1847,42 @@ export default function Dashboard({
       ? (dynamicConsumerPriceKwh ?? configuredConsumerBase)
       : configuredConsumerBase
     const consumerRate = consumerBaseRate + (pricingConfig?.consumerMargin || 0)
+    const configuredProducerBase = pricingConfig?.producerPrice || 0.10
+    const producerBaseRate = pricingConfig?.type === 'dynamic'
+      ? (dynamicConsumerPriceKwh ?? configuredProducerBase)
+      : configuredProducerBase
+    const producerRate = Math.max(0, producerBaseRate - (pricingConfig?.producerMargin || 0))
     const electricityCostToday = dailyUsage * consumerRate
     const electricityCostMonth = monthlyUsage * consumerRate
+    const electricityRevenueToday = dailyProduction * producerRate
+    const electricityRevenueMonth = monthlyProduction * producerRate
+    const netDailyUsage = dailyUsage - dailyProduction
+    const netMonthlyUsage = monthlyUsage - monthlyProduction
+    const netElectricityCostToday = electricityCostToday - electricityRevenueToday
+    const netElectricityCostMonth = electricityCostMonth - electricityRevenueMonth
     const gasCostToday = gasDailyUsage * gasRatePerM3
     const gasCostMonth = gasMonthlyUsage * gasRatePerM3
-    const totalCostToday = electricityCostToday + gasCostToday
-    const totalCostMonth = electricityCostMonth + gasCostMonth
+    const totalCostToday = electricityCostToday + gasCostToday - electricityRevenueToday
+    const totalCostMonth = electricityCostMonth + gasCostMonth - electricityRevenueMonth
 
     return {
       currentPower: parseFloat(currentPower.toFixed(2)),
-      dailyUsage: parseFloat(dailyUsage.toFixed(1)),
-      monthlyUsage: parseFloat(monthlyUsage.toFixed(1)),
+      currentProduction: parseFloat(currentProduction.toFixed(2)),
+      dailyUsage: parseFloat(dailyUsage.toFixed(2)),
+      monthlyUsage: parseFloat(monthlyUsage.toFixed(2)),
+      dailyProduction: parseFloat(dailyProduction.toFixed(2)),
+      monthlyProduction: parseFloat(monthlyProduction.toFixed(2)),
+      netDailyUsage: parseFloat(netDailyUsage.toFixed(2)),
+      netMonthlyUsage: parseFloat(netMonthlyUsage.toFixed(2)),
       gasDailyUsage: parseFloat(gasDailyUsage.toFixed(2)),
       gasMonthlyUsage: parseFloat(gasMonthlyUsage.toFixed(2)),
       gasChartValue: parseFloat(gasChartValue.toFixed(3)),
       electricityCostToday: parseFloat(electricityCostToday.toFixed(2)),
       electricityCostMonth: parseFloat(electricityCostMonth.toFixed(2)),
+      electricityRevenueToday: parseFloat(electricityRevenueToday.toFixed(2)),
+      electricityRevenueMonth: parseFloat(electricityRevenueMonth.toFixed(2)),
+      netElectricityCostToday: parseFloat(netElectricityCostToday.toFixed(2)),
+      netElectricityCostMonth: parseFloat(netElectricityCostMonth.toFixed(2)),
       gasCostToday: parseFloat(gasCostToday.toFixed(2)),
       gasCostMonth: parseFloat(gasCostMonth.toFixed(2)),
       costToday: parseFloat(totalCostToday.toFixed(2)),
@@ -1537,9 +1894,11 @@ export default function Dashboard({
     haMetricsSnapshot,
     pricingConfig,
     dynamicConsumerPriceKwh,
+    dynamicGasPricePerM3,
     selectedEnvironment,
     gasRatePerM3,
     powerSamples,
+    productionSamples,
   ])
 
   const powerHistoryScope = useMemo(() => {
@@ -1547,13 +1906,43 @@ export default function Dashboard({
     return String(source).replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 120)
   }, [haMetricsSnapshot?.powerEntityId])
 
-  const livePowerStorageKey = `energy_live_power_samples_${selectedEnvironment || 'default'}_${powerHistoryScope}`
+  const productionHistoryScope = useMemo(() => {
+    const source = haMetricsSnapshot?.sources?.currentProductionEntityId || 'fallback'
+    return String(source).replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 120)
+  }, [haMetricsSnapshot?.sources?.currentProductionEntityId])
+
+  const livePowerStorageKey = `energy_live_power_samples_v3_${selectedEnvironment || 'default'}_${powerHistoryScope}`
+  const liveProductionStorageKey = `energy_live_production_samples_v2_${selectedEnvironment || 'default'}_${productionHistoryScope}`
   const liveGasStorageKey = `energy_gas_hourly_data_${selectedEnvironment || 'default'}`
+  const historyArchiveStorageKey = `energy_history_archive_hourly_v2_${selectedEnvironment || 'default'}`
+  const legacyHistoryArchiveStorageKeys = useMemo(
+    () => [
+      `energy_history_archive_hourly_v1_${selectedEnvironment || 'default'}_${powerHistoryScope}_${productionHistoryScope}`,
+      `energy_history_archive_hourly_v1_${selectedEnvironment || 'default'}_fallback_fallback`,
+    ],
+    [selectedEnvironment, powerHistoryScope, productionHistoryScope],
+  )
+  const environmentInstalledOnStorageKey = `energy_environment_installed_on_v3_${selectedEnvironment || 'default'}`
   const latestPowerRef = useRef(realTimeData.currentPower)
+  const latestProductionRef = useRef(realTimeData.currentProduction)
+  const haEntitiesRef = useRef(haEntities)
+  const haMetricsSnapshotRef = useRef(haMetricsSnapshot)
 
   useEffect(() => {
     latestPowerRef.current = realTimeData.currentPower
   }, [realTimeData.currentPower])
+
+  useEffect(() => {
+    latestProductionRef.current = realTimeData.currentProduction
+  }, [realTimeData.currentProduction])
+
+  useEffect(() => {
+    haEntitiesRef.current = haEntities
+  }, [haEntities])
+
+  useEffect(() => {
+    haMetricsSnapshotRef.current = haMetricsSnapshot
+  }, [haMetricsSnapshot])
 
   useEffect(() => {
     try {
@@ -1563,19 +1952,266 @@ export default function Dashboard({
         return
       }
 
-      const parsed: PowerSample[] = JSON.parse(stored)
-      if (!Array.isArray(parsed)) {
-        return
-      }
-
-      const cleaned = parsed.filter(
-        (sample) => typeof sample.timestamp === 'number' && typeof sample.power === 'number',
-      )
+      const parsed = JSON.parse(stored)
+      const cleaned = sanitizePowerSampleArray(parsed).slice(-MAX_LIVE_SAMPLE_POINTS)
       setPowerSamples(cleaned)
     } catch {
       setPowerSamples([])
     }
   }, [livePowerStorageKey])
+
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(liveProductionStorageKey)
+      if (!stored) {
+        setProductionSamples([])
+        return
+      }
+
+      const parsed = JSON.parse(stored)
+      const cleaned = sanitizePowerSampleArray(parsed).slice(-MAX_LIVE_SAMPLE_POINTS)
+      setProductionSamples(cleaned)
+    } catch {
+      setProductionSamples([])
+    }
+  }, [liveProductionStorageKey])
+
+  useEffect(() => {
+    try {
+      const keysToLoad = [historyArchiveStorageKey, ...legacyHistoryArchiveStorageKeys]
+      let mergedPowerSamples: PowerSample[] = []
+      let mergedProductionSamples: PowerSample[] = []
+      let latestFetchTime = 0
+      let hasSamples = false
+
+      keysToLoad.forEach((storageKey) => {
+        if (!storageKey) {
+          return
+        }
+
+        const stored = localStorage.getItem(storageKey)
+        if (!stored) {
+          return
+        }
+
+        const parsed = JSON.parse(stored) as Partial<HistoryArchivePayload>
+        const power = sanitizePowerSampleArray(parsed?.powerSamples)
+        const production = sanitizePowerSampleArray(parsed?.productionSamples)
+
+        if (power.length === 0 && production.length === 0) {
+          return
+        }
+
+        hasSamples = true
+        mergedPowerSamples = mergePowerSamples(
+          [mergedPowerSamples, power],
+          { resolutionMs: 60 * 60_000, maxPoints: MAX_ARCHIVE_HOURLY_POINTS },
+        )
+        mergedProductionSamples = mergePowerSamples(
+          [mergedProductionSamples, production],
+          { resolutionMs: 60 * 60_000, maxPoints: MAX_ARCHIVE_HOURLY_POINTS },
+        )
+
+        const fetchTime = Number(parsed?.fetchTime)
+        if (Number.isFinite(fetchTime) && fetchTime > latestFetchTime) {
+          latestFetchTime = fetchTime
+        }
+      })
+
+      if (!hasSamples) {
+        setArchivedPowerSamples([])
+        setArchivedProductionSamples([])
+        return
+      }
+
+      setArchivedPowerSamples(mergedPowerSamples)
+      setArchivedProductionSamples(mergedProductionSamples)
+
+      storeLocalJson(historyArchiveStorageKey, {
+        fetchTime: latestFetchTime > 0 ? latestFetchTime : Date.now(),
+        powerSamples: mergedPowerSamples,
+        productionSamples: mergedProductionSamples,
+      })
+    } catch {
+      setArchivedPowerSamples([])
+      setArchivedProductionSamples([])
+    }
+  }, [historyArchiveStorageKey, legacyHistoryArchiveStorageKeys])
+
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(environmentInstalledOnStorageKey)
+      if (!stored) {
+        setEnvironmentInstalledOnMs(null)
+        return
+      }
+
+      const parsed = Number(stored)
+      setEnvironmentInstalledOnMs(Number.isFinite(parsed) && parsed > 0 ? parsed : null)
+    } catch {
+      setEnvironmentInstalledOnMs(null)
+    }
+  }, [environmentInstalledOnStorageKey])
+
+  useEffect(() => {
+    if (!selectedEnvironment || !isAuthenticated) {
+      return
+    }
+
+    let isDisposed = false
+
+    const refreshInstalledOnFromHistory = async () => {
+      try {
+        const metricSources = haMetricsSnapshotRef.current?.sources
+        const prioritizedIds: string[] = []
+        const seenIds = new Set<string>()
+
+        const pushEntityId = (entityId: string | null | undefined) => {
+          if (!entityId || typeof entityId !== 'string') {
+            return
+          }
+
+          const normalized = entityId.trim()
+          if (!normalized || seenIds.has(normalized)) {
+            return
+          }
+
+          seenIds.add(normalized)
+          prioritizedIds.push(normalized)
+        }
+
+        pushEntityId(metricSources?.electricityTotalEntityId)
+        pushEntityId(metricSources?.electricityProductionTotalEntityId)
+        pushEntityId(metricSources?.gasTotalEntityId)
+        pushEntityId(metricSources?.dailyElectricityEntityId)
+        pushEntityId(metricSources?.monthlyElectricityEntityId)
+        pushEntityId(metricSources?.dailyProductionEntityId)
+        pushEntityId(metricSources?.monthlyProductionEntityId)
+        pushEntityId(metricSources?.dailyGasEntityId)
+        pushEntityId(metricSources?.monthlyGasEntityId)
+        pushEntityId(metricSources?.currentPowerEntityId)
+        pushEntityId(metricSources?.currentProductionEntityId)
+
+        const entities = haEntitiesRef.current
+        entities.forEach((entity) => {
+          if (entity.domain !== 'sensor') {
+            return
+          }
+
+          const entityId = String(entity.entity_id || '')
+          const searchable = `${entityId} ${entity.friendly_name || ''}`.toLowerCase()
+          if (!entityId || searchable.includes('price') || searchable.includes('cost')) {
+            return
+          }
+
+          const unit = String(entity.unit_of_measurement || '').trim().toLowerCase()
+          const stateClass = String(entity.state_class || '').toLowerCase()
+          const deviceClass = String(entity.device_class || '').toLowerCase()
+
+          const hasEnergyUnit = unit === 'wh' || unit === 'kwh' || unit === 'mwh'
+          const hasGasUnit = unit.includes('m3') || unit.includes('m³') || unit === 'l' || unit === 'liter'
+          const isCumulative = stateClass === 'total_increasing' || stateClass === 'total'
+          const hasRelevantKeyword = (
+            searchable.includes('electricity') ||
+            searchable.includes('energy') ||
+            searchable.includes('consumption') ||
+            searchable.includes('production') ||
+            searchable.includes('gas') ||
+            searchable.includes('meter') ||
+            searchable.includes('opwek') ||
+            searchable.includes('teruglever') ||
+            searchable.includes('solar') ||
+            searchable.includes('pv')
+          )
+
+          if (hasRelevantKeyword && (hasEnergyUnit || hasGasUnit || isCumulative || deviceClass === 'energy' || deviceClass === 'gas')) {
+            pushEntityId(entityId)
+          }
+        })
+
+        if (prioritizedIds.length === 0) {
+          return
+        }
+
+        const token = await getAuthToken()
+        if (isDisposed) {
+          return
+        }
+
+        const now = Date.now()
+        const startTimeIso = new Date(now - ARCHIVE_LOOKBACK_DAYS * 24 * 60 * 60_000).toISOString()
+        const endTimeIso = new Date(now).toISOString()
+        const selectedIds = prioritizedIds.slice(0, 30)
+
+        const url = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(startTimeIso)}&endTime=${encodeURIComponent(endTimeIso)}&entityIds=${encodeURIComponent(selectedIds.join(','))}&mode=history`
+        const response = await fetch(url, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        })
+
+        if (!response.ok || isDisposed) {
+          return
+        }
+
+        const payload = await response.json()
+        if (isDisposed) {
+          return
+        }
+
+        const earliestCandidates = (Array.isArray(payload?.entities) ? payload.entities : [])
+          .flatMap((entry: any) => (Array.isArray(entry?.history) ? entry.history : []))
+          .map((row: any) => Number(row?.timestamp))
+          .filter((value: number) => Number.isFinite(value) && value > 0)
+
+        if (earliestCandidates.length === 0) {
+          return
+        }
+
+        const detectedInstalledOnMs = Math.min(...earliestCandidates)
+        setEnvironmentInstalledOnMs((previous) => {
+          const mergedWithPrevious = previous === null
+            ? detectedInstalledOnMs
+            : Math.min(previous, detectedInstalledOnMs)
+
+          try {
+            const persistedInstalledOnMs = Number(localStorage.getItem(environmentInstalledOnStorageKey))
+            const canonicalInstalledOnMs = Number.isFinite(persistedInstalledOnMs) && persistedInstalledOnMs > 0
+              ? Math.min(persistedInstalledOnMs, mergedWithPrevious)
+              : mergedWithPrevious
+            localStorage.setItem(environmentInstalledOnStorageKey, String(canonicalInstalledOnMs))
+            return canonicalInstalledOnMs
+          } catch {
+            return mergedWithPrevious
+          }
+        })
+      } catch (error) {
+        console.warn('[Installed On] Failed to refresh from HA history:', error)
+      }
+    }
+
+    void refreshInstalledOnFromHistory()
+    return () => {
+      isDisposed = true
+    }
+  }, [
+    selectedEnvironment,
+    isAuthenticated,
+    getAuthToken,
+    environmentInstalledOnStorageKey,
+    haEntities.length,
+    haMetricsSnapshot?.sources?.electricityTotalEntityId,
+    haMetricsSnapshot?.sources?.electricityProductionTotalEntityId,
+    haMetricsSnapshot?.sources?.gasTotalEntityId,
+    haMetricsSnapshot?.sources?.dailyElectricityEntityId,
+    haMetricsSnapshot?.sources?.monthlyElectricityEntityId,
+    haMetricsSnapshot?.sources?.dailyProductionEntityId,
+    haMetricsSnapshot?.sources?.monthlyProductionEntityId,
+    haMetricsSnapshot?.sources?.dailyGasEntityId,
+    haMetricsSnapshot?.sources?.monthlyGasEntityId,
+    haMetricsSnapshot?.sources?.currentPowerEntityId,
+    haMetricsSnapshot?.sources?.currentProductionEntityId,
+  ])
 
   // Load stored gas data from localStorage immediately (before async fetch)
   useEffect(() => {
@@ -1654,44 +2290,355 @@ export default function Dashboard({
     return () => window.clearInterval(interval)
   }, [getAuthToken, isAuthenticated, liveGasStorageKey, selectedEnvironment])
 
+  // Pre-warm cache for week and month ranges so switching is instant
+  useEffect(() => {
+    if (!selectedEnvironment || !isAuthenticated || haEntities.length === 0) {
+      return
+    }
+
+    let isDisposed = false
+
+    const prefetchRange = async (startMs: number, endMs: number) => {
+      const now = Date.now()
+      const clampedEnd = Math.min(endMs, now)
+      if (clampedEnd <= startMs) return
+
+      // Warm the same cache key that fetchHistoricalData reads (history mode, 15-min buckets, 5-min TTL)
+      const cacheStartKey = Math.floor(startMs / (15 * 60_000))
+      const cacheEndKey = Math.floor(clampedEnd / (15 * 60_000))
+      const cacheKey = `ha_history_v5_${selectedEnvironment}_${cacheStartKey}_${cacheEndKey}`
+
+      try {
+        const cached = localStorage.getItem(cacheKey)
+        if (cached) {
+          const parsed = JSON.parse(cached)
+          // Already fresh enough — skip (5-min TTL)
+          if (parsed?.fetchTime && (now - parsed.fetchTime) < 5 * 60_000) return
+        }
+      } catch { /* ignore */ }
+
+      const currentEntities = haEntitiesRef.current
+      if (currentEntities.length === 0) return
+
+      const preferredPowerEntityId = haMetricsSnapshotRef.current?.powerEntityId || null
+      const powerEntity = preferredPowerEntityId
+        ? currentEntities.find((e) => e.entity_id === preferredPowerEntityId)
+        : currentEntities.find((e) => {
+            const id = e.entity_id.toLowerCase()
+            return !id.startsWith('binary_sensor') && (
+              id.includes('electricity_meter_power_consumption') ||
+              (id.includes('electricity_meter') && id.includes('power')) ||
+              id.includes('current_power')
+            )
+          })
+
+      if (!powerEntity) return
+
+      const productionEntityId = haMetricsSnapshotRef.current?.sources?.currentProductionEntityId || null
+      const entityIds = Array.from(new Set([
+        powerEntity.entity_id,
+        productionEntityId,
+      ].filter((id): id is string => typeof id === 'string' && id.length > 0)))
+
+      try {
+        const token = await getAuthToken()
+        if (isDisposed) return
+
+        // Use history mode (power/kW entities are not in HA long-term statistics)
+        const url = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(new Date(startMs).toISOString())}&endTime=${encodeURIComponent(new Date(clampedEnd).toISOString())}&entityIds=${encodeURIComponent(entityIds.join(','))}`
+        const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
+        if (!response.ok || isDisposed) return
+
+        const result = await response.json()
+        if (isDisposed) return
+
+        const historyData: any[] = Array.isArray(result?.entities) ? result.entities : []
+        const powerData = historyData.find((e: any) => e.entity_id === powerEntity.entity_id)
+        const prodData = historyData.find((e: any) => e.entity_id === productionEntityId)
+
+        const toSamples = (history: any[], unit?: string): PowerSample[] =>
+          (Array.isArray(history) ? history : [])
+            .map((s) => {
+              const ts = Number(s?.timestamp)
+              const raw = Number(s?.value)
+              if (!Number.isFinite(ts) || !Number.isFinite(raw)) return null
+              const u = String(unit || '').trim().toLowerCase()
+              const kw = (u === 'w' || u === 'watt' || u === 'va') ? raw / 1000 : raw
+              return { timestamp: ts, power: kw }
+            })
+            .filter((s): s is PowerSample => s !== null)
+
+        const powerSamples = toSamples(powerData?.history, powerEntity.unit_of_measurement)
+        const productionSamples = toSamples(prodData?.history)
+
+        if (powerSamples.length > 0) {
+          localStorage.setItem(cacheKey, JSON.stringify({ fetchTime: Date.now(), powerSamples, productionSamples }))
+          console.log('[Prefetch] Cached', powerSamples.length, 'samples for range', new Date(startMs).toLocaleDateString())
+        }
+      } catch { /* ignore prefetch errors */ }
+    }
+
+    // Prefetch in background — fire sooner so week/month is ready by the time user clicks
+    const now = Date.now()
+    const weekStart = new Date(now); weekStart.setDate(weekStart.getDate() - 6); weekStart.setHours(0, 0, 0, 0)
+    const monthStart = new Date(now); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0)
+    const installedOnMs = environmentInstalledOnMs
+    const monthStartMs = installedOnMs ? Math.min(monthStart.getTime(), installedOnMs) : monthStart.getTime()
+
+    const t1 = window.setTimeout(() => { void prefetchRange(weekStart.getTime(), now) }, 2000)
+    const t2 = window.setTimeout(() => { void prefetchRange(monthStartMs, now) }, 5000)
+
+    return () => {
+      isDisposed = true
+      window.clearTimeout(t1)
+      window.clearTimeout(t2)
+    }
+  }, [selectedEnvironment, isAuthenticated, haEntities.length, environmentInstalledOnMs, getAuthToken])
+
+  // Fetch electricity usage statistics (kWh per hour/day) — matches HA "Electricity usage" bar chart
+  useEffect(() => {
+    if (!selectedEnvironment || !isAuthenticated) {
+      return
+    }
+
+    let isDisposed = false
+
+    const fetchUsageStatistics = async () => {
+      const bounds = getBoundsFromInputDates(selectedStartDate, selectedEndDate)
+      const now = Date.now()
+      const clampedEnd = Math.min(bounds.endMs, now)
+
+      // For month range, expand start to installed-on date
+      const startMs = timeRange === 'month'
+        ? Math.min(bounds.startMs, environmentInstalledOnMs ?? bounds.startMs)
+        : bounds.startMs
+
+      if (clampedEnd <= startMs) return
+
+      // statistics period: hour for today/week, day for month
+      const period = timeRange === 'month' ? 'day' : 'hour'
+
+      // Cache key (15-min bucket precision)
+      const cacheKey = `ha_usage_v2_${selectedEnvironment}_${period}_${Math.floor(startMs / (15 * 60_000))}_${Math.floor(clampedEnd / (15 * 60_000))}`
+      const cacheTtlMs = clampedEnd < now - 60 * 60_000 ? 12 * 3600_000 : 5 * 60_000
+
+      try {
+        const cached = localStorage.getItem(cacheKey)
+        if (cached) {
+          const parsed = JSON.parse(cached)
+          if (parsed?.fetchTime && (now - parsed.fetchTime) < cacheTtlMs && Array.isArray(parsed.buckets)) {
+            setElectricityUsageBuckets(parsed.buckets)
+            return
+          }
+          // Stale — show immediately while refreshing
+          if (Array.isArray(parsed?.buckets)) {
+            setElectricityUsageBuckets(parsed.buckets)
+          }
+        }
+      } catch { /* ignore */ }
+
+      // Determine which entities to fetch (tarif 1 + tarif 2 cumulative meters)
+      const sources = haMetricsSnapshotRef.current?.sources
+      const entityIds: string[] = Array.from(new Set([
+        ...(sources?.electricityTotalEntityIds ?? []),
+        sources?.electricityTotalEntityId,
+      ].filter((id): id is string => typeof id === 'string' && id.length > 0)))
+
+      // If no configured entities, search haEntities for energy consumption meters
+      if (entityIds.length === 0) {
+        const currentEntities = haEntitiesRef.current
+        const candidates = currentEntities.filter((e) => {
+          const id = e.entity_id.toLowerCase()
+          return id.startsWith('sensor.') &&
+            (id.includes('energy_consumption') || id.includes('energy_meter') || id.includes('kwh')) &&
+            !id.includes('gas') && !id.includes('price') && !id.includes('cost')
+        }).slice(0, 4)
+        entityIds.push(...candidates.map((e) => e.entity_id))
+      }
+
+      if (entityIds.length === 0) {
+        console.log('[Usage Stats] No energy total entities found')
+        return
+      }
+
+      setIsLoadingUsage(true)
+
+      try {
+        const token = await getAuthToken()
+        if (isDisposed) return
+
+        const url = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(new Date(startMs).toISOString())}&endTime=${encodeURIComponent(new Date(clampedEnd).toISOString())}&entityIds=${encodeURIComponent(entityIds.join(','))}&mode=statistics&period=${period}`
+
+        console.log('[Usage Stats] Fetching', entityIds.join(', '), 'period:', period)
+        const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
+        if (!response.ok || isDisposed) {
+          if (!isDisposed) setIsLoadingUsage(false)
+          return
+        }
+
+        const result = await response.json()
+        if (isDisposed) return
+
+        const historyData: Array<{ entity_id: string; history: Array<{ timestamp: number; change: number; value: number }> }> =
+          Array.isArray(result?.entities) ? result.entities : []
+
+        console.log('[Usage Stats] Got data for', historyData.length, 'entities')
+
+        // Build a merged per-bucket kWh map: for each timestamp bucket, sum change across all tariff entities
+        const bucketMap = new Map<number, number>()
+
+        for (const entry of historyData) {
+          if (!entityIds.includes(entry.entity_id)) continue
+          for (const row of entry.history) {
+            const ts = row.timestamp
+            const delta = row.change
+            if (!Number.isFinite(ts) || !Number.isFinite(delta) || delta < 0) continue
+            bucketMap.set(ts, (bucketMap.get(ts) ?? 0) + delta)
+          }
+        }
+
+        const buckets = Array.from(bucketMap.entries())
+          .sort((a, b) => a[0] - b[0])
+          .map(([timestamp, kwh]) => ({ timestamp, kwh: Number(kwh.toFixed(3)) }))
+
+        setElectricityUsageBuckets(buckets)
+
+        try {
+          localStorage.setItem(cacheKey, JSON.stringify({ fetchTime: Date.now(), buckets }))
+        } catch { /* ignore quota errors */ }
+      } catch (err) {
+        console.error('[Usage Stats] Error:', err)
+      } finally {
+        if (!isDisposed) setIsLoadingUsage(false)
+      }
+    }
+
+    void fetchUsageStatistics()
+    return () => { isDisposed = true }
+  }, [
+    selectedEnvironment,
+    isAuthenticated,
+    selectedStartDate,
+    selectedEndDate,
+    timeRange,
+    environmentInstalledOnMs,
+    getAuthToken,
+    haEntities.length,
+    haMetricsSnapshot?.sources?.electricityTotalEntityId,
+  ])
+
   // Fetch electricity history
   useEffect(() => {
     if (!selectedEnvironment || !isAuthenticated) {
       return
     }
 
+    let isDisposed = false
+
+    const normalizeHistoryPowerToKw = (rawValue: number, unit?: string) => {
+      if (!Number.isFinite(rawValue)) {
+        return NaN
+      }
+
+      const normalizedUnit = String(unit || '').trim().toLowerCase()
+      if (normalizedUnit === 'w' || normalizedUnit === 'watt' || normalizedUnit === 'watts' || normalizedUnit === 'va') {
+        return rawValue / 1000
+      }
+      if (normalizedUnit === 'kw' || normalizedUnit === 'kilowatt' || normalizedUnit === 'kilowatts' || normalizedUnit === 'kva') {
+        return rawValue
+      }
+      if (normalizedUnit === 'mw') {
+        return rawValue * 1000
+      }
+
+      // Unknown unit: choose the scale that is closest to current live power.
+      const livePower = latestPowerRef.current
+      const asKw = rawValue
+      const asWToKw = rawValue / 1000
+
+      if (Number.isFinite(livePower) && livePower > 0) {
+        const diffKw = Math.abs(asKw - livePower)
+        const diffWToKw = Math.abs(asWToKw - livePower)
+        return diffWToKw < diffKw ? asWToKw : asKw
+      }
+
+      return rawValue > 50 ? rawValue / 1000 : rawValue
+    }
+
     const fetchHistoricalData = async () => {
       try {
         console.log('[HA History] Starting fetch for environment:', selectedEnvironment)
 
-        const preferredPowerEntityId = haMetricsSnapshot?.powerEntityId || null
-        const powerHistoryScopeKey = String(preferredPowerEntityId || 'fallback')
-          .replace(/[^a-zA-Z0-9_.-]/g, '_')
-          .slice(0, 120)
+        const preferredPowerEntityId = haMetricsSnapshotRef.current?.powerEntityId || null
+        const preferredProductionEntityId = haMetricsSnapshotRef.current?.sources?.currentProductionEntityId || null
+        const bounds = getBoundsFromInputDates(selectedStartDate, selectedEndDate)
+        const requestedStartMs = timeRange === 'month'
+          ? Math.min(bounds.startMs, environmentInstalledOnMs ?? Number.POSITIVE_INFINITY)
+          : bounds.startMs
 
-        // Get last fetch timestamp from localStorage
-        const lastFetchKey = `ha_history_last_fetch_${selectedEnvironment}_${powerHistoryScopeKey}`
-        const lastFetchStr = localStorage.getItem(lastFetchKey)
-        const lastFetch = lastFetchStr ? new Date(lastFetchStr) : null
-
-        const now = new Date()
-        const isIncrementalFetch = Boolean(
-          lastFetch && (now.getTime() - lastFetch.getTime()) < 8 * 24 * 60 * 60 * 1000,
-        )
-        const startTime = isIncrementalFetch
-          ? new Date(lastFetch!.getTime() - 60000)
-          : new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
-
-        if (isIncrementalFetch) {
-          console.log('[HA History] Incremental fetch from', startTime.toISOString())
-        } else {
-          console.log('[HA History] Full 7-day fetch from', startTime.toISOString())
+        const now = Date.now()
+        const clampedEndMs = Math.min(bounds.endMs, now)
+        if (clampedEndMs <= requestedStartMs) {
+          console.warn('[HA History] Skipping fetch because selected range ends in the future')
+          return
         }
 
+        // today = history mode (per-minute precision); week/month also uses history mode.
+        // NOTE: statistics mode only works for energy (kWh/m³) entities — power (kW) entities are NOT in HA statistics.
+        // Power sources chart always uses history mode. Electricity usage uses statistics separately.
+
+        // Check localStorage cache first — avoid unnecessary network requests.
+        // Round start/end to 15-minute buckets so switching between day/week/month
+        // hits the same cache entry as long as the selected window hasn't changed.
+        const cacheStartKey = Math.floor(requestedStartMs / (15 * 60_000))
+        const cacheEndKey = Math.floor(clampedEndMs / (15 * 60_000))
+        const cacheKey = `ha_history_v5_${selectedEnvironment}_${cacheStartKey}_${cacheEndKey}`
+        // History data for power (kW) entities — cache for 5 min.
+        const cacheTtlMs = 5 * 60_000
+        let staleCachedSamples: PowerSample[] | null = null
+        let staleCachedProductionSamples: PowerSample[] | null = null
+        try {
+          const cached = localStorage.getItem(cacheKey)
+          if (cached) {
+            const parsed = JSON.parse(cached)
+            if (parsed?.fetchTime) {
+              const cachedPower = sanitizePowerSampleArray(parsed.powerSamples)
+              const cachedProduction = sanitizePowerSampleArray(parsed.productionSamples)
+              if ((now - parsed.fetchTime) < cacheTtlMs) {
+                // Fresh cache — use immediately and skip network fetch
+                console.log('[HA History] Loaded from cache:', cachedPower.length, 'power samples')
+                setHistoricalRangeSamples(cachedPower)
+                setHistoricalProductionRangeSamples(cachedProduction)
+                return
+              }
+              // Stale cache — show immediately while we re-fetch in background
+              if (cachedPower.length > 0) {
+                setHistoricalRangeSamples(cachedPower)
+                setHistoricalProductionRangeSamples(cachedProduction)
+                staleCachedSamples = cachedPower
+                staleCachedProductionSamples = cachedProduction
+              }
+            }
+          }
+        } catch {
+          // Ignore cache parse errors
+        }
+
+        const startTime = new Date(requestedStartMs - 60 * 60_000)
+        const endTime = new Date(clampedEndMs)
+
+        console.log('[HA History] Fetching selected range from', startTime.toISOString(), 'to', endTime.toISOString())
+
         // Find power entity - prefer server-selected metrics source for admin/non-admin parity.
-        const powerEntity = preferredPowerEntityId
-          ? { entity_id: preferredPowerEntityId }
-          : haEntities.find(
+        const currentHaEntities = haEntitiesRef.current
+        const preferredPowerEntity = preferredPowerEntityId
+          ? currentHaEntities.find((entity) => entity.entity_id === preferredPowerEntityId)
+          : null
+        const preferredProductionEntity = preferredProductionEntityId
+          ? currentHaEntities.find((entity) => entity.entity_id === preferredProductionEntityId)
+          : null
+
+        const powerEntity = preferredPowerEntity || currentHaEntities.find(
             (e) => {
               const id = e.entity_id.toLowerCase()
               // Prioritize electricity meter, exclude binary sensors
@@ -1701,7 +2648,7 @@ export default function Dashboard({
                 id.includes('meter') && id.includes('power') && id.includes('consumption')
               )
             }
-          ) || haEntities.find(
+          ) || currentHaEntities.find(
             (e) => {
               const id = e.entity_id.toLowerCase()
               // Fallback to any power/watt sensor that's not binary
@@ -1712,22 +2659,46 @@ export default function Dashboard({
             }
           )
 
-        console.log('[HA History] Available entities:', haEntities.map((e) => e.entity_id).join(', '))
+        const productionEntity = preferredProductionEntity || currentHaEntities.find(
+          (e) => {
+            const id = e.entity_id.toLowerCase()
+            return !id.startsWith('binary_sensor') && id.startsWith('sensor.') && (
+              id.includes('production') ||
+              id.includes('solar') ||
+              id.includes('pv') ||
+              id.includes('yield') ||
+              id.includes('opwek') ||
+              id.includes('opgewekt') ||
+              id.includes('export') ||
+              id.includes('injection') ||
+              id.includes('teruglever')
+            )
+          },
+        )
+
+        console.log('[HA History] Available entities:', currentHaEntities.map((e) => e.entity_id).join(', '))
         console.log('[HA History] Preferred power entity from metrics:', preferredPowerEntityId)
+        console.log('[HA History] Preferred production entity from metrics:', preferredProductionEntityId)
         console.log('[HA History] Found power entity:', powerEntity?.entity_id)
+        console.log('[HA History] Found production entity:', productionEntity?.entity_id)
 
         if (!powerEntity) {
           console.error('[HA History] No power entity found from', haEntities.length, 'entities')
           return
         }
 
-        const entityIds = [powerEntity.entity_id]
+        // Only use the primary power entity — extra entities cause doubled/spiked values.
+        const entityIds = Array.from(new Set([
+          powerEntity.entity_id,
+          productionEntity?.entity_id || null,
+        ].filter((entityId): entityId is string => typeof entityId === 'string' && entityId.length > 0)))
 
         console.log('[HA History] Fetching entities:', entityIds.join(', '))
-        console.log('[HA History] Fetching from', startTime.toISOString(), 'to', now.toISOString())
+        console.log('[HA History] From', startTime.toISOString(), 'to', endTime.toISOString())
 
+        setIsLoadingHistory(true)
         const token = await getAuthToken()
-        const url = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(startTime.toISOString())}&endTime=${encodeURIComponent(now.toISOString())}&entityIds=${encodeURIComponent(entityIds.join(','))}`
+        const url = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(startTime.toISOString())}&endTime=${encodeURIComponent(endTime.toISOString())}&entityIds=${encodeURIComponent(entityIds.join(','))}`
         
         console.log('[HA History] Request URL:', url)
 
@@ -1740,56 +2711,468 @@ export default function Dashboard({
         if (!response.ok) {
           const errorText = await response.text()
           console.error('[HA History] Failed to fetch:', response.status, errorText)
+          if (!isDisposed) setIsLoadingHistory(false)
           return
         }
 
         const result = await response.json()
+        if (isDisposed) {
+          return
+        }
         const historyData = result.entities || []
 
         console.log('[HA History] Retrieved data for', historyData.length, 'entities:', JSON.stringify(historyData.map((e: any) => ({ entity_id: e.entity_id, samples: e.history?.length || 0 }))))
 
-        // Process power data
-        const powerData = historyData.find((h: any) => h.entity_id === powerEntity?.entity_id)
-        if (powerData?.history && powerData.history.length > 0) {
-          const newPowerSamples: PowerSample[] = powerData.history.map((state: any) => ({
-            timestamp: state.timestamp,
-            power: state.value > 100 ? state.value / 1000 : state.value, // Convert W to kW if needed
-          }))
+        // Process power data (only the primary entity to avoid doubled/spiked values)
+        const powerEntityIdSet = new Set([powerEntity.entity_id])
+        let newPowerSamples: PowerSample[] = []
+        const powerSeriesByEntity = historyData
+          .filter((entry: any) => powerEntityIdSet.has(String(entry?.entity_id || '')))
+          .map((entry: any) => {
+            const matchedEntity = currentHaEntities.find((entity) => entity.entity_id === entry?.entity_id)
+            const normalized = (Array.isArray(entry?.history) ? entry.history : [])
+              .map((state: any) => {
+                const timestamp = Number(state?.timestamp)
+                const rawValue = Number(state?.value)
+                const normalizedPower = normalizeHistoryPowerToKw(rawValue, matchedEntity?.unit_of_measurement)
+
+                if (!Number.isFinite(timestamp) || !Number.isFinite(normalizedPower)) {
+                  return null
+                }
+
+                return {
+                  timestamp,
+                  power: normalizedPower,
+                }
+              })
+              .filter((sample: PowerSample | null): sample is PowerSample => sample !== null)
+
+            return normalized
+          })
+          .filter((series: PowerSample[]) => series.length > 0)
+
+        if (powerSeriesByEntity.length > 0) {
+          newPowerSamples = mergePowerSamples(powerSeriesByEntity)
+
+          // Store fetched range samples directly so they are always visible for the selected date regardless of live-samples trim
+          setHistoricalRangeSamples(newPowerSamples)
 
           setPowerSamples((prev) => {
-            const combined = [...prev, ...newPowerSamples]
-            const uniqueMap = new Map()
-            combined.forEach((sample) => {
-              const key = Math.floor(sample.timestamp / 10000) * 10000
-              if (!uniqueMap.has(key) || sample.timestamp > uniqueMap.get(key).timestamp) {
-                uniqueMap.set(key, sample)
-              }
-            })
-            const merged = Array.from(uniqueMap.values()).sort((a, b) => a.timestamp - b.timestamp)
-            localStorage.setItem(livePowerStorageKey, JSON.stringify(merged))
-            return merged
+            const trimmed = mergePowerSamples([prev, newPowerSamples], { maxPoints: MAX_LIVE_SAMPLE_POINTS })
+            storeLocalJson(livePowerStorageKey, trimmed)
+            return trimmed
           })
 
-          console.log('[HA History] Loaded', newPowerSamples.length, 'power samples')
+          console.log('[HA History] Loaded', newPowerSamples.length, 'power samples from', powerSeriesByEntity.length, 'entities')
+        } else if (staleCachedSamples === null) {
+          // Only clear if we had nothing to show — don't erase stale data on empty HA response
+          setHistoricalRangeSamples([])
         }
 
-        // Save fetch timestamp for incremental updates
-        localStorage.setItem(lastFetchKey, now.toISOString())
-        console.log('[HA History] Saved fetch timestamp for incremental updates')
+        // Process production data
+        const productionData = historyData.find((h: any) => h.entity_id === productionEntity?.entity_id)
+        let newProductionSamples: PowerSample[] = []
+        if (productionData?.history && productionData.history.length > 0) {
+          newProductionSamples = productionData.history
+            .map((state: any) => {
+              const timestamp = Number(state?.timestamp)
+              const rawValue = Number(state?.value)
+              const normalizedPower = normalizeHistoryPowerToKw(rawValue, productionEntity?.unit_of_measurement)
+
+              if (!Number.isFinite(timestamp) || !Number.isFinite(normalizedPower)) {
+                return null
+              }
+
+              return {
+                timestamp,
+                power: normalizedPower,
+              }
+            })
+            .filter((sample: PowerSample | null): sample is PowerSample => sample !== null)
+
+          setHistoricalProductionRangeSamples(newProductionSamples)
+
+          setProductionSamples((prev) => {
+            const trimmed = mergePowerSamples([prev, newProductionSamples], { maxPoints: MAX_LIVE_SAMPLE_POINTS })
+            storeLocalJson(liveProductionStorageKey, trimmed)
+            return trimmed
+          })
+
+          console.log('[HA History] Loaded', newProductionSamples.length, 'production samples')
+        } else if (staleCachedProductionSamples === null) {
+          // Only clear if we had nothing to show from stale cache
+          setHistoricalProductionRangeSamples([])
+        }
+
+        try {
+          localStorage.setItem(
+            cacheKey,
+            JSON.stringify({
+              fetchTime: Date.now(),
+              powerSamples: newPowerSamples,
+              productionSamples: newProductionSamples,
+            }),
+          )
+        } catch {
+          // Ignore storage quota errors
+        }
+
+        try {
+          const existingArchiveRaw = localStorage.getItem(historyArchiveStorageKey)
+          const existingArchive = existingArchiveRaw
+            ? (JSON.parse(existingArchiveRaw) as Partial<HistoryArchivePayload>)
+            : null
+
+          const mergedPowerArchive = mergePowerSamples(
+            [sanitizePowerSampleArray(existingArchive?.powerSamples), newPowerSamples],
+            { resolutionMs: 60 * 60_000, maxPoints: MAX_ARCHIVE_HOURLY_POINTS },
+          )
+          const mergedProductionArchive = mergePowerSamples(
+            [sanitizePowerSampleArray(existingArchive?.productionSamples), newProductionSamples],
+            { resolutionMs: 60 * 60_000, maxPoints: MAX_ARCHIVE_HOURLY_POINTS },
+          )
+
+          if (mergedPowerArchive.length > 0 || mergedProductionArchive.length > 0) {
+            setArchivedPowerSamples(mergedPowerArchive)
+            setArchivedProductionSamples(mergedProductionArchive)
+            storeLocalJson(historyArchiveStorageKey, {
+              fetchTime: Date.now(),
+              powerSamples: mergedPowerArchive,
+              productionSamples: mergedProductionArchive,
+            })
+          }
+        } catch {
+          // Ignore archive merge/write failures.
+        }
+
+        if (!isDisposed) setIsLoadingHistory(false)
       } catch (error) {
         console.error('[HA History] Error fetching historical data:', error)
+        if (!isDisposed) setIsLoadingHistory(false)
       }
     }
 
     void fetchHistoricalData()
+    return () => {
+      isDisposed = true
+    }
   }, [
     selectedEnvironment,
     isAuthenticated,
-    haEntities,
-    haMetricsSnapshot,
-    livePowerStorageKey,
+    selectedStartDate,
+    selectedEndDate,
+    timeRange,
+    environmentInstalledOnMs,
     getAuthToken,
+    historyArchiveStorageKey,
+    livePowerStorageKey,
+    liveProductionStorageKey,
   ])
+
+  useEffect(() => {
+    if (!selectedEnvironment || !isAuthenticated) {
+      return
+    }
+
+    let isDisposed = false
+
+    const normalizeHistoryPowerToKw = (rawValue: number, unit?: string) => {
+      if (!Number.isFinite(rawValue)) {
+        return NaN
+      }
+
+      const normalizedUnit = String(unit || '').trim().toLowerCase()
+      if (normalizedUnit === 'w' || normalizedUnit === 'watt' || normalizedUnit === 'watts' || normalizedUnit === 'va') {
+        return rawValue / 1000
+      }
+      if (normalizedUnit === 'kw' || normalizedUnit === 'kilowatt' || normalizedUnit === 'kilowatts' || normalizedUnit === 'kva') {
+        return rawValue
+      }
+      if (normalizedUnit === 'mw') {
+        return rawValue * 1000
+      }
+
+      return rawValue > 50 ? rawValue / 1000 : rawValue
+    }
+
+    const fetchArchiveStatistics = async () => {
+      try {
+        const now = Date.now()
+        let existingPowerArchive: PowerSample[] = []
+        let existingProductionArchive: PowerSample[] = []
+
+        try {
+          const cached = localStorage.getItem(historyArchiveStorageKey)
+          if (cached) {
+            const parsed = JSON.parse(cached) as Partial<HistoryArchivePayload>
+            existingPowerArchive = sanitizePowerSampleArray(parsed?.powerSamples)
+            existingProductionArchive = sanitizePowerSampleArray(parsed?.productionSamples)
+            if (existingPowerArchive.length > 0 || existingProductionArchive.length > 0) {
+              setArchivedPowerSamples(existingPowerArchive)
+              setArchivedProductionSamples(existingProductionArchive)
+
+              const cachedArchiveTimestamps = [
+                existingPowerArchive[0]?.timestamp,
+                existingProductionArchive[0]?.timestamp,
+              ].filter((value): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0)
+
+              if (cachedArchiveTimestamps.length > 0) {
+                const cachedInstalledOnMs = Math.min(...cachedArchiveTimestamps)
+                setEnvironmentInstalledOnMs((previous) => previous === null
+                  ? cachedInstalledOnMs
+                  : Math.min(previous, cachedInstalledOnMs))
+
+                try {
+                  const persistedInstalledOnMs = Number(localStorage.getItem(environmentInstalledOnStorageKey))
+                  const nextInstalledOnMs = Number.isFinite(persistedInstalledOnMs) && persistedInstalledOnMs > 0
+                    ? Math.min(persistedInstalledOnMs, cachedInstalledOnMs)
+                    : cachedInstalledOnMs
+                  localStorage.setItem(environmentInstalledOnStorageKey, String(nextInstalledOnMs))
+                } catch {
+                  // Ignore localStorage errors.
+                }
+              }
+            }
+
+            const fetchTime = Number(parsed?.fetchTime)
+            const knownInstalledOnMs = Number(localStorage.getItem(environmentInstalledOnStorageKey))
+            const hasKnownInstalledOn = Number.isFinite(knownInstalledOnMs) && knownInstalledOnMs > 0
+            if (Number.isFinite(fetchTime) && now - fetchTime < ARCHIVE_REFRESH_TTL_MS && hasKnownInstalledOn) {
+              return
+            }
+          }
+        } catch {
+          // Ignore cache parse errors and continue with refresh.
+        }
+
+        const preferredPowerEntityId = haMetricsSnapshotRef.current?.powerEntityId || null
+        const preferredProductionEntityId = haMetricsSnapshotRef.current?.sources?.currentProductionEntityId || null
+        const currentHaEntities = haEntitiesRef.current
+
+        const preferredPowerEntity = preferredPowerEntityId
+          ? currentHaEntities.find((entity) => entity.entity_id === preferredPowerEntityId)
+          : null
+        const preferredProductionEntity = preferredProductionEntityId
+          ? currentHaEntities.find((entity) => entity.entity_id === preferredProductionEntityId)
+          : null
+
+        const powerEntity = preferredPowerEntity || currentHaEntities.find(
+            (entity) => {
+              const id = entity.entity_id.toLowerCase()
+              return !id.startsWith('binary_sensor') && (
+                id.includes('electricity_meter_power_consumption') ||
+                id.includes('electricity_meter') && id.includes('power') ||
+                id.includes('meter') && id.includes('power') && id.includes('consumption')
+              )
+            }
+          ) || currentHaEntities.find(
+            (entity) => {
+              const id = entity.entity_id.toLowerCase()
+              return !id.startsWith('binary_sensor') && id.startsWith('sensor.') && (
+                id.includes('current_power') ||
+                (id.includes('power') && (id.includes('consumption') || id.includes('watt')))
+              )
+            }
+          )
+
+        if (!powerEntity) {
+          return
+        }
+
+        const productionEntity = preferredProductionEntity || currentHaEntities.find(
+          (entity) => {
+            const id = entity.entity_id.toLowerCase()
+            return !id.startsWith('binary_sensor') && id.startsWith('sensor.') && (
+              id.includes('production') ||
+              id.includes('solar') ||
+              id.includes('pv') ||
+              id.includes('yield') ||
+              id.includes('opwek') ||
+              id.includes('opgewekt') ||
+              id.includes('export') ||
+              id.includes('injection') ||
+              id.includes('teruglever')
+            )
+          },
+        )
+
+        const metricSources = haMetricsSnapshotRef.current?.sources
+        const entityIds = Array.from(new Set([
+          powerEntity.entity_id,
+          productionEntity?.entity_id || null,
+          metricSources?.electricityTotalEntityId || null,
+          metricSources?.electricityProductionTotalEntityId || null,
+          metricSources?.gasTotalEntityId || null,
+          metricSources?.dailyElectricityEntityId || null,
+          metricSources?.monthlyElectricityEntityId || null,
+          metricSources?.dailyProductionEntityId || null,
+          metricSources?.monthlyProductionEntityId || null,
+        ].filter((entityId): entityId is string => typeof entityId === 'string' && entityId.trim().length > 0)))
+
+        const token = await getAuthToken()
+        const archiveStartTime = new Date(now - ARCHIVE_LOOKBACK_DAYS * 24 * 60 * 60_000)
+        const archiveEndTime = new Date(now)
+
+        const archiveUrl = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(archiveStartTime.toISOString())}&endTime=${encodeURIComponent(archiveEndTime.toISOString())}&entityIds=${encodeURIComponent(entityIds.join(','))}&mode=statistics&period=hour`
+
+        const response = await fetch(archiveUrl, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        })
+
+        let historyData: any[] = []
+        if (response.ok) {
+          const result = await response.json()
+          if (isDisposed) {
+            return
+          }
+
+          historyData = Array.isArray(result?.entities) ? result.entities : []
+        } else {
+          console.warn('[HA History] Statistics bootstrap failed, trying history fallback for month window')
+        }
+
+        const hasStatisticsRows = historyData.some(
+          (entry) => Array.isArray(entry?.history) && entry.history.length > 0,
+        )
+
+        if (!hasStatisticsRows) {
+          const selectedBounds = getBoundsFromInputDates(selectedStartDate, selectedEndDate)
+          const fallbackStartMs = Math.max(0, selectedBounds.startMs - 24 * 60 * 60_000)
+          const fallbackHistoryUrl = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(new Date(fallbackStartMs).toISOString())}&endTime=${encodeURIComponent(archiveEndTime.toISOString())}&entityIds=${encodeURIComponent(entityIds.join(','))}&mode=history`
+
+          const historyFallbackResponse = await fetch(fallbackHistoryUrl, {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          })
+
+          if (historyFallbackResponse.ok) {
+            const fallbackResult = await historyFallbackResponse.json()
+            if (isDisposed) {
+              return
+            }
+
+            historyData = Array.isArray(fallbackResult?.entities) ? fallbackResult.entities : []
+          }
+        }
+
+        const installedOnCandidates = historyData.flatMap((entry: any) => {
+          const rows = Array.isArray(entry?.history) ? entry.history : []
+          return rows
+            .map((row: any) => Number(row?.timestamp))
+            .filter((timestamp: number) => Number.isFinite(timestamp) && timestamp > 0)
+        })
+
+        if (installedOnCandidates.length > 0) {
+          const detectedInstalledOnMs = Math.min(...installedOnCandidates)
+          setEnvironmentInstalledOnMs((previous) => previous === null
+            ? detectedInstalledOnMs
+            : Math.min(previous, detectedInstalledOnMs))
+
+          try {
+            const persistedInstalledOnMs = Number(localStorage.getItem(environmentInstalledOnStorageKey))
+            const nextInstalledOnMs = Number.isFinite(persistedInstalledOnMs) && persistedInstalledOnMs > 0
+              ? Math.min(persistedInstalledOnMs, detectedInstalledOnMs)
+              : detectedInstalledOnMs
+            localStorage.setItem(environmentInstalledOnStorageKey, String(nextInstalledOnMs))
+          } catch {
+            // Ignore localStorage errors.
+          }
+        }
+
+        const archivePowerSamples = sanitizePowerSampleArray(
+          historyData
+            .find((entry: any) => entry?.entity_id === powerEntity.entity_id)
+            ?.history
+            ?.map((state: any) => {
+              const timestamp = Number(state?.timestamp)
+              const rawValue = Number(state?.value)
+              const normalizedPower = normalizeHistoryPowerToKw(rawValue, powerEntity?.unit_of_measurement)
+
+              if (!Number.isFinite(timestamp) || !Number.isFinite(normalizedPower)) {
+                return null
+              }
+
+              return {
+                timestamp,
+                power: normalizedPower,
+              }
+            })
+            ?.filter((sample: PowerSample | null): sample is PowerSample => sample !== null),
+        )
+
+        const archiveProductionSamples = sanitizePowerSampleArray(
+          historyData
+            .find((entry: any) => entry?.entity_id === productionEntity?.entity_id)
+            ?.history
+            ?.map((state: any) => {
+              const timestamp = Number(state?.timestamp)
+              const rawValue = Number(state?.value)
+              const normalizedPower = normalizeHistoryPowerToKw(rawValue, productionEntity?.unit_of_measurement)
+
+              if (!Number.isFinite(timestamp) || !Number.isFinite(normalizedPower)) {
+                return null
+              }
+
+              return {
+                timestamp,
+                power: normalizedPower,
+              }
+            })
+            ?.filter((sample: PowerSample | null): sample is PowerSample => sample !== null),
+        )
+
+        const nextPowerArchive = mergePowerSamples(
+          [existingPowerArchive, archivePowerSamples],
+          { resolutionMs: 60 * 60_000, maxPoints: MAX_ARCHIVE_HOURLY_POINTS },
+        )
+        const nextProductionArchive = mergePowerSamples(
+          [existingProductionArchive, archiveProductionSamples],
+          { resolutionMs: 60 * 60_000, maxPoints: MAX_ARCHIVE_HOURLY_POINTS },
+        )
+
+        if (nextPowerArchive.length === 0 && nextProductionArchive.length === 0) {
+          return
+        }
+
+        setArchivedPowerSamples(nextPowerArchive)
+        setArchivedProductionSamples(nextProductionArchive)
+
+        const payload: HistoryArchivePayload = {
+          fetchTime: now,
+          powerSamples: nextPowerArchive,
+          productionSamples: nextProductionArchive,
+        }
+        storeLocalJson(historyArchiveStorageKey, payload)
+      } catch (error) {
+        console.error('[HA History] Error refreshing archive statistics:', error)
+      }
+    }
+
+    void fetchArchiveStatistics()
+    return () => {
+      isDisposed = true
+    }
+  }, [
+    selectedEnvironment,
+    isAuthenticated,
+    getAuthToken,
+    historyArchiveStorageKey,
+    environmentInstalledOnStorageKey,
+    haEntities.length,
+    haMetricsSnapshot?.powerEntityId,
+    haMetricsSnapshot?.sources?.currentProductionEntityId,
+    haMetricsSnapshot?.sources?.electricityTotalEntityId,
+    haMetricsSnapshot?.sources?.electricityProductionTotalEntityId,
+    haMetricsSnapshot?.sources?.gasTotalEntityId,
+    haMetricsSnapshot?.sources?.dailyElectricityEntityId,
+    haMetricsSnapshot?.sources?.monthlyElectricityEntityId,
+    haMetricsSnapshot?.sources?.dailyProductionEntityId,
+    haMetricsSnapshot?.sources?.monthlyProductionEntityId,
+  ])
+
   useEffect(() => {
     if (!selectedEnvironment || visibleEnvironments.length === 0) {
       return
@@ -1805,45 +3188,113 @@ export default function Dashboard({
         }
 
         const next = [...prev, { timestamp: now, power: latestPowerRef.current }]
-        localStorage.setItem(livePowerStorageKey, JSON.stringify(next))
-        return next
+        const trimmed = next.slice(-MAX_LIVE_SAMPLE_POINTS)
+        storeLocalJson(livePowerStorageKey, trimmed)
+        return trimmed
+      })
+
+      setProductionSamples((prev) => {
+        const lastSample = prev[prev.length - 1]
+        if (lastSample && now - lastSample.timestamp < 8000) {
+          return prev
+        }
+
+        const next = [...prev, { timestamp: now, power: latestProductionRef.current }]
+        const trimmed = next.slice(-MAX_LIVE_SAMPLE_POINTS)
+        storeLocalJson(liveProductionStorageKey, trimmed)
+        return trimmed
       })
     }
 
     captureSamples()
     const interval = window.setInterval(captureSamples, 10000)
     return () => window.clearInterval(interval)
-  }, [livePowerStorageKey, selectedEnvironment, visibleEnvironments.length])
+  }, [livePowerStorageKey, liveProductionStorageKey, selectedEnvironment, visibleEnvironments.length])
+
+  const earliestArchiveStartMs = useMemo(() => {
+    const candidateTimestamps = [
+      archivedPowerSamples[0]?.timestamp,
+      archivedProductionSamples[0]?.timestamp,
+    ].filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+
+    if (candidateTimestamps.length === 0) {
+      return null
+    }
+
+    return Math.min(...candidateTimestamps)
+  }, [archivedPowerSamples, archivedProductionSamples])
+
+  const selectedEnvironmentName = useMemo(() => {
+    const matched = visibleEnvironments.find((environment) => environment.id === selectedEnvironment)
+    if (matched?.name) {
+      return matched.name
+    }
+
+    return selectedEnvironment || 'No environment selected'
+  }, [selectedEnvironment, visibleEnvironments])
+
+  const environmentInstalledOnLabel = useMemo(() => {
+    if (environmentInstalledOnMs === null) {
+      return 'unknown'
+    }
+
+    return new Date(environmentInstalledOnMs).toLocaleString('nl-NL', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+  }, [environmentInstalledOnMs])
 
 
   const selectedRange = useMemo(() => {
-    const [year, month, day] = selectedChartDate.split('-').map(Number)
-    const isValidDate = Number.isFinite(year) && Number.isFinite(month) && Number.isFinite(day)
-    const anchorDate = isValidDate
-      ? new Date(year, month - 1, day)
-      : new Date()
-
-    const rangeStart = new Date(anchorDate)
-    const rangeEnd = new Date(anchorDate)
-    rangeEnd.setHours(23, 59, 59, 999)
-
-    if (timeRange === 'week') {
-      rangeStart.setDate(rangeStart.getDate() - 6)
-      rangeStart.setHours(0, 0, 0, 0)
-    } else if (timeRange === 'month') {
-      rangeStart.setDate(1)
-      rangeStart.setHours(0, 0, 0, 0)
-    } else {
-      rangeStart.setHours(0, 0, 0, 0)
-    }
+    const bounds = getBoundsFromInputDates(selectedStartDate, selectedEndDate)
+    const startLabel = new Date(bounds.startMs).toLocaleDateString()
+    const endLabel = new Date(bounds.endMs).toLocaleDateString()
 
     return {
-      startMs: rangeStart.getTime(),
-      endMs: rangeEnd.getTime(),
-      label: rangeEnd.toLocaleDateString(),
+      startMs: bounds.startMs,
+      endMs: bounds.endMs,
+      label: startLabel === endLabel ? endLabel : `${startLabel} - ${endLabel}`,
     }
-  }, [selectedChartDate, timeRange])
+  }, [selectedStartDate, selectedEndDate])
 
+  const handleTimeRangeChange = (nextRange: 'today' | 'week' | 'month') => {
+    setTimeRange(nextRange)
+
+    const anchorDate = parseInputDate(selectedEndDate) || new Date()
+    const nextStart = new Date(anchorDate)
+
+    if (nextRange === 'week') {
+      nextStart.setDate(anchorDate.getDate() - 6)
+    } else if (nextRange === 'month') {
+      nextStart.setDate(1)
+    }
+
+    setSelectedStartDate(formatDateForInput(nextStart))
+    setSelectedEndDate(formatDateForInput(anchorDate))
+  }
+
+  const electricityRange = useMemo(() => {
+    const installedOnStartMs = environmentInstalledOnMs
+    const expandedStartMs = timeRange === 'month'
+      ? Math.min(
+          selectedRange.startMs,
+          earliestArchiveStartMs ?? Number.POSITIVE_INFINITY,
+          installedOnStartMs ?? Number.POSITIVE_INFINITY,
+        )
+      : selectedRange.startMs
+    const label = expandedStartMs < selectedRange.startMs
+      ? `${new Date(expandedStartMs).toLocaleDateString()} - ${new Date(selectedRange.endMs).toLocaleDateString()}`
+      : selectedRange.label
+
+    return {
+      startMs: expandedStartMs,
+      endMs: selectedRange.endMs,
+      label,
+    }
+  }, [earliestArchiveStartMs, environmentInstalledOnMs, selectedRange.endMs, selectedRange.label, selectedRange.startMs, timeRange])
   // Build gas chart data from locally captured meter readings
   // HA does not provide history/statistics for this gas entity (returns 404),
   // so we capture the meter value every 10sec via entity polling and derive consumption.
@@ -1884,79 +3335,151 @@ export default function Dashboard({
     [gasMeterReadings],
   )
 
-  const bucketPowerSamples = useCallback(
+  const bucketPowerSeries = useCallback(
     (
+      powerSeries: PowerSample[],
+      productionSeries: PowerSample[],
       startMs: number,
       endMs: number,
       bucketMs: number,
-      fallbackPower: number,
-      aggregationMode: 'average' | 'peak' = 'average',
+      powerSeriesIsSigned: boolean,
     ) => {
-      const sorted = powerSamples
-        .filter((sample) => sample.timestamp >= startMs - bucketMs && sample.timestamp <= endMs)
-        .sort((a, b) => a.timestamp - b.timestamp)
+      const sortedPower = [...powerSeries].sort((a, b) => a.timestamp - b.timestamp)
+      const sortedProduction = [...productionSeries].sort((a, b) => a.timestamp - b.timestamp)
 
       const bucketStart = Math.floor(startMs / bucketMs) * bucketMs
       const bucketEnd = Math.ceil(endMs / bucketMs) * bucketMs
-      const buckets: Array<{ start: number; value: number }> = []
+      const buckets: Array<{ start: number; value: number | null }> = []
+      const staleThresholdMs = Math.max(bucketMs * 3, 45 * 60_000)
 
-      let index = 0
-      let lastKnownPower = Number.isFinite(fallbackPower) ? fallbackPower : 0
+      let powerIndex = 0
+      let productionIndex = 0
+      let lastKnownPower: number | null = null
+      let lastKnownProduction: number | null = null
+      let lastPowerTimestamp: number | null = null
+      let lastProductionTimestamp: number | null = null
 
-      while (index < sorted.length && sorted[index].timestamp < bucketStart) {
-        lastKnownPower = sorted[index].power
-        index += 1
+      while (powerIndex < sortedPower.length && sortedPower[powerIndex].timestamp < bucketStart) {
+        lastKnownPower = sortedPower[powerIndex].power
+        lastPowerTimestamp = sortedPower[powerIndex].timestamp
+        powerIndex += 1
       }
+
+      while (productionIndex < sortedProduction.length && sortedProduction[productionIndex].timestamp < bucketStart) {
+        lastKnownProduction = sortedProduction[productionIndex].power
+        lastProductionTimestamp = sortedProduction[productionIndex].timestamp
+        productionIndex += 1
+      }
+
+      const nowMs = Date.now()
 
       for (let t = bucketStart; t < bucketEnd; t += bucketMs) {
         const nextT = t + bucketMs
-        let sum = 0
-        let count = 0
-        let maxInBucket = Number.NEGATIVE_INFINITY
 
-        while (index < sorted.length && sorted[index].timestamp < nextT) {
-          const sample = sorted[index]
-          if (sample.timestamp >= t) {
-            sum += sample.power
-            count += 1
-            if (sample.power > maxInBucket) {
-              maxInBucket = sample.power
-            }
-          }
-          lastKnownPower = sample.power
-          index += 1
+        while (powerIndex < sortedPower.length && sortedPower[powerIndex].timestamp < nextT) {
+          lastKnownPower = sortedPower[powerIndex].power
+          lastPowerTimestamp = sortedPower[powerIndex].timestamp
+          powerIndex += 1
         }
 
-        const bucketValue = count > 0
-          ? (aggregationMode === 'peak' ? maxInBucket : sum / count)
-          : lastKnownPower
+        while (productionIndex < sortedProduction.length && sortedProduction[productionIndex].timestamp < nextT) {
+          lastKnownProduction = sortedProduction[productionIndex].power
+          lastProductionTimestamp = sortedProduction[productionIndex].timestamp
+          productionIndex += 1
+        }
+
+        const isFutureBucket = t > nowMs
+        const hasPowerValue = lastKnownPower !== null && lastPowerTimestamp !== null && (nextT - lastPowerTimestamp) <= staleThresholdMs
+        const hasProductionValue = lastKnownProduction !== null && lastProductionTimestamp !== null && (nextT - lastProductionTimestamp) <= staleThresholdMs
+
+        let bucketValue: number | null = null
+        if (!isFutureBucket) {
+          if (powerSeriesIsSigned) {
+            bucketValue = hasPowerValue ? lastKnownPower : null
+          } else if (hasPowerValue || hasProductionValue) {
+            const powerValue = hasPowerValue ? Number(lastKnownPower) : 0
+            const productionValue = hasProductionValue ? Number(lastKnownProduction) : 0
+            bucketValue = powerValue - productionValue
+          }
+        }
+
         buckets.push({
           start: t,
-          value: parseFloat(Math.max(0, bucketValue).toFixed(3)),
+          value: bucketValue === null ? null : parseFloat(bucketValue.toFixed(3)),
         })
       }
 
       return buckets
     },
-    [powerSamples],
+    [],
   )
 
+  // Combine live samples with the last fetched historical range so past dates are always visible
+  const chartSamples = useMemo(() => {
+    const filteredHistorical = historicalRangeSamples.filter(
+      (sample) => sample.timestamp >= electricityRange.startMs && sample.timestamp <= electricityRange.endMs,
+    )
+    const filteredLive = powerSamples.filter(
+      (sample) => sample.timestamp >= electricityRange.startMs && sample.timestamp <= electricityRange.endMs,
+    )
+
+    if (filteredHistorical.length > 0) {
+      return mergePowerSamples([filteredHistorical, filteredLive])
+    }
+
+    const filteredArchive = archivedPowerSamples.filter(
+      (sample) => sample.timestamp >= electricityRange.startMs && sample.timestamp <= electricityRange.endMs,
+    )
+    return mergePowerSamples([filteredArchive, filteredLive])
+  }, [archivedPowerSamples, electricityRange.endMs, electricityRange.startMs, historicalRangeSamples, powerSamples])
+
+  const chartProductionSamples = useMemo(() => {
+    const filteredHistorical = historicalProductionRangeSamples.filter(
+      (sample) => sample.timestamp >= electricityRange.startMs && sample.timestamp <= electricityRange.endMs,
+    )
+    const filteredLive = productionSamples.filter(
+      (sample) => sample.timestamp >= electricityRange.startMs && sample.timestamp <= electricityRange.endMs,
+    )
+
+    if (filteredHistorical.length > 0) {
+      return mergePowerSamples([filteredHistorical, filteredLive])
+    }
+
+    const filteredArchive = archivedProductionSamples.filter(
+      (sample) => sample.timestamp >= electricityRange.startMs && sample.timestamp <= electricityRange.endMs,
+    )
+    return mergePowerSamples([filteredArchive, filteredLive])
+  }, [archivedProductionSamples, electricityRange.endMs, electricityRange.startMs, historicalProductionRangeSamples, productionSamples])
+
   const chartData = useMemo(() => {
-    const bucketMs = timeRange === 'today' ? 300_000 : 86_400_000
-    const aggregationMode = timeRange === 'today' ? 'peak' : 'average'
-    const buckets = bucketPowerSamples(
-      selectedRange.startMs,
-      selectedRange.endMs,
+    const rangeSpanMs = Math.max(0, electricityRange.endMs - electricityRange.startMs)
+    const bucketMs = timeRange === 'today'
+      ? 60_000
+      : timeRange === 'week'
+        ? 15 * 60_000
+        : rangeSpanMs > 120 * 24 * 60 * 60_000
+          ? 6 * 60 * 60_000
+          : rangeSpanMs > 45 * 24 * 60 * 60_000
+            ? 60 * 60_000
+            : 15 * 60_000
+
+    const powerSeriesIsSigned = chartSamples.some(
+      (sample) =>
+        sample.timestamp >= electricityRange.startMs &&
+        sample.timestamp <= electricityRange.endMs &&
+        sample.power < -0.05,
+    )
+    const buckets = bucketPowerSeries(
+      chartSamples,
+      chartProductionSamples,
+      electricityRange.startMs,
+      electricityRange.endMs,
       bucketMs,
-      realTimeData.currentPower,
-      aggregationMode,
+      powerSeriesIsSigned,
     )
 
     if (buckets.length === 0) {
-      return [{
-        time: '',
-        power: 0,
-      }]
+      return [] as Array<{ time: string; power: number | null }>
     }
 
     return buckets.map((bucket) => ({
@@ -1964,12 +3487,24 @@ export default function Dashboard({
       power: bucket.value,
     }))
   }, [
-    bucketPowerSamples,
-    selectedRange.startMs,
-    selectedRange.endMs,
-    realTimeData.currentPower,
+    bucketPowerSeries,
+    chartSamples,
+    chartProductionSamples,
+    electricityRange.startMs,
+    electricityRange.endMs,
     timeRange,
   ])
+
+  // "Electricity usage" bar chart data — from HA statistics (kWh per bucket)
+  const electricityUsageChartData = useMemo(() => {
+    if (electricityUsageBuckets.length === 0) return [] as Array<{ time: string; power: number | null }>
+    return electricityUsageBuckets
+      .filter((b) => b.timestamp >= electricityRange.startMs && b.timestamp <= electricityRange.endMs)
+      .map((b) => ({
+        time: formatChartAxisLabel(b.timestamp, timeRange),
+        power: b.kwh,
+      }))
+  }, [electricityUsageBuckets, electricityRange.startMs, electricityRange.endMs, timeRange])
 
   const gasChartData = useMemo(() => {
     const bucketMs = timeRange === 'today' ? 3_600_000 : 86_400_000
@@ -2030,37 +3565,183 @@ export default function Dashboard({
     )
   }, [gasChartData])
 
-  const gasSelectedPeriodLabel = timeRange === 'today'
-    ? 'Gas Day Total'
-    : timeRange === 'week'
-      ? 'Gas Week Total'
-      : 'Gas Month Total'
-
   // Gas card values: use local meter readings to compute daily/monthly totals
   const gasTodayCardValue = useMemo(() => {
+    if (haMetricsSnapshot?.dailyGasM3 !== null && haMetricsSnapshot?.dailyGasM3 !== undefined) {
+      return parseFloat(Math.max(0, haMetricsSnapshot.dailyGasM3).toFixed(2))
+    }
+
     const now = new Date()
     const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0).getTime()
     const readings = gasMeterReadings.filter((r) => r.timestamp >= startOfToday)
     if (readings.length >= 2) {
       const total = Math.max(0, readings[readings.length - 1].value - readings[0].value)
-      return parseFloat(Math.max(realTimeData.gasDailyUsage, total).toFixed(2))
+      return parseFloat(total.toFixed(2))
     }
     return realTimeData.gasDailyUsage
-  }, [gasMeterReadings, realTimeData.gasDailyUsage])
+  }, [gasMeterReadings, haMetricsSnapshot?.dailyGasM3, realTimeData.gasDailyUsage])
 
   const gasMonthCardValue = useMemo(() => {
+    if (haMetricsSnapshot?.monthlyGasM3 !== null && haMetricsSnapshot?.monthlyGasM3 !== undefined) {
+      return parseFloat(Math.max(0, haMetricsSnapshot.monthlyGasM3).toFixed(2))
+    }
+
     const now = new Date()
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0).getTime()
     const readings = gasMeterReadings.filter((r) => r.timestamp >= startOfMonth)
     if (readings.length >= 2) {
       const total = Math.max(0, readings[readings.length - 1].value - readings[0].value)
-      return parseFloat(Math.max(realTimeData.gasMonthlyUsage, total).toFixed(2))
+      return parseFloat(total.toFixed(2))
     }
     return realTimeData.gasMonthlyUsage
-  }, [gasMeterReadings, realTimeData.gasMonthlyUsage])
+  }, [gasMeterReadings, haMetricsSnapshot?.monthlyGasM3, realTimeData.gasMonthlyUsage])
 
   const gasTodayCardCost = parseFloat((gasTodayCardValue * gasRatePerM3).toFixed(2))
   const gasMonthCardCost = parseFloat((gasMonthCardValue * gasRatePerM3).toFixed(2))
+
+  const apiConsistencyIssues = useMemo(() => {
+    if (!haMetricsSnapshot) {
+      return [] as string[]
+    }
+
+    const issues: string[] = []
+    const entitiesForCheck = haEntities.length > 0 ? haEntities : lastKnownHaEntities
+
+    const getEntityValue = (entityId: string | null, kind: 'energy' | 'gas') => {
+      if (!entityId) {
+        return null
+      }
+
+      const entity = entitiesForCheck.find(
+        (candidate) => candidate.entity_id.toLowerCase() === entityId.toLowerCase(),
+      )
+      if (!entity) {
+        return null
+      }
+
+      const parsed = parseNumericValue(entity.state)
+      if (!Number.isFinite(parsed)) {
+        return null
+      }
+
+      const normalized = kind === 'energy'
+        ? convertEnergyToKwh(parsed, entity.unit_of_measurement)
+        : convertGasToM3(parsed, entity.unit_of_measurement)
+
+      return Number.isFinite(normalized) ? normalized : null
+    }
+
+    const addDriftIssue = (
+      label: string,
+      displayed: number,
+      apiValue: number | null,
+      unit: string,
+      tolerance: number,
+    ) => {
+      if (!Number.isFinite(displayed) || apiValue === null || !Number.isFinite(apiValue)) {
+        return
+      }
+
+      const drift = Math.abs(displayed - apiValue)
+      if (drift > tolerance) {
+        issues.push(
+          `${label}: UI=${displayed.toFixed(3)} ${unit}, API=${apiValue.toFixed(3)} ${unit}, drift=${drift.toFixed(3)} ${unit}`,
+        )
+      }
+    }
+
+    addDriftIssue('Electricity today', realTimeData.dailyUsage, haMetricsSnapshot.dailyElectricityKwh, 'kWh', 0.01)
+    addDriftIssue('Electricity month', realTimeData.monthlyUsage, haMetricsSnapshot.monthlyElectricityKwh, 'kWh', 0.01)
+    addDriftIssue('Gas today', gasTodayCardValue, haMetricsSnapshot.dailyGasM3, 'm3', 0.01)
+    addDriftIssue('Gas month', gasMonthCardValue, haMetricsSnapshot.monthlyGasM3, 'm3', 0.01)
+
+    const checkSourceAlignment = (
+      label: string,
+      sourceEntityId: string | null,
+      metricValue: number | null,
+      kind: 'energy' | 'gas',
+      unit: string,
+      tolerance: number,
+    ) => {
+      if (metricValue === null) {
+        return
+      }
+
+      const sourceValue = getEntityValue(sourceEntityId, kind)
+      if (sourceValue === null) {
+        return
+      }
+
+      const drift = Math.abs(sourceValue - metricValue)
+      if (drift > tolerance) {
+        issues.push(
+          `${label}: metric=${metricValue.toFixed(3)} ${unit}, source=${sourceValue.toFixed(3)} ${unit}, drift=${drift.toFixed(3)} ${unit}`,
+        )
+      }
+    }
+
+    checkSourceAlignment(
+      'Electricity daily source',
+      haMetricsSnapshot.sources.dailyElectricityEntityId,
+      haMetricsSnapshot.dailyElectricityKwh,
+      'energy',
+      'kWh',
+      0.01,
+    )
+    checkSourceAlignment(
+      'Electricity monthly source',
+      haMetricsSnapshot.sources.monthlyElectricityEntityId,
+      haMetricsSnapshot.monthlyElectricityKwh,
+      'energy',
+      'kWh',
+      0.01,
+    )
+    checkSourceAlignment(
+      'Gas daily source',
+      haMetricsSnapshot.sources.dailyGasEntityId,
+      haMetricsSnapshot.dailyGasM3,
+      'gas',
+      'm3',
+      0.01,
+    )
+    checkSourceAlignment(
+      'Gas monthly source',
+      haMetricsSnapshot.sources.monthlyGasEntityId,
+      haMetricsSnapshot.monthlyGasM3,
+      'gas',
+      'm3',
+      0.01,
+    )
+
+    const now = new Date()
+    const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+    if (timeRange === 'today' && selectedStartDate === todayKey && selectedEndDate === todayKey) {
+      addDriftIssue('Gas chart day total', gasSelectedPeriodTotal, haMetricsSnapshot.dailyGasM3, 'm3', 0.05)
+    }
+
+    return issues
+  }, [
+    gasMonthCardValue,
+    gasSelectedPeriodTotal,
+    gasTodayCardValue,
+    haEntities,
+    haMetricsSnapshot,
+    lastKnownHaEntities,
+    realTimeData.dailyUsage,
+    realTimeData.monthlyUsage,
+    selectedStartDate,
+    selectedEndDate,
+    timeRange,
+  ])
+
+  useEffect(() => {
+    if (apiConsistencyIssues.length > 0) {
+      console.warn('[API consistency] Detected metric drift:', {
+        environmentId: selectedEnvironment,
+        issues: apiConsistencyIssues,
+      })
+    }
+  }, [apiConsistencyIssues, selectedEnvironment])
 
   // Show loading screen while checking permissions
   if (isCheckingPermissions) {
@@ -2081,11 +3762,31 @@ export default function Dashboard({
         <div className="mb-8">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-4">
-              <Home className="w-8 h-8 text-brand-2" />
+              {onOpenOverview ? (
+                <button
+                  type="button"
+                  onClick={onOpenOverview}
+                  className="p-1 rounded-md hover:bg-light-2 hover:bg-opacity-10 transition-all"
+                  title="Back to overview"
+                  aria-label="Back to overview"
+                >
+                  <Home className="w-8 h-8 text-brand-2" />
+                </button>
+              ) : (
+                <Home className="w-8 h-8 text-brand-2" />
+              )}
               <div>
                 <h1 className="text-4xl md:text-5xl font-heavy text-light-2 mb-2">
-                  Inside-Out Foxtrot
+                  {selectedEnvironmentName}
                 </h1>
+                <div className="flex items-center gap-2 text-light-1 text-sm md:text-base">
+                  <span
+                    className={`inline-block w-2.5 h-2.5 rounded-full ${haConnectionStatus === 'connected' ? 'bg-emerald-400' : haConnectionStatus === 'connecting' ? 'bg-amber-300' : 'bg-red-400'}`}
+                  ></span>
+                  <span>{haConnectionStatus === 'connected' ? 'Online' : haConnectionStatus === 'connecting' ? 'Connecting' : 'Offline'}</span>
+                  <span className="opacity-70">|</span>
+                  <span>Installed on {environmentInstalledOnLabel}</span>
+                </div>
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -2286,7 +3987,7 @@ export default function Dashboard({
           <div className="flex flex-col md:flex-row md:items-center gap-4">
             <div className="flex gap-4 flex-1">
               <button
-                onClick={() => setTimeRange('today')}
+                onClick={() => handleTimeRangeChange('today')}
                 className={`flex-1 py-3 px-4 rounded-lg font-medium transition-all ${
                   timeRange === 'today'
                     ? 'glass-button'
@@ -2296,7 +3997,7 @@ export default function Dashboard({
                 Day
               </button>
               <button
-                onClick={() => setTimeRange('week')}
+                onClick={() => handleTimeRangeChange('week')}
                 className={`flex-1 py-3 px-4 rounded-lg font-medium transition-all ${
                   timeRange === 'week'
                     ? 'glass-button'
@@ -2306,7 +4007,7 @@ export default function Dashboard({
                 Week
               </button>
               <button
-                onClick={() => setTimeRange('month')}
+                onClick={() => handleTimeRangeChange('month')}
                 className={`flex-1 py-3 px-4 rounded-lg font-medium transition-all ${
                   timeRange === 'month'
                     ? 'glass-button'
@@ -2316,33 +4017,97 @@ export default function Dashboard({
                 Month
               </button>
             </div>
-            <div className="md:w-56">
-              <label className="block text-xs text-light-1 mb-1">Selected date</label>
-              <input
-                type="date"
-                value={selectedChartDate}
-                onChange={(event) => setSelectedChartDate(event.target.value)}
-                className="w-full bg-dark-2 bg-opacity-70 text-light-2 border border-light-2 border-opacity-20 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-2"
-              />
+            <div className="md:w-[26rem]">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs text-light-1 mb-1">Start date</label>
+                  <input
+                    type="date"
+                    value={selectedStartDate}
+                    max={selectedEndDate}
+                    onChange={(event) => handleStartDateChange(event.target.value)}
+                    className="w-full bg-dark-2 bg-opacity-70 text-light-2 border border-light-2 border-opacity-20 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-2"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-light-1 mb-1">End date</label>
+                  <input
+                    type="date"
+                    value={selectedEndDate}
+                    min={selectedStartDate}
+                    onChange={(event) => handleEndDateChange(event.target.value)}
+                    className="w-full bg-dark-2 bg-opacity-70 text-light-2 border border-light-2 border-opacity-20 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-2"
+                  />
+                </div>
+              </div>
             </div>
           </div>
         </div>
 
+        {apiConsistencyIssues.length > 0 && (
+          <div className="glass-panel rounded-xl border border-red-400 border-opacity-60 p-4 mb-8">
+            <h3 className="text-red-200 font-semibold mb-2">API consistency check detected drift</h3>
+            <p className="text-light-1 text-sm mb-3">
+              Displayed values differ from direct API/source values. The details below help identify the mismatched sensor.
+            </p>
+            <ul className="list-disc pl-5 space-y-1 text-sm text-red-100">
+              {apiConsistencyIssues.map((issue) => (
+                <li key={issue}>{issue}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {/* Chart Section - Electricity and Gas charts */}
         <div className="space-y-8">
-          {/* Electricity Chart */}
+          {/* Power Sources Chart (instantaneous kW) */}
           <div className="glass-panel rounded-3xl shadow-2xl p-4 sm:p-6 md:p-8">
             <h2 className="text-2xl font-heavy text-dark-1 mb-6 flex items-center gap-2">
               <Clock className="w-6 h-6 text-brand-2" />
-              Electricity Chart
+              Power sources
+              {isLoadingHistory && (
+                <span className="ml-3 inline-flex items-center gap-1.5 text-sm font-normal text-brand-2 opacity-75">
+                  <svg className="animate-spin w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+                  </svg>
+                  Laden…
+                </span>
+              )}
             </h2>
             <EnergyChart
               data={chartData}
               timeRange={timeRange}
               unit="kW"
-              seriesLabel="Electricity chart"
-              rangeLabel={selectedRange.label}
+              seriesLabel="Power sources"
+              rangeLabel={electricityRange.label}
               lineType="linear"
+              signed={true}
+            />
+          </div>
+
+          {/* Electricity Usage Chart (kWh per hour/day from statistics) */}
+          <div className="glass-panel rounded-3xl shadow-2xl p-4 sm:p-6 md:p-8">
+            <h2 className="text-2xl font-heavy text-dark-1 mb-6 flex items-center gap-2">
+              <Clock className="w-6 h-6 text-brand-2" />
+              Electricity usage
+              {isLoadingUsage && (
+                <span className="ml-3 inline-flex items-center gap-1.5 text-sm font-normal text-brand-2 opacity-75">
+                  <svg className="animate-spin w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+                  </svg>
+                  Laden…
+                </span>
+              )}
+            </h2>
+            <EnergyChart
+              data={electricityUsageChartData}
+              timeRange={timeRange}
+              unit="kWh"
+              seriesLabel="Electricity usage"
+              rangeLabel={electricityRange.label}
+              chartType="bar"
             />
           </div>
 
@@ -2351,12 +4116,8 @@ export default function Dashboard({
             <div className="mb-6 flex flex-col gap-4">
               <h2 className="text-2xl font-heavy text-dark-1 flex items-center gap-2">
                 <Flame className="w-6 h-6 text-brand-2" />
-                Gas Chart
+                Gas consumption
               </h2>
-              <div className="glass-card rounded-xl px-4 py-3">
-                <p className="text-light-1 text-xs font-medium uppercase">{gasSelectedPeriodLabel}</p>
-                <p className="text-2xl font-heavy text-light-2">{gasSelectedPeriodTotal.toFixed(2)} m³</p>
-              </div>
             </div>
             <EnergyChart
               data={gasChartData}

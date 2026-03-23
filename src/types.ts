@@ -38,4 +38,7 @@ export interface EnergyPricingConfig {
   producerBasePrice?: number
   consumerMargin?: number
   producerMargin?: number
+  gasPrice?: number
+  gasMargin?: number
+  gasProxyKwhPerM3?: number
 }
