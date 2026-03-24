@@ -3442,7 +3442,7 @@ export default function Dashboard({
       const bucketStart = Math.floor(startMs / bucketMs) * bucketMs
       const bucketEnd = Math.ceil(endMs / bucketMs) * bucketMs
       const buckets: Array<{ start: number; value: number | null }> = []
-      const staleThresholdMs = Math.max(bucketMs * 3, 45 * 60_000)
+      const staleThresholdMs = Math.max(bucketMs * 3, 4 * 60 * 60_000)
 
       let powerIndex = 0
       let productionIndex = 0

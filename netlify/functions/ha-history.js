@@ -321,14 +321,37 @@ const formatStatisticsPayload = (statisticsData, entityIdsList) => {
   return entityIdsList.map((entityId) => {
     const statsRows = Array.isArray(safeData[entityId]) ? safeData[entityId] : []
     const mappedRows = statsRows
-      .map((row) => {
+      .map((row, rowIndex) => {
         const timestampRaw = row?.start || row?.end || row?.last_reset
         const timestamp = timestampRaw ? new Date(timestampRaw).getTime() : NaN
         const parsedValue = parseNumericState(
           row?.state ?? row?.sum ?? row?.mean ?? row?.max ?? row?.min,
         )
 
-        const changeValue = parseNumericState(row?.change)
+        let changeValue = parseNumericState(row?.change)
+
+        // HA versions before 2023.5 do not include the 'change' field in statistics_during_period.
+        // Compute the per-period consumption from consecutive 'sum' (or 'state') differences so
+        // the Electricity usage bar chart shows real data on all HA versions.
+        if (!Number.isFinite(changeValue) || changeValue < 0) {
+          const currentSum = parseNumericState(row?.sum)
+          if (Number.isFinite(currentSum) && rowIndex > 0) {
+            const prevSum = parseNumericState(statsRows[rowIndex - 1]?.sum)
+            if (Number.isFinite(prevSum) && currentSum > prevSum) {
+              changeValue = currentSum - prevSum
+            }
+          }
+
+          // Fall back to state-field differences when sum is unavailable
+          if ((!Number.isFinite(changeValue) || changeValue < 0) && Number.isFinite(parsedValue) && rowIndex > 0) {
+            const prevParsed = parseNumericState(
+              statsRows[rowIndex - 1]?.state ?? statsRows[rowIndex - 1]?.sum,
+            )
+            if (Number.isFinite(prevParsed) && parsedValue > prevParsed) {
+              changeValue = parsedValue - prevParsed
+            }
+          }
+        }
 
         if (!Number.isFinite(timestamp) || (!Number.isFinite(parsedValue) && !Number.isFinite(changeValue))) {
           return null
@@ -337,7 +360,7 @@ const formatStatisticsPayload = (statisticsData, entityIdsList) => {
         return {
           timestamp,
           value: Number.isFinite(parsedValue) ? parsedValue : 0,
-          change: Number.isFinite(changeValue) ? changeValue : 0,
+          change: Number.isFinite(changeValue) && changeValue >= 0 ? changeValue : 0,
           state: String(row?.state ?? row?.sum ?? row?.mean ?? ''),
         }
       })

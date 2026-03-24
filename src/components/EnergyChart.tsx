@@ -315,7 +315,7 @@ export default function EnergyChart({
                   dot={false}
                   activeDot={{ r: isMobile ? 4.5 : 6.5, fill: 'rgb(2, 125, 94)' }}
                   isAnimationActive={false}
-                  connectNulls={false}
+                  connectNulls={true}
                 />
                 <Line
                   type="monotone"
@@ -328,7 +328,7 @@ export default function EnergyChart({
                   dot={false}
                   activeDot={{ r: isMobile ? 4.5 : 6.5, fill: 'rgb(250, 204, 21)' }}
                   isAnimationActive={false}
-                  connectNulls={false}
+                  connectNulls={true}
                 />
               </>
             ) : (
@@ -342,6 +342,7 @@ export default function EnergyChart({
                 fillOpacity={1}
                 fill="url(#colorPower)"
                 isAnimationActive={false}
+                connectNulls={true}
               />
             )}
           </LineChart>
