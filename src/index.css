@@ -27,7 +27,7 @@ body,
 }
 
 body {
-  background: rgb(10, 25, 60);
+  background: rgb(4, 4, 4);
   min-height: 100vh;
   font-family: 'Haffer SQ', sans-serif;
   font-size: 1rem;
@@ -85,9 +85,9 @@ label:has(input[type='radio']) {
   position: relative;
   min-height: 100vh;
   background:
-    radial-gradient(900px circle at 15% 10%, rgba(29, 78, 216, 0.3), transparent 45%),
-    radial-gradient(800px circle at 85% 85%, rgba(59, 130, 246, 0.2), transparent 50%),
-    linear-gradient(180deg, rgb(10, 25, 60) 0%, rgb(5, 15, 40) 100%);
+    radial-gradient(900px circle at 15% 10%, rgba(2, 125, 94, 0.18), transparent 45%),
+    radial-gradient(800px circle at 85% 85%, rgba(204, 255, 0, 0.12), transparent 50%),
+    linear-gradient(180deg, rgb(6, 6, 6) 0%, rgb(3, 3, 3) 100%);
   color: rgb(245, 245, 245);
   overflow-x: hidden;
   overflow-y: visible;
@@ -363,7 +363,7 @@ table {
 }
 
 ::-webkit-scrollbar-track {
-  background: rgb(5, 15, 40);
+  background: rgb(12, 12, 12);
 }
 
 ::-webkit-scrollbar-thumb {
