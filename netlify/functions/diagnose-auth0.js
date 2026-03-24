@@ -64,6 +64,17 @@ const verifyToken = async (event) => {
   return payload
 }
 
+const isAdminEmail = (email) => {
+  if (!email) return false
+  const ownerEmail = (process.env.OWNER_EMAIL || '').trim().toLowerCase()
+  if (ownerEmail && email === ownerEmail) return true
+  const allowlist = (process.env.ADMIN_EMAILS || process.env.VITE_ADMIN_EMAILS || '')
+    .split(',')
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean)
+  return allowlist.includes(email)
+}
+
 export const handler = async (event) => {
   try {
     if (event.httpMethod !== 'GET') {
@@ -78,6 +89,13 @@ export const handler = async (event) => {
     }
 
     const payload = await verifyToken(event)
+
+    const emailValue = payload.email || payload['https://brouwer-ems/email']
+    const email = typeof emailValue === 'string' ? emailValue.toLowerCase() : ''
+    if (!isAdminEmail(email)) {
+      return { statusCode: 403, body: JSON.stringify({ ok: false, error: 'Admin only' }) }
+    }
+
     const domain = getEnv('AUTH0_DOMAIN')
     const managementToken = await getManagementToken(domain)
     const metadata = await getClientMetadata(domain, managementToken)

@@ -207,12 +207,14 @@ const isAdminFromClaims = (payload, rolesClaim, email = '') => {
     : typeof rolesValue === 'string'
       ? [rolesValue]
       : []
-  const allowlist = (process.env.ADMIN_EMAILS || process.env.VITE_ADMIN_EMAILS || 'olivier@inside-out.tech')
+  const ownerEmail = (process.env.OWNER_EMAIL || '').trim().toLowerCase()
+  const allowlist = (process.env.ADMIN_EMAILS || process.env.VITE_ADMIN_EMAILS || '')
     .split(',')
     .map((value) => value.trim().toLowerCase())
     .filter(Boolean)
+  const isOwner = ownerEmail.length > 0 && email === ownerEmail
   const isAllowedEmail = email.length > 0 && allowlist.includes(email)
-  return roles.includes('admin') || isAllowedEmail
+  return roles.includes('admin') || isOwner || isAllowedEmail
 }
 
 const verifyAuth = async (event) => {
@@ -254,11 +256,6 @@ const verifyAuth = async (event) => {
     }
   } catch (error) {
     if (debugMode) debug.push({ result: 'management_failed', message: error?.message })
-  }
-
-  if ((process.env.ADMIN_FAIL_OPEN || '').toLowerCase() === 'true') {
-    if (debugMode) debug.push({ result: 'fail_open' })
-    return { isAdmin: true, debug: debugMode ? debug : undefined }
   }
 
   if (debugMode) debug.push({ result: 'denied', roles: payload[rolesClaim] })

@@ -226,7 +226,7 @@ export const handler = async (event) => {
   } catch (err) {
     return {
       statusCode: 500,
-      body: JSON.stringify({ error: err.message, stack: err.stack }),
+      body: JSON.stringify({ error: err.message }),
     }
   }
 }

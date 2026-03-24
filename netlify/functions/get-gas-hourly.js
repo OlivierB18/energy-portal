@@ -3,6 +3,7 @@
  * Each hour: current_meter_value - previous_hour_meter_value = consumption
  */
 
+import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { resolveEnvironmentConfig } from './_environment-storage.js'
 
 const getEnv = (key) => {
@@ -96,6 +97,52 @@ const HA_ENVIRONMENTS = {
 
 const normalizeValue = (value) => (value ? String(value).trim() : '')
 const ENV_METADATA_PREFIX = 'ha_env_v1_'
+
+const getOwnerEmail = () => (process.env.OWNER_EMAIL || '').trim().toLowerCase()
+
+const getAdminAllowlist = () =>
+  (process.env.ADMIN_EMAILS || process.env.VITE_ADMIN_EMAILS || '')
+    .split(',')
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean)
+
+const isAdminEmail = (email) => {
+  if (!email) return false
+  const ownerEmail = getOwnerEmail()
+  if (ownerEmail && email === ownerEmail) return true
+  return getAdminAllowlist().includes(email)
+}
+
+const verifyAuthAndAdmin = async (event) => {
+  const authHeader = event.headers.authorization || event.headers.Authorization
+  if (!authHeader?.startsWith('Bearer ')) {
+    throw Object.assign(new Error('Missing auth'), { statusCode: 401 })
+  }
+
+  const token = authHeader.replace('Bearer ', '')
+  const domain = getEnv('AUTH0_DOMAIN')
+  const jwks = createRemoteJWKSet(new URL(`https://${domain}/.well-known/jwks.json`))
+  const { payload } = await jwtVerify(token, jwks, { issuer: `https://${domain}/` })
+
+  const emailValue = payload.email || payload['https://brouwer-ems/email']
+  const email = typeof emailValue === 'string' ? emailValue.toLowerCase() : ''
+  const isAdmin = isAdminEmail(email)
+
+  return { payload, isAdmin, userId: payload.sub }
+}
+
+const getUserAppMetadata = async (domain, userId) => {
+  const managementToken = await getManagementToken(domain)
+  const response = await fetch(
+    `https://${domain}/api/v2/users/${encodeURIComponent(userId)}?fields=app_metadata&include_fields=true`,
+    { headers: { Authorization: `Bearer ${managementToken}` } },
+  )
+  if (!response.ok) {
+    throw new Error('Unable to fetch user metadata')
+  }
+  const user = await response.json()
+  return user.app_metadata || {}
+}
 
 const parseEnvironmentMap = (input) => {
   if (!input) {
@@ -259,14 +306,34 @@ const parseNumericState = (rawValue) => {
 
 export const handler = async (event) => {
   try {
-    const authHeader = event.headers.authorization || event.headers.Authorization
-    if (!authHeader?.startsWith('Bearer ')) {
-      return { statusCode: 401, body: JSON.stringify({ error: 'Missing auth' }) }
+    let authResult
+    try {
+      authResult = await verifyAuthAndAdmin(event)
+    } catch (authErr) {
+      const statusCode = authErr.statusCode || 401
+      return { statusCode, body: JSON.stringify({ error: authErr.message || 'Unauthorized' }) }
     }
+
+    const { isAdmin, userId } = authResult
 
     const environmentId = event.queryStringParameters?.environmentId || 'vacation'
     const entityId = event.queryStringParameters?.entityId || 'sensor.gas_meter_gas_consumption'
     const hoursBack = parseInt(event.queryStringParameters?.hoursBack || '200', 10) // ~8 days back to March 3
+
+    // Non-admin users may only access environments they are assigned to
+    if (!isAdmin) {
+      try {
+        const domain = getEnv('AUTH0_DOMAIN')
+        const appMetadata = await getUserAppMetadata(domain, userId)
+        const allowedEnvIds = Array.isArray(appMetadata.environmentIds) ? appMetadata.environmentIds : []
+        if (!allowedEnvIds.includes(environmentId)) {
+          return { statusCode: 403, body: JSON.stringify({ error: 'Access denied to this environment' }) }
+        }
+      } catch (metaErr) {
+        console.error('[Gas Hourly] Failed to verify environment access:', metaErr?.message || metaErr)
+        return { statusCode: 403, body: JSON.stringify({ error: 'Unable to verify environment access' }) }
+      }
+    }
 
     const { baseUrl, token } = await getHaConfig(event, environmentId)
 
