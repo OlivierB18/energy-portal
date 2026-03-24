@@ -87,6 +87,15 @@ git push -u origin feature/short-description
 npm run git:sync
 ```
 
+6. Verify that the PR branch or commit is really in `master`:
+```bash
+# By branch name (origin/<branch>)
+npm run git:verify-merge -- -Branch copilot/fix-empty-electricity-usage-chart
+
+# Or by commit SHA
+npm run git:verify-merge -- -Commit 2e63e7b
+```
+
 Rules of thumb:
 - Keep your own work and agent work on different branches.
 - Do not work directly on `master`.
