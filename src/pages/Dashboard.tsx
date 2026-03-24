@@ -704,7 +704,7 @@ export default function Dashboard({
     const source = user?.sub || user?.email || 'anonymous'
     return String(source).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80)
   }, [user?.email, user?.sub])
-  const haEntitiesCacheKey = `ha_entities_cache_v4_${selectedEnvironment || 'default'}_${userCacheScope}`
+  const haEntitiesCacheKey = `ha_entities_cache_v5_${selectedEnvironment || 'default'}_${userCacheScope}`
   const userEnvironmentIdsCacheKey = `user_environment_ids_cache_v1_${userCacheScope}`
   const dynamicPriceCacheKey = `energy_dynamic_price_${selectedEnvironment || 'default'}`
   const dynamicPriceChartPreferenceKey = `energy_dynamic_chart_visible_${selectedEnvironment || 'default'}`
@@ -2543,7 +2543,7 @@ export default function Dashboard({
       const period = timeRange === 'month' ? 'day' : 'hour'
 
       // --- Step C: load persistent incremental cache ---
-      const bucketCacheKey = `ha_electricity_buckets_v3_${selectedEnvironment}_${period}`
+      const bucketCacheKey = `ha_electricity_buckets_v4_${selectedEnvironment}_${period}`
       let cachedBuckets: Array<{ timestamp: number; kwh: number }> = []
       try {
         const raw = localStorage.getItem(bucketCacheKey)
@@ -2566,7 +2566,7 @@ export default function Dashboard({
       }
 
       // --- Step A: get confirmed statistic IDs from HA ---
-      const statisticIdCacheKey = `ha_statistic_ids_v1_${selectedEnvironment}`
+      const statisticIdCacheKey = `ha_statistic_ids_v2_${selectedEnvironment}`
       const statisticIdCacheTtlMs = 3600_000 // 1 hour
       let entityIds: string[] = []
 
