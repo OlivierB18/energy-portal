@@ -436,6 +436,7 @@ export const handler = async (event) => {
         statisticsUrl.searchParams.append('statistic_ids', entityId)
       })
       statisticsUrl.searchParams.append('period', statisticsPeriod === 'day' ? 'day' : 'hour')
+      statisticsUrl.searchParams.append('types', 'change,sum,state')
       if (endTime) {
         statisticsUrl.searchParams.append('end_time', endTime)
       }

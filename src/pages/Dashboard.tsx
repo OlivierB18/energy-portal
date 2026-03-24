@@ -2559,9 +2559,14 @@ export default function Dashboard({
       }
 
       // --- Step A: get confirmed statistic IDs from HA ---
-      const statisticIdCacheKey = `ha_statistic_ids_v2_${selectedEnvironment}`
+      const statisticIdCacheKey = `ha_statistic_ids_v3_${selectedEnvironment}`
       const statisticIdCacheTtlMs = 3600_000 // 1 hour
       let entityIds: string[] = []
+      const sources = haMetricsSnapshotRef.current?.sources
+      const preferredEntityIds: string[] = Array.from(new Set([
+        ...(sources?.electricityTotalEntityIds ?? []),
+        sources?.electricityTotalEntityId,
+      ].filter((id): id is string => typeof id === 'string' && id.length > 0)))
 
       try {
         const cachedIds = localStorage.getItem(statisticIdCacheKey)
@@ -2601,19 +2606,18 @@ export default function Dashboard({
       }
 
       // --- Step B: fall back to detectEnergyEntities if HA returned no IDs ---
-      if (entityIds.length === 0) {
-        const sources = haMetricsSnapshotRef.current?.sources
-        const configuredIds: string[] = Array.from(new Set([
-          ...(sources?.electricityTotalEntityIds ?? []),
-          sources?.electricityTotalEntityId,
-        ].filter((id): id is string => typeof id === 'string' && id.length > 0)))
-
-        if (configuredIds.length > 0) {
-          entityIds = configuredIds
+      if (preferredEntityIds.length > 0) {
+        if (entityIds.length > 0) {
+          const matchedEntityIds = entityIds.filter((id) => preferredEntityIds.includes(id))
+          entityIds = matchedEntityIds.length > 0 ? matchedEntityIds : preferredEntityIds
         } else {
-          const detected = detectEnergyEntities(haEntitiesRef.current)
-          entityIds = detected.electricityTotalEntityIds
+          entityIds = preferredEntityIds
         }
+      }
+
+      if (entityIds.length === 0) {
+        const detected = detectEnergyEntities(haEntitiesRef.current)
+        entityIds = detected.electricityTotalEntityIds
       }
 
       if (entityIds.length === 0) {
