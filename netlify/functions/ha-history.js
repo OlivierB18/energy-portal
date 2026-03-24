@@ -320,30 +320,41 @@ const formatStatisticsPayload = (statisticsData, entityIdsList) => {
 
   return entityIdsList.map((entityId) => {
     const statsRows = Array.isArray(safeData[entityId]) ? safeData[entityId] : []
-    const mappedRows = statsRows
-      .map((row) => {
-        const timestampRaw = row?.start || row?.end || row?.last_reset
-        const timestamp = timestampRaw ? new Date(timestampRaw).getTime() : NaN
-        const parsedValue = parseNumericState(
-          row?.state ?? row?.sum ?? row?.mean ?? row?.max ?? row?.min,
-        )
 
-        const changeValue = parseNumericState(row?.change)
+    // Parse all rows and sort chronologically so we can derive change from consecutive sum diffs
+    const parsedRows = statsRows.map((row) => {
+      const timestampRaw = row?.start || row?.end || row?.last_reset
+      const timestamp = timestampRaw ? new Date(timestampRaw).getTime() : NaN
+      const sum = parseNumericState(row?.sum ?? row?.state ?? row?.mean ?? row?.max ?? row?.min)
+      const explicitChange = parseNumericState(row?.change)
+      return { timestamp, sum, explicitChange }
+    }).filter((r) => Number.isFinite(r.timestamp))
 
-        if (!Number.isFinite(timestamp) || (!Number.isFinite(parsedValue) && !Number.isFinite(changeValue))) {
-          return null
+    parsedRows.sort((a, b) => a.timestamp - b.timestamp)
+
+    const mappedRows = parsedRows.map((row, i) => {
+      let changeValue = row.explicitChange
+
+      // When HA omits the change field (first row, older HA versions, or per-version differences),
+      // derive the consumption for this period from consecutive cumulative sum values.
+      if (!Number.isFinite(changeValue) && i > 0) {
+        const prevSum = parsedRows[i - 1].sum
+        if (Number.isFinite(row.sum) && Number.isFinite(prevSum)) {
+          const delta = row.sum - prevSum
+          changeValue = delta > 0 ? delta : 0
         }
+      }
 
-        return {
-          timestamp,
-          value: Number.isFinite(parsedValue) ? parsedValue : 0,
-          change: Number.isFinite(changeValue) ? changeValue : 0,
-          state: String(row?.state ?? row?.sum ?? row?.mean ?? ''),
-        }
-      })
-      .filter(Boolean)
+      return {
+        timestamp: row.timestamp,
+        value: Number.isFinite(row.sum) ? row.sum : 0,
+        change: Number.isFinite(changeValue) ? Math.max(0, changeValue) : 0,
+        state: String(Number.isFinite(row.sum) ? row.sum : ''),
+      }
+    })
 
-    console.log('[HA History] Statistics entity', entityId, 'rows:', mappedRows.length)
+    const totalChange = mappedRows.reduce((s, r) => s + r.change, 0)
+    console.log('[HA History] Statistics entity', entityId, 'rows:', mappedRows.length, '| total change:', totalChange.toFixed(3))
 
     return {
       entity_id: entityId,

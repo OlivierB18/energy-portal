@@ -162,7 +162,11 @@ export const handler = async (event) => {
     console.log('[StatisticIds] HA returned', rawList.length, 'total statistic IDs')
 
     const energyStatistics = rawList.filter(
-      (item) => item?.unit_class === 'energy' && item?.has_sum === true,
+      (item) => {
+        const isEnergyClass = item?.unit_class === 'energy'
+        const isKwhUnit = ['kWh', 'Wh', 'MWh'].includes(item?.display_unit_of_measurement)
+        return (isEnergyClass || isKwhUnit) && item?.has_sum === true
+      },
     )
 
     const statisticIds = energyStatistics.map((item) => item.statistic_id).filter(Boolean)

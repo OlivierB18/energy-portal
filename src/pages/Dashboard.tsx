@@ -2527,15 +2527,8 @@ export default function Dashboard({
       const clampedEnd = Math.min(bounds.endMs, now)
 
       // For month range, clamp start to installed-on date (use the LATER of month-start and install date)
-      const startMs = timeRange === 'month'
-        ? Math.max(bounds.startMs, environmentInstalledOnMs ?? bounds.startMs)
-        : bounds.startMs
-
-      if (environmentInstalledOnMs && startMs === environmentInstalledOnMs) {
-        console.log('[Usage Stats] startMs:', new Date(startMs).toISOString(), '(from installedOn)')
-      } else {
-        console.log('[Usage Stats] startMs:', new Date(startMs).toISOString())
-      }
+      const startMs = bounds.startMs
+      console.log('[Usage Stats] startMs:', new Date(startMs).toISOString())
 
       if (clampedEnd <= startMs) return
 
@@ -2543,7 +2536,7 @@ export default function Dashboard({
       const period = timeRange === 'month' ? 'day' : 'hour'
 
       // --- Step C: load persistent incremental cache ---
-      const bucketCacheKey = `ha_electricity_buckets_v4_${selectedEnvironment}_${period}`
+      const bucketCacheKey = `ha_electricity_buckets_v5_${selectedEnvironment}_${period}`
       let cachedBuckets: Array<{ timestamp: number; kwh: number }> = []
       try {
         const raw = localStorage.getItem(bucketCacheKey)
@@ -2704,7 +2697,6 @@ export default function Dashboard({
     selectedStartDate,
     selectedEndDate,
     timeRange,
-    environmentInstalledOnMs,
     getAuthToken,
     haEntities.length,
     haMetricsSnapshot?.sources?.electricityTotalEntityId,
