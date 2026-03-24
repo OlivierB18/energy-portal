@@ -582,14 +582,14 @@ const pickTotalElectricityCandidates = (entities) => {
     entities.map((entity) => [String(entity.entity_id || '').trim().toLowerCase(), entity]),
   )
 
-  const explicitMatchId = ELECTRICITY_TOTAL_ENTITY_ID_CANDIDATES.find((candidateId) => normalizedMap.has(candidateId))
-  if (explicitMatchId) {
-    const explicitEntity = normalizedMap.get(explicitMatchId)
-    const explicitRawValue = parseNumericValue(explicitEntity?.state)
-    const explicitValueKwh = convertEnergyToKwh(explicitRawValue, explicitEntity?.unit_of_measurement)
-
-    if (explicitEntity && Number.isFinite(explicitValueKwh)) {
-      return [{
+  const explicitMatches = ELECTRICITY_TOTAL_ENTITY_ID_CANDIDATES
+    .filter((candidateId) => normalizedMap.has(candidateId))
+    .map((candidateId) => {
+      const explicitEntity = normalizedMap.get(candidateId)
+      const explicitRawValue = parseNumericValue(explicitEntity?.state)
+      const explicitValueKwh = convertEnergyToKwh(explicitRawValue, explicitEntity?.unit_of_measurement)
+      if (!explicitEntity || !Number.isFinite(explicitValueKwh)) return null
+      return {
         entity: explicitEntity,
         score: Number.MAX_SAFE_INTEGER,
         stateClass: String(explicitEntity.state_class || '').toLowerCase(),
@@ -599,8 +599,11 @@ const pickTotalElectricityCandidates = (entities) => {
         isMonthlyLike: false,
         isTariffLike: false,
         isAggregateLike: true,
-      }]
-    }
+      }
+    })
+    .filter(Boolean)
+  if (explicitMatches.length > 0) {
+    return explicitMatches
   }
 
   const candidates = entities
@@ -692,14 +695,14 @@ const pickTotalElectricityProductionCandidates = (entities) => {
     entities.map((entity) => [String(entity.entity_id || '').trim().toLowerCase(), entity]),
   )
 
-  const explicitMatchId = ELECTRICITY_PRODUCTION_TOTAL_ENTITY_ID_CANDIDATES.find((candidateId) => normalizedMap.has(candidateId))
-  if (explicitMatchId) {
-    const explicitEntity = normalizedMap.get(explicitMatchId)
-    const explicitRawValue = parseNumericValue(explicitEntity?.state)
-    const explicitValueKwh = convertEnergyToKwh(explicitRawValue, explicitEntity?.unit_of_measurement)
-
-    if (explicitEntity && Number.isFinite(explicitValueKwh)) {
-      return [{
+  const explicitMatches = ELECTRICITY_PRODUCTION_TOTAL_ENTITY_ID_CANDIDATES
+    .filter((candidateId) => normalizedMap.has(candidateId))
+    .map((candidateId) => {
+      const explicitEntity = normalizedMap.get(candidateId)
+      const explicitRawValue = parseNumericValue(explicitEntity?.state)
+      const explicitValueKwh = convertEnergyToKwh(explicitRawValue, explicitEntity?.unit_of_measurement)
+      if (!explicitEntity || !Number.isFinite(explicitValueKwh)) return null
+      return {
         entity: explicitEntity,
         score: Number.MAX_SAFE_INTEGER,
         stateClass: String(explicitEntity.state_class || '').toLowerCase(),
@@ -709,8 +712,11 @@ const pickTotalElectricityProductionCandidates = (entities) => {
         isMonthlyLike: false,
         isTariffLike: false,
         isAggregateLike: true,
-      }]
-    }
+      }
+    })
+    .filter(Boolean)
+  if (explicitMatches.length > 0) {
+    return explicitMatches
   }
 
   const candidates = entities
@@ -1116,18 +1122,21 @@ const enrichMetricsWithHistoryFallback = async ({
         (strongestAggregate.stateClass === 'total_increasing' || strongestAggregate.stateClass === 'total'),
       )
 
-      const selectedCandidates = hasTrustedAggregate
-        ? [strongestAggregate]
-        : tariffCandidates.length >= 2
-          ? tariffCandidates.slice(0, 4)
-          : phaseCandidates.length >= 2
-            ? phaseCandidates.slice(0, 3)
-            : (() => {
-                const highestValueCandidate = electricityCandidates
-                  .filter((candidate) => Number.isFinite(candidate.currentValueKwh))
-                  .sort((a, b) => b.currentValueKwh - a.currentValueKwh)[0]
-                return [highestValueCandidate || electricityCandidates[0]]
-              })()
+      const allExplicitCandidates = electricityCandidates.filter((c) => c.score === Number.MAX_SAFE_INTEGER)
+      const selectedCandidates = allExplicitCandidates.length > 0
+        ? allExplicitCandidates
+        : hasTrustedAggregate
+          ? [strongestAggregate]
+          : tariffCandidates.length >= 2
+            ? tariffCandidates.slice(0, 4)
+            : phaseCandidates.length >= 2
+              ? phaseCandidates.slice(0, 3)
+              : (() => {
+                  const highestValueCandidate = electricityCandidates
+                    .filter((candidate) => Number.isFinite(candidate.currentValueKwh))
+                    .sort((a, b) => b.currentValueKwh - a.currentValueKwh)[0]
+                  return [highestValueCandidate || electricityCandidates[0]]
+                })()
 
       let dailySum = 0
       let monthlySum = 0
@@ -1220,11 +1229,14 @@ const enrichMetricsWithHistoryFallback = async ({
         (strongestAggregate.stateClass === 'total_increasing' || strongestAggregate.stateClass === 'total'),
       )
 
-      const selectedCandidates = hasTrustedAggregate
-        ? [strongestAggregate]
-        : phaseCandidates.length >= 2
-          ? phaseCandidates.slice(0, 3)
-          : [productionCandidates[0]]
+      const allExplicitCandidates = productionCandidates.filter((c) => c.score === Number.MAX_SAFE_INTEGER)
+      const selectedCandidates = allExplicitCandidates.length > 0
+        ? allExplicitCandidates
+        : hasTrustedAggregate
+          ? [strongestAggregate]
+          : phaseCandidates.length >= 2
+            ? phaseCandidates.slice(0, 3)
+            : [productionCandidates[0]]
 
       let dailySum = 0
       let monthlySum = 0
