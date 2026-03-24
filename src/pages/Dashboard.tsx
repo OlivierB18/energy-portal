@@ -3,6 +3,7 @@ import EnergyCard from '../components/EnergyCard'
 import EnergyChart from '../components/EnergyChart'
 import HomeAssistantConfig from '../components/HomeAssistantConfig'
 import EnergyPriceModal from '../components/EnergyPriceModal'
+import Embedded3DInstallationPanel from '../components/installation/Embedded3DInstallationPanel'
 import { Zap, Clock, Home, Settings, DollarSign, Flame, Users as UsersIcon, LogOut } from 'lucide-react'
 import { useAuth0 } from '@auth0/auth0-react'
 import {
@@ -680,6 +681,7 @@ export default function Dashboard({
   const [environmentInstalledOnMs, setEnvironmentInstalledOnMs] = useState<number | null>(null)
   // Sensor connection status: 'connecting' | 'connected' | 'error'
   const [haConnectionStatus, setHaConnectionStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
+  const [installationViewerEnabled, setInstallationViewerEnabled] = useState<boolean>(true)
   const { isAuthenticated, getIdTokenClaims, getAccessTokenSilently, user } = useAuth0()
 
   const handleStartDateChange = useCallback((nextStartDate: string) => {
@@ -917,6 +919,11 @@ export default function Dashboard({
       setSelectedEnvironment(selectedEnvironmentId)
     }
   }, [selectedEnvironment, selectedEnvironmentId])
+
+  // Reset installation viewer flag to default (enabled) when switching environments
+  useEffect(() => {
+    setInstallationViewerEnabled(true)
+  }, [selectedEnvironment])
 
   useEffect(() => {
     let isMounted = true
@@ -1293,6 +1300,10 @@ export default function Dashboard({
         const metrics = normalizeHaMetricsSnapshot(data?.metrics)
         // eslint-disable-next-line no-console
         console.log(`[HA] ✅ Loaded ${entities.length} entities`)
+
+        if (typeof data?.installationViewerEnabled === 'boolean') {
+          setInstallationViewerEnabled(data.installationViewerEnabled)
+        }
         
         // Update entities AND keep them as last known
         setHaEntities(entities)
@@ -1401,6 +1412,34 @@ export default function Dashboard({
       setHaError(error instanceof Error ? error.message : 'Unable to run action')
     } finally {
       setHaActionId(null)
+    }
+  }
+
+  const saveInstallationViewerEnabled = async (enabled: boolean) => {
+    if (!selectedEnvironment) {
+      return
+    }
+
+    try {
+      const token = await getAuthToken()
+      const response = await fetch('/.netlify/functions/save-environment-config', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          environmentId: selectedEnvironment,
+          installationViewerEnabled: enabled,
+        }),
+      })
+
+      if (response.ok) {
+        setInstallationViewerEnabled(enabled)
+      }
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.warn('[Dashboard] Failed to save installation viewer setting:', error)
     }
   }
 
@@ -4009,6 +4048,26 @@ export default function Dashboard({
                           </div>
                         </button>
                       )}
+                      {isAdmin && (
+                        <button
+                          onClick={() => {
+                            void saveInstallationViewerEnabled(!installationViewerEnabled)
+                            setShowSettingsDropdown(false)
+                          }}
+                          disabled={!selectedEnvironment}
+                          className="w-full flex items-center gap-3 px-4 py-3 text-light-2 hover:bg-light-2 hover:bg-opacity-10 transition-all text-left"
+                        >
+                          <Zap className="w-5 h-5" />
+                          <div>
+                            <div className="font-medium">
+                              {installationViewerEnabled ? 'Hide' : 'Show'} Installation Viewer
+                            </div>
+                            <div className="text-xs text-light-1">
+                              {installationViewerEnabled ? 'Disable' : 'Enable'} 3D viewer for this environment
+                            </div>
+                          </div>
+                        </button>
+                      )}
                     </div>
                   </div>
                 )}
@@ -4038,6 +4097,15 @@ export default function Dashboard({
         {/* Main Content - Only show when there are environments */}
         {visibleEnvironments.length > 0 && (
           <>
+            {/* 3D Installation Viewer — shown below the dashboard title when enabled */}
+            {installationViewerEnabled && selectedEnvironment && (
+              <Embedded3DInstallationPanel
+                environmentId={selectedEnvironment}
+                isAdmin={isAdmin}
+                getAuthToken={getAuthToken}
+              />
+            )}
+
             {/* Main Current Power Display */}
             <div className="glass-panel rounded-3xl shadow-2xl p-8 mb-8">
           <div className="flex items-center justify-between mb-6">

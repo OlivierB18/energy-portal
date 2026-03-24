@@ -260,9 +260,6 @@ export const handler = async (event) => {
 
     const body = JSON.parse(event.body || '{}')
     const environmentId = body.environmentId?.trim()
-    const visibleEntityIds = Array.isArray(body.visibleEntityIds)
-      ? body.visibleEntityIds.map((entityId) => String(entityId))
-      : []
 
     if (!environmentId) {
       return { statusCode: 400, body: JSON.stringify({ error: 'Missing environmentId' }) }
@@ -272,13 +269,26 @@ export const handler = async (event) => {
     const managementToken = await getManagementToken(domain)
     const metadata = await getClientMetadata(domain, managementToken)
     const haConfig = parseHaConfig(metadata.ha_config)
+    const existingEnvConfig = parseEnvironmentMap(haConfig[environmentId])
+
+    const nextEnvConfig = {
+      ...existingEnvConfig,
+      updated_at: new Date().toISOString(),
+    }
+
+    // Only update visible_entity_ids when explicitly provided
+    if (Array.isArray(body.visibleEntityIds)) {
+      nextEnvConfig.visible_entity_ids = body.visibleEntityIds.map((entityId) => String(entityId))
+    }
+
+    // Preserve installation_viewer_enabled when provided explicitly
+    if (typeof body.installationViewerEnabled === 'boolean') {
+      nextEnvConfig.installation_viewer_enabled = body.installationViewerEnabled
+    }
 
     const nextConfig = {
       ...haConfig,
-      [environmentId]: {
-        visible_entity_ids: visibleEntityIds,
-        updated_at: new Date().toISOString(),
-      },
+      [environmentId]: nextEnvConfig,
     }
 
     await updateClientMetadata(domain, managementToken, {

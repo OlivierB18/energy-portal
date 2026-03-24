@@ -1502,6 +1502,13 @@ export const handler = async (event) => {
       return { statusCode: 400, body: JSON.stringify({ error: 'Missing environmentId' }) }
     }
 
+    const requestedEntityIds = (() => {
+      const raw = String(event.queryStringParameters?.entityIds || '').trim()
+      if (!raw) return null
+      const ids = raw.split(',').map((id) => id.trim()).filter(Boolean)
+      return ids.length > 0 ? ids : null
+    })()
+
     const { isAdmin, payload, resolvedEmail } = await verifyAuth(event)
     console.log('[HA-ENTITIES] Auth resolved. isAdmin:', isAdmin, 'email:', resolvedEmail || 'unknown')
 
@@ -1601,6 +1608,23 @@ export const handler = async (event) => {
       console.log('[HA-ENTITIES] Metrics sources:', metrics.sources)
     }
 
+    // Read installation_viewer_enabled flag from ha_config (defaults to true)
+    const haConfig = parseHaConfig(metadata.ha_config)
+    const envHaConfig = haConfig[environmentId] || {}
+    const installationViewerEnabled = envHaConfig.installation_viewer_enabled !== false
+
+    // If specific entityIds were requested, return only those entities regardless of
+    // the normal visibility rules (used by the installation viewer for its sensor markers)
+    if (requestedEntityIds !== null) {
+      const requestedSet = new Set(requestedEntityIds)
+      const filteredByRequest = allEntities.filter((entity) => requestedSet.has(entity.entity_id))
+      console.log('[HA-ENTITIES] Applied entityIds filter:', filteredByRequest.length, 'of', allEntities.length, 'entities')
+      return {
+        statusCode: 200,
+        body: JSON.stringify({ entities: filteredByRequest, metrics, installationViewerEnabled }),
+      }
+    }
+
     if (!isAdmin) {
       // Check for user-specific sensor visibility only
       const userVisibleIds = getUserVisibleEntityIds(userMetadata, environmentId)
@@ -1624,7 +1648,7 @@ export const handler = async (event) => {
 
     return {
       statusCode: 200,
-      body: JSON.stringify({ entities, metrics }),
+      body: JSON.stringify({ entities, metrics, installationViewerEnabled }),
     }
   } catch (error) {
     console.error('ha-entities handler error:', error);
