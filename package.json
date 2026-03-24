@@ -10,7 +10,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "git:sync": "powershell -ExecutionPolicy Bypass -File ./scripts/git-sync.ps1",
-    "git:start": "powershell -ExecutionPolicy Bypass -File ./scripts/git-start-feature.ps1"
+    "git:start": "powershell -ExecutionPolicy Bypass -File ./scripts/git-start-feature.ps1",
+    "git:verify-merge": "powershell -ExecutionPolicy Bypass -File ./scripts/git-verify-merge.ps1"
   },
   "dependencies": {
     "@auth0/auth0-react": "^2.11.0",
