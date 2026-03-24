@@ -133,10 +133,16 @@ const GAS_TOTAL_ENTITY_ID_CANDIDATES = parseCsvEnv(process.env.HA_GAS_TOTAL_ENTI
   'sensor.gas_consumption_total',
 ])
 
-const ELECTRICITY_TOTAL_ENTITY_ID_CANDIDATES = parseCsvEnv(process.env.HA_ELECTRICITY_TOTAL_ENTITY_IDS, [])
+const ELECTRICITY_TOTAL_ENTITY_ID_CANDIDATES = parseCsvEnv(process.env.HA_ELECTRICITY_TOTAL_ENTITY_IDS, [
+  'sensor.electricity_meter_energy_consumption_tarif_1',
+  'sensor.electricity_meter_energy_consumption_tarif_2',
+])
 const ELECTRICITY_PRODUCTION_TOTAL_ENTITY_ID_CANDIDATES = parseCsvEnv(
   process.env.HA_ELECTRICITY_PRODUCTION_TOTAL_ENTITY_IDS,
-  [],
+  [
+    'sensor.electricity_meter_energy_production_tarif_1',
+    'sensor.electricity_meter_energy_production_tarif_2',
+  ],
 )
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -323,6 +329,7 @@ const getDashboardMetrics = (entities) => {
   }
 
   const powerEntity =
+    entities.find((entity) => entity.entity_id === 'sensor.electricity_meter_power_consumption') ||
     entities.find((entity) => (
       entity.domain === 'sensor' &&
       String(entity.device_class || '').toLowerCase() === 'power' &&
@@ -353,6 +360,7 @@ const getDashboardMetrics = (entities) => {
     ))
 
   const productionPowerEntity =
+    entities.find((entity) => entity.entity_id === 'sensor.electricity_meter_power_production') ||
     findEntityByKeywords(
       entities,
       PRODUCTION_KEYWORDS,

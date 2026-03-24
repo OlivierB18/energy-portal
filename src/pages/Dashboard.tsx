@@ -360,7 +360,7 @@ const convertGasToM3 = (value: number, unit: unknown) => {
 
 const findGasConsumptionEntity = (entities: HaEntity[]) => {
   const exactEntity = entities.find(
-    (entity) => entity.domain === 'sensor' && entity.entity_id.toLowerCase() === GAS_METER_ENTITY_ID,
+    (e) => e.entity_id === GAS_METER_ENTITY_ID,
   )
 
   if (exactEntity) {
@@ -2498,6 +2498,17 @@ export default function Dashboard({
           ),
       )
       keysToRemove.forEach((k) => localStorage.removeItem(k))
+
+      setPowerSamples([])
+      setProductionSamples([])
+      setHistoricalRangeSamples([])
+      setHistoricalProductionRangeSamples([])
+      setArchivedPowerSamples([])
+      setArchivedProductionSamples([])
+      setElectricityUsageBuckets([])
+      setGasMeterReadings([])
+      setHaMetricsSnapshot(null)
+      setEnvironmentInstalledOnMs(null)
     }
     prevSelectedEnvironmentRef.current = selectedEnvironment
   }, [selectedEnvironment])
