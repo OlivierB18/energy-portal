@@ -2484,6 +2484,24 @@ export default function Dashboard({
     }
   }, [selectedEnvironment, isAuthenticated, haEntities.length, environmentInstalledOnMs, getAuthToken])
 
+  // Clear stale bucket/statistic-ID caches when the selected environment changes
+  const prevSelectedEnvironmentRef = useRef<string>('')
+  useEffect(() => {
+    const prev = prevSelectedEnvironmentRef.current
+    if (prev && prev !== selectedEnvironment) {
+      // Clear only keys belonging to the previous environment
+      const keysToRemove = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)).filter(
+        (key): key is string =>
+          key !== null && (
+            key.startsWith(`ha_electricity_buckets_v3_${prev}_`) ||
+            key === `ha_statistic_ids_v1_${prev}`
+          ),
+      )
+      keysToRemove.forEach((k) => localStorage.removeItem(k))
+    }
+    prevSelectedEnvironmentRef.current = selectedEnvironment
+  }, [selectedEnvironment])
+
   // Fetch electricity usage statistics (kWh per hour/day) — matches HA "Electricity usage" bar chart
   useEffect(() => {
     if (!selectedEnvironment || !isAuthenticated) {
@@ -2497,46 +2515,101 @@ export default function Dashboard({
       const now = Date.now()
       const clampedEnd = Math.min(bounds.endMs, now)
 
-      // For month range, expand start to installed-on date
+      // For month range, clamp start to installed-on date (use the LATER of month-start and install date)
       const startMs = timeRange === 'month'
-        ? Math.min(bounds.startMs, environmentInstalledOnMs ?? bounds.startMs)
+        ? Math.max(bounds.startMs, environmentInstalledOnMs ?? bounds.startMs)
         : bounds.startMs
+
+      if (environmentInstalledOnMs && startMs === environmentInstalledOnMs) {
+        console.log('[Usage Stats] startMs:', new Date(startMs).toISOString(), '(from installedOn)')
+      } else {
+        console.log('[Usage Stats] startMs:', new Date(startMs).toISOString())
+      }
 
       if (clampedEnd <= startMs) return
 
       // statistics period: hour for today/week, day for month
       const period = timeRange === 'month' ? 'day' : 'hour'
 
-      // Cache key (15-min bucket precision)
-      const cacheKey = `ha_usage_v2_${selectedEnvironment}_${period}_${Math.floor(startMs / (15 * 60_000))}_${Math.floor(clampedEnd / (15 * 60_000))}`
-      const cacheTtlMs = clampedEnd < now - 60 * 60_000 ? 12 * 3600_000 : 5 * 60_000
-
+      // --- Step C: load persistent incremental cache ---
+      const bucketCacheKey = `ha_electricity_buckets_v3_${selectedEnvironment}_${period}`
+      let cachedBuckets: Array<{ timestamp: number; kwh: number }> = []
       try {
-        const cached = localStorage.getItem(cacheKey)
-        if (cached) {
-          const parsed = JSON.parse(cached)
-          if (parsed?.fetchTime && (now - parsed.fetchTime) < cacheTtlMs && Array.isArray(parsed.buckets)) {
-            setElectricityUsageBuckets(parsed.buckets)
-            return
-          }
-          // Stale — show immediately while refreshing
+        const raw = localStorage.getItem(bucketCacheKey)
+        if (raw) {
+          const parsed = JSON.parse(raw)
           if (Array.isArray(parsed?.buckets)) {
-            setElectricityUsageBuckets(parsed.buckets)
+            cachedBuckets = parsed.buckets
+            // Show cached data immediately so chart is never blank on reload
+            if (!isDisposed) setElectricityUsageBuckets(cachedBuckets)
           }
         }
       } catch { /* ignore */ }
 
-      // Determine which entities to fetch (tarif 1 + tarif 2 cumulative meters)
-      const sources = haMetricsSnapshotRef.current?.sources
-      const entityIds: string[] = Array.from(new Set([
-        ...(sources?.electricityTotalEntityIds ?? []),
-        sources?.electricityTotalEntityId,
-      ].filter((id): id is string => typeof id === 'string' && id.length > 0)))
+      // Determine incremental fetch range: from (lastCachedBucket - 2h) to now
+      let fetchStartMs = startMs
+      if (cachedBuckets.length > 0) {
+        const lastTs = cachedBuckets[cachedBuckets.length - 1].timestamp
+        // Overlap by 2 hours to handle late-arriving data and bucket boundary alignment
+        fetchStartMs = Math.max(startMs, lastTs - 2 * 3600_000)
+      }
 
-      // If no configured entities, auto-detect using HA's own classification (device_class/state_class/unit)
+      // --- Step A: get confirmed statistic IDs from HA ---
+      const statisticIdCacheKey = `ha_statistic_ids_v1_${selectedEnvironment}`
+      const statisticIdCacheTtlMs = 3600_000 // 1 hour
+      let entityIds: string[] = []
+
+      try {
+        const cachedIds = localStorage.getItem(statisticIdCacheKey)
+        if (cachedIds) {
+          const parsed = JSON.parse(cachedIds)
+          if (
+            parsed?.fetchTime &&
+            now - parsed.fetchTime < statisticIdCacheTtlMs &&
+            Array.isArray(parsed.ids) &&
+            parsed.ids.length > 0
+          ) {
+            entityIds = parsed.ids
+          }
+        }
+      } catch { /* ignore */ }
+
       if (entityIds.length === 0) {
-        const detected = detectEnergyEntities(haEntitiesRef.current)
-        entityIds.push(...detected.electricityTotalEntityIds)
+        try {
+          const token = await getAuthToken()
+          if (isDisposed) return
+          const idsResponse = await fetch(
+            `/.netlify/functions/get-ha-statistic-ids?environmentId=${encodeURIComponent(selectedEnvironment)}`,
+            { headers: { Authorization: `Bearer ${token}` } },
+          )
+          if (!isDisposed && idsResponse.ok) {
+            const idsResult = await idsResponse.json()
+            if (Array.isArray(idsResult?.statistic_ids) && idsResult.statistic_ids.length > 0) {
+              entityIds = idsResult.statistic_ids
+              try {
+                localStorage.setItem(statisticIdCacheKey, JSON.stringify({ fetchTime: Date.now(), ids: entityIds }))
+              } catch { /* ignore quota errors */ }
+            }
+          }
+        } catch (err) {
+          console.warn('[Usage Stats] get-ha-statistic-ids failed, falling back:', err)
+        }
+      }
+
+      // --- Step B: fall back to detectEnergyEntities if HA returned no IDs ---
+      if (entityIds.length === 0) {
+        const sources = haMetricsSnapshotRef.current?.sources
+        const configuredIds: string[] = Array.from(new Set([
+          ...(sources?.electricityTotalEntityIds ?? []),
+          sources?.electricityTotalEntityId,
+        ].filter((id): id is string => typeof id === 'string' && id.length > 0)))
+
+        if (configuredIds.length > 0) {
+          entityIds = configuredIds
+        } else {
+          const detected = detectEnergyEntities(haEntitiesRef.current)
+          entityIds = detected.electricityTotalEntityIds
+        }
       }
 
       if (entityIds.length === 0) {
@@ -2544,15 +2617,16 @@ export default function Dashboard({
         return
       }
 
+      console.log('[Usage Stats] Using statistic IDs from HA:', entityIds.join(', '))
+
       setIsLoadingUsage(true)
 
       try {
         const token = await getAuthToken()
         if (isDisposed) return
 
-        const url = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(new Date(startMs).toISOString())}&endTime=${encodeURIComponent(new Date(clampedEnd).toISOString())}&entityIds=${encodeURIComponent(entityIds.join(','))}&mode=statistics&period=${period}`
+        const url = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(new Date(fetchStartMs).toISOString())}&endTime=${encodeURIComponent(new Date(clampedEnd).toISOString())}&entityIds=${encodeURIComponent(entityIds.join(','))}&mode=statistics&period=${period}`
 
-        console.log('[Usage Stats] Fetching', entityIds.join(', '), 'period:', period)
         const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
         if (!response.ok || isDisposed) {
           if (!isDisposed) setIsLoadingUsage(false)
@@ -2565,29 +2639,44 @@ export default function Dashboard({
         const historyData: Array<{ entity_id: string; history: Array<{ timestamp: number; change: number; value: number }> }> =
           Array.isArray(result?.entities) ? result.entities : []
 
-        console.log('[Usage Stats] Got data for', historyData.length, 'entities')
-
-        // Build a merged per-bucket kWh map: for each timestamp bucket, sum change across all tariff entities
-        const bucketMap = new Map<number, number>()
-
+        // Build a merged per-bucket kWh map from the incremental fetch
+        const newBucketMap = new Map<number, number>()
         for (const entry of historyData) {
           if (!entityIds.includes(entry.entity_id)) continue
           for (const row of entry.history) {
             const ts = row.timestamp
             const delta = row.change
             if (!Number.isFinite(ts) || !Number.isFinite(delta) || delta < 0) continue
-            bucketMap.set(ts, (bucketMap.get(ts) ?? 0) + delta)
+            newBucketMap.set(ts, (newBucketMap.get(ts) ?? 0) + delta)
           }
         }
 
-        const buckets = Array.from(bucketMap.entries())
+        const newBuckets = Array.from(newBucketMap.entries())
           .sort((a, b) => a[0] - b[0])
           .map(([timestamp, kwh]) => ({ timestamp, kwh: Number(kwh.toFixed(3)) }))
 
-        setElectricityUsageBuckets(buckets)
+        // Merge new buckets into cached buckets: overwrite same timestamps, append new ones
+        const mergedMap = new Map<number, number>(cachedBuckets.map((b) => [b.timestamp, b.kwh]))
+        for (const b of newBuckets) {
+          mergedMap.set(b.timestamp, b.kwh)
+        }
+        // Only keep buckets within the current range
+        const mergedBuckets = Array.from(mergedMap.entries())
+          .filter(([ts]) => ts >= startMs && ts <= clampedEnd)
+          .sort((a, b) => a[0] - b[0])
+          .map(([timestamp, kwh]) => ({ timestamp, kwh }))
+
+        if (!isDisposed) setElectricityUsageBuckets(mergedBuckets)
+
+        if (mergedBuckets.length > 0) {
+          const firstDate = new Date(mergedBuckets[0].timestamp).toISOString().slice(0, 10)
+          const lastDate = new Date(mergedBuckets[mergedBuckets.length - 1].timestamp).toISOString().slice(0, 10)
+          console.log(`[Usage Stats] Fetched ${mergedBuckets.length} buckets, range: ${firstDate} → ${lastDate}`)
+        }
 
         try {
-          localStorage.setItem(cacheKey, JSON.stringify({ fetchTime: Date.now(), buckets }))
+          localStorage.setItem(bucketCacheKey, JSON.stringify({ buckets: mergedBuckets }))
+          console.log(`[Usage Stats] Cached ${mergedBuckets.length} buckets to localStorage`)
         } catch { /* ignore quota errors */ }
       } catch (err) {
         console.error('[Usage Stats] Error:', err)
@@ -3818,14 +3907,19 @@ export default function Dashboard({
     const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
     if (timeRange === 'today' && selectedStartDate === todayKey && selectedEndDate === todayKey) {
       addDriftIssue('Gas chart day total', gasSelectedPeriodTotal, haMetricsSnapshot.dailyGasM3, 'm3', 0.05)
-      addDriftIssue('Electricity usage chart day total', electricityUsageTotal, haMetricsSnapshot.dailyElectricityKwh, 'kWh', 0.5)
+      if (electricityUsageBuckets.length > 0 && electricityUsageTotal > 0) {
+        addDriftIssue('Electricity usage chart day total', electricityUsageTotal, haMetricsSnapshot.dailyElectricityKwh, 'kWh', 0.5)
+      }
     }
     if (timeRange === 'month') {
-      addDriftIssue('Electricity usage chart month total', electricityUsageTotal, haMetricsSnapshot.monthlyElectricityKwh, 'kWh', 1.0)
+      if (electricityUsageBuckets.length > 0 && electricityUsageTotal > 0) {
+        addDriftIssue('Electricity usage chart month total', electricityUsageTotal, haMetricsSnapshot.monthlyElectricityKwh, 'kWh', 1.0)
+      }
     }
 
     return issues
   }, [
+    electricityUsageBuckets,
     electricityUsageTotal,
     gasMonthCardValue,
     gasSelectedPeriodTotal,
