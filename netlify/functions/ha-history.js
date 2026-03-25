@@ -1,3 +1,4 @@
+import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { resolveEnvironmentConfig } from './_environment-storage.js'
 
 const getEnv = (key) => {
@@ -100,6 +101,57 @@ const getCachedClientMetadata = async (domain, token) => {
 
 const normalizeValue = (value) => (value ? String(value).trim() : '')
 const ENV_METADATA_PREFIX = 'ha_env_v1_'
+
+const getOwnerEmail = () => (process.env.OWNER_EMAIL || '').trim().toLowerCase()
+
+const getAdminAllowlist = () =>
+  (process.env.ADMIN_EMAILS || process.env.VITE_ADMIN_EMAILS || '')
+    .split(',')
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean)
+
+const getEmailFromPayload = (payload) => {
+  const emailValue = payload.email || payload['https://brouwer-ems/email']
+  return typeof emailValue === 'string' ? emailValue.toLowerCase() : ''
+}
+
+const isAdminEmail = (email) => {
+  if (!email) return false
+  const ownerEmail = getOwnerEmail()
+  if (ownerEmail && email === ownerEmail) return true
+  const allowlist = getAdminAllowlist()
+  return allowlist.includes(email)
+}
+
+const verifyAuthAndAdmin = async (event) => {
+  const authHeader = event.headers.authorization || event.headers.Authorization
+  if (!authHeader?.startsWith('Bearer ')) {
+    throw Object.assign(new Error('Missing authorization header'), { statusCode: 401 })
+  }
+
+  const token = authHeader.replace('Bearer ', '')
+  const domain = getEnv('AUTH0_DOMAIN')
+  const jwks = createRemoteJWKSet(new URL(`https://${domain}/.well-known/jwks.json`))
+  const { payload } = await jwtVerify(token, jwks, { issuer: `https://${domain}/` })
+
+  const emailFromPayload = getEmailFromPayload(payload)
+  const isAdmin = isAdminEmail(emailFromPayload)
+
+  return { payload, isAdmin, userId: payload.sub }
+}
+
+const getUserAppMetadata = async (domain, userId) => {
+  const managementToken = await getManagementToken(domain)
+  const response = await fetch(
+    `https://${domain}/api/v2/users/${encodeURIComponent(userId)}?fields=app_metadata&include_fields=true`,
+    { headers: { Authorization: `Bearer ${managementToken}` } },
+  )
+  if (!response.ok) {
+    throw new Error('Unable to fetch user metadata')
+  }
+  const user = await response.json()
+  return user.app_metadata || {}
+}
 
 const parseEnvironmentMap = (input) => {
   if (!input) {
@@ -354,17 +406,18 @@ const formatStatisticsPayload = (statisticsData, entityIdsList) => {
 
 export const handler = async (event) => {
   try {
-    const authHeader = event.headers.authorization || event.headers.Authorization
-    if (!authHeader?.startsWith('Bearer ')) {
-      console.error('[HA History] Missing authorization header')
+    let authResult
+    try {
+      authResult = await verifyAuthAndAdmin(event)
+    } catch (authErr) {
+      const statusCode = authErr.statusCode || 401
       return {
-        statusCode: 401,
-        body: JSON.stringify({ error: 'Missing authorization header' }),
+        statusCode,
+        body: JSON.stringify({ error: authErr.message || 'Unauthorized' }),
       }
     }
 
-    // Keep auth behavior aligned with ha-entities: require bearer header presence.
-    console.log('[HA History] Authorization header present')
+    const { isAdmin, userId } = authResult
 
     const environmentId = event.queryStringParameters?.environmentId || 'vacation'
     const startTime = event.queryStringParameters?.startTime
@@ -378,6 +431,21 @@ export const handler = async (event) => {
       return {
         statusCode: 400,
         body: JSON.stringify({ error: 'Missing query parameters: startTime, endTime, entityIds' }),
+      }
+    }
+
+    // Non-admin users may only access environments they are assigned to
+    if (!isAdmin) {
+      try {
+        const domain = getEnv('AUTH0_DOMAIN')
+        const appMetadata = await getUserAppMetadata(domain, userId)
+        const allowedEnvIds = Array.isArray(appMetadata.environmentIds) ? appMetadata.environmentIds : []
+        if (!allowedEnvIds.includes(environmentId)) {
+          return { statusCode: 403, body: JSON.stringify({ error: 'Access denied to this environment' }) }
+        }
+      } catch (metaErr) {
+        console.error('[HA History] Failed to verify environment access:', metaErr?.message || metaErr)
+        return { statusCode: 403, body: JSON.stringify({ error: 'Unable to verify environment access' }) }
       }
     }
 
@@ -557,7 +625,6 @@ export const handler = async (event) => {
       statusCode: 500,
       body: JSON.stringify({
         error: error instanceof Error ? error.message : 'Server error',
-        stack: error instanceof Error ? error.stack : String(error),
       }),
     }
   }

@@ -1412,8 +1412,10 @@ const getUserEmailFromManagement = async (domain, token, userId) => {
   }
 }
 
+const getOwnerEmail = () => (process.env.OWNER_EMAIL || '').trim().toLowerCase()
+
 const getAdminAllowlist = () =>
-  (process.env.ADMIN_EMAILS || process.env.VITE_ADMIN_EMAILS || 'olivier@inside-out.tech')
+  (process.env.ADMIN_EMAILS || process.env.VITE_ADMIN_EMAILS || '')
     .split(',')
     .map((value) => value.trim().toLowerCase())
     .filter(Boolean)
@@ -1440,6 +1442,7 @@ const verifyAuth = async (event) => {
 
   const allowlist = getAdminAllowlist()
   const forceEmail = getForceEmail()
+  const ownerEmail = getOwnerEmail()
   const debugMode = (process.env.DEBUG_ADMIN || '').toLowerCase() === 'true'
   const debug = []
 
@@ -1471,7 +1474,7 @@ const verifyAuth = async (event) => {
     }
   }
 
-  const isAdmin = isEmailAllowed(resolvedEmail, allowlist, forceEmail)
+  const isAdmin = (ownerEmail && resolvedEmail === ownerEmail) || isEmailAllowed(resolvedEmail, allowlist, forceEmail)
 
   if (debugMode) {
     debug.push({
@@ -1513,22 +1516,38 @@ export const handler = async (event) => {
       const managementToken = await getManagementToken(domain)
       metadata = await getCachedClientMetadata(domain, managementToken)
 
-      // Fetch user's own metadata for user-specific sensor visibility
+      // Fetch user's own metadata for user-specific sensor visibility and environment access
       if (payload?.sub) {
         try {
           const userResponse = await fetch(
-            `https://${domain}/api/v2/users/${encodeURIComponent(payload.sub)}?fields=user_metadata&include_fields=true`,
+            `https://${domain}/api/v2/users/${encodeURIComponent(payload.sub)}?fields=app_metadata,user_metadata&include_fields=true`,
             { headers: { Authorization: `Bearer ${managementToken}` } },
           )
           if (userResponse.ok) {
             const userData = await userResponse.json()
             userMetadata = userData.user_metadata || null
             console.log('[HA-ENTITIES] Fetched user metadata, has user_metadata:', !!userMetadata)
+
+            // Non-admin users may only access environments assigned to them
+            if (!isAdmin) {
+              const allowedEnvIds = Array.isArray(userData.app_metadata?.environmentIds)
+                ? userData.app_metadata.environmentIds
+                : []
+              if (!allowedEnvIds.includes(environmentId)) {
+                return { statusCode: 403, body: JSON.stringify({ error: 'Access denied to this environment' }) }
+              }
+            }
           } else {
             console.log('[HA-ENTITIES] Failed to fetch user metadata, status:', userResponse.status)
+            if (!isAdmin) {
+              return { statusCode: 403, body: JSON.stringify({ error: 'Unable to verify environment access' }) }
+            }
           }
         } catch (userMetadataError) {
           console.warn('Failed to fetch user metadata:', userMetadataError instanceof Error ? userMetadataError.message : userMetadataError)
+          if (!isAdmin) {
+            return { statusCode: 403, body: JSON.stringify({ error: 'Unable to verify environment access' }) }
+          }
         }
       }
     } catch (metadataError) {
@@ -1630,12 +1649,10 @@ export const handler = async (event) => {
     console.error('ha-entities handler error:', error);
     const message = error instanceof Error ? error.message : 'Server error';
     const statusCode = message === 'Missing token' ? 401 : 500
-    const stack = error && error.stack ? error.stack : String(error);
     return {
       statusCode,
       body: JSON.stringify({
         error: message,
-        stack,
         details: 'Check env vars: HA_BROUWER_TEST_URL, HA_BROUWER_TEST_TOKEN'
       }),
     };

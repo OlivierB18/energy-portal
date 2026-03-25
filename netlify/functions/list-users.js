@@ -80,8 +80,10 @@ const getUserEmailFromManagement = async (domain, token, userId) => {
   return typeof data.email === 'string' ? data.email.toLowerCase() : ''
 }
 
+const getOwnerEmail = () => (process.env.OWNER_EMAIL || '').trim().toLowerCase()
+
 const getAdminAllowlist = () =>
-  (process.env.ADMIN_EMAILS || process.env.VITE_ADMIN_EMAILS || 'olivier@inside-out.tech')
+  (process.env.ADMIN_EMAILS || process.env.VITE_ADMIN_EMAILS || '')
     .split(',')
     .map((email) => email.trim().toLowerCase())
     .filter(Boolean)
@@ -113,13 +115,20 @@ const isAdminFromClaims = (payload, rolesClaim) => {
 const verifyAdmin = async (domain, token, payload, rolesClaim) => {
   const allowlist = getAdminAllowlist()
   const forceEmail = getForceEmail()
+  const ownerEmail = getOwnerEmail()
 
   const emailFromPayload = getEmailFromPayload(payload)
+  if (ownerEmail && emailFromPayload === ownerEmail) {
+    return true
+  }
   if (isEmailAllowed(emailFromPayload, allowlist, forceEmail)) {
     return true
   }
 
   const emailFromUserInfo = emailFromPayload ? '' : await getUserInfoEmail(domain, token)
+  if (ownerEmail && emailFromUserInfo === ownerEmail) {
+    return true
+  }
   if (isEmailAllowed(emailFromUserInfo, allowlist, forceEmail)) {
     return true
   }
@@ -131,15 +140,14 @@ const verifyAdmin = async (domain, token, payload, rolesClaim) => {
   try {
     const managementToken = await getManagementToken(domain)
     const emailFromManagement = await getUserEmailFromManagement(domain, managementToken, payload.sub)
+    if (ownerEmail && emailFromManagement === ownerEmail) {
+      return true
+    }
     if (isEmailAllowed(emailFromManagement, allowlist, forceEmail)) {
       return true
     }
   } catch {
     // Ignore management fallback errors and continue normal deny path.
-  }
-
-  if ((process.env.ADMIN_FAIL_OPEN || '').toLowerCase() === 'true') {
-    return true
   }
 
   return false

@@ -79,14 +79,16 @@ const isAdminFromClaims = (payload, rolesClaim) => {
     : typeof rolesValue === 'string'
       ? [rolesValue]
       : []
-  const allowlist = (process.env.ADMIN_EMAILS || process.env.VITE_ADMIN_EMAILS || 'olivier@inside-out.tech')
+  const ownerEmail = (process.env.OWNER_EMAIL || '').trim().toLowerCase()
+  const allowlist = (process.env.ADMIN_EMAILS || process.env.VITE_ADMIN_EMAILS || '')
     .split(',')
     .map((email) => email.trim().toLowerCase())
     .filter(Boolean)
   const emailValue = payload.email || payload['https://brouwer-ems/email'] || payload['email']
   const email = typeof emailValue === 'string' ? emailValue.toLowerCase() : ''
+  const isOwner = ownerEmail.length > 0 && email === ownerEmail
   const isAllowedEmail = email.length > 0 && allowlist.includes(email)
-  return roles.includes('admin') || isAllowedEmail
+  return roles.includes('admin') || isOwner || isAllowedEmail
 }
 
 const getManagementToken = async (domain) => {

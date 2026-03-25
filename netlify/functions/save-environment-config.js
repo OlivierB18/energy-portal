@@ -117,8 +117,10 @@ const getUserEmailFromManagement = async (domain, token, userId) => {
   return typeof data.email === 'string' ? data.email.toLowerCase() : ''
 }
 
+const getOwnerEmail = () => (process.env.OWNER_EMAIL || '').trim().toLowerCase()
+
 const getAdminAllowlist = () =>
-  (process.env.ADMIN_EMAILS || process.env.VITE_ADMIN_EMAILS || 'olivier@inside-out.tech')
+  (process.env.ADMIN_EMAILS || process.env.VITE_ADMIN_EMAILS || '')
     .split(',')
     .map((value) => value.trim().toLowerCase())
     .filter(Boolean)
@@ -140,8 +142,10 @@ const isAdminFromClaims = (payload, rolesClaim, email = '') => {
       : []
   const allowlist = getAdminAllowlist()
   const forceEmail = getForceEmail()
+  const ownerEmail = getOwnerEmail()
+  const isOwner = ownerEmail.length > 0 && email === ownerEmail
   const isAllowedEmail = email.length > 0 && (allowlist.includes(email) || (forceEmail && email === forceEmail))
-  return roles.includes('admin') || isAllowedEmail
+  return roles.includes('admin') || isOwner || isAllowedEmail
 }
 
 const verifyAdmin = async (event) => {
@@ -158,19 +162,20 @@ const verifyAdmin = async (event) => {
 
   const allowlist = getAdminAllowlist()
   const forceEmail = getForceEmail()
+  const ownerEmail = getOwnerEmail()
   const debugMode = (process.env.DEBUG_ADMIN || '').toLowerCase() === 'true'
   const debug = []
 
   const emailFromPayload = getEmailFromPayload(payload)
   if (emailFromPayload) debug.push({ source: 'id_token', email: emailFromPayload })
-  if (isEmailAllowed(emailFromPayload, allowlist, forceEmail)) {
+  if ((ownerEmail && emailFromPayload === ownerEmail) || isEmailAllowed(emailFromPayload, allowlist, forceEmail)) {
     if (debugMode) debug.push({ result: 'allowed_by_id_token' })
     return
   }
 
   const emailFromUserInfo = emailFromPayload ? '' : await getUserInfoEmail(domain, token)
   if (emailFromUserInfo) debug.push({ source: 'userinfo', email: emailFromUserInfo })
-  if (isEmailAllowed(emailFromUserInfo, allowlist, forceEmail)) {
+  if ((ownerEmail && emailFromUserInfo === ownerEmail) || isEmailAllowed(emailFromUserInfo, allowlist, forceEmail)) {
     if (debugMode) debug.push({ result: 'allowed_by_userinfo' })
     return
   }
@@ -192,12 +197,6 @@ const verifyAdmin = async (event) => {
     }
   } catch (error) {
     if (debugMode) debug.push({ result: 'management_failed', message: error?.message })
-    // fall through to fail-open option if configured
-  }
-
-  if ((process.env.ADMIN_FAIL_OPEN || '').toLowerCase() === 'true') {
-    if (debugMode) debug.push({ result: 'fail_open' })
-    return
   }
 
   const err = new Error('Admin only')

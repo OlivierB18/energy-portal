@@ -81,14 +81,15 @@ function App() {
           }
         }
 
-        const allowlist = ((import.meta.env.VITE_ADMIN_EMAILS as string | undefined) ?? 'olivier@inside-out.tech')
+        const ownerEmail = ((import.meta.env.VITE_OWNER_EMAIL as string | undefined) ?? '').trim().toLowerCase()
+        const allowlist = ((import.meta.env.VITE_ADMIN_EMAILS as string | undefined) ?? '')
           .split(',')
           .map((email) => email.trim().toLowerCase())
           .filter(Boolean)
         const claimEmail = getEmailFromClaims(claims)
         const profileEmail = typeof user?.email === 'string' ? user.email : ''
         const email = (claimEmail || profileEmail).toLowerCase()
-        const isAllowedEmail = email.length > 0 && allowlist.includes(email)
+        const isAllowedEmail = email.length > 0 && (allowlist.includes(email) || (ownerEmail.length > 0 && email === ownerEmail))
 
         const nextIsAdmin = roles.includes('admin') || isAllowedEmail
         setIsAdmin(nextIsAdmin)

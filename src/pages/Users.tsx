@@ -42,7 +42,8 @@ export default function Users({ isAdmin, onOpenOverview, onOpenDashboard, onLogo
   const [selectedUserForSensorConfig, setSelectedUserForSensorConfig] = useState<{ userId: string; email: string; environmentId: string; environmentName: string } | null>(null)
   const [expandedUserId, setExpandedUserId] = useState<string | null>(null)
 
-  const adminEmailAllowlist = ((import.meta.env.VITE_ADMIN_EMAILS as string | undefined) ?? 'olivier@inside-out.tech')
+  const ownerEmail = ((import.meta.env.VITE_OWNER_EMAIL as string | undefined) ?? '').trim().toLowerCase()
+  const adminEmailAllowlist = ((import.meta.env.VITE_ADMIN_EMAILS as string | undefined) ?? '')
     .split(',')
     .map((email) => email.trim().toLowerCase())
     .filter(Boolean)
@@ -340,7 +341,7 @@ export default function Users({ isAdmin, onOpenOverview, onOpenDashboard, onLogo
           {!isLoading && !error && users.length > 0 && (
             <div className="space-y-2">
               {users.map((user) => {
-                const isAdminUser = !!user.email && adminEmailAllowlist.includes(user.email.toLowerCase())
+                const isAdminUser = !!user.email && (adminEmailAllowlist.includes(user.email.toLowerCase()) || (ownerEmail.length > 0 && user.email.toLowerCase() === ownerEmail))
                 const isExpanded = expandedUserId === user.user_id
 
                 return (

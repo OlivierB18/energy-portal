@@ -133,8 +133,10 @@ const getUserEmailFromManagement = async (domain, token, userId) => {
   return typeof data.email === 'string' ? data.email.toLowerCase() : ''
 }
 
+const getOwnerEmail = () => (process.env.OWNER_EMAIL || '').trim().toLowerCase()
+
 const getAdminAllowlist = () =>
-  (process.env.ADMIN_EMAILS || process.env.VITE_ADMIN_EMAILS || 'olivier@inside-out.tech')
+  (process.env.ADMIN_EMAILS || process.env.VITE_ADMIN_EMAILS || '')
     .split(',')
     .map((email) => email.trim().toLowerCase())
     .filter(Boolean)
@@ -174,16 +176,17 @@ const verifyAdmin = async (event) => {
   const rolesClaim = process.env.AUTH0_ROLES_CLAIM || 'https://brouwer-ems/roles'
   const allowlist = getAdminAllowlist()
   const forceEmail = getForceEmail()
+  const ownerEmail = getOwnerEmail()
   const jwks = createRemoteJWKSet(new URL(`https://${domain}/.well-known/jwks.json`))
   const { payload } = await jwtVerify(token, jwks, { issuer: `https://${domain}/` })
 
   const emailFromPayload = getEmailFromPayload(payload)
-  if (isEmailAllowed(emailFromPayload, allowlist, forceEmail)) {
+  if ((ownerEmail && emailFromPayload === ownerEmail) || isEmailAllowed(emailFromPayload, allowlist, forceEmail)) {
     return
   }
 
   const emailFromUserInfo = emailFromPayload ? '' : await getUserInfoEmail(domain, token)
-  if (isEmailAllowed(emailFromUserInfo, allowlist, forceEmail)) {
+  if ((ownerEmail && emailFromUserInfo === ownerEmail) || isEmailAllowed(emailFromUserInfo, allowlist, forceEmail)) {
     return
   }
 
@@ -194,15 +197,11 @@ const verifyAdmin = async (event) => {
   try {
     const managementToken = await getManagementToken(domain)
     const emailFromManagement = await getUserEmailFromManagement(domain, managementToken, payload.sub)
-    if (isEmailAllowed(emailFromManagement, allowlist, forceEmail)) {
+    if ((ownerEmail && emailFromManagement === ownerEmail) || isEmailAllowed(emailFromManagement, allowlist, forceEmail)) {
       return
     }
   } catch {
     // Ignore management fallback errors and continue normal deny path.
-  }
-
-  if ((process.env.ADMIN_FAIL_OPEN || '').toLowerCase() === 'true') {
-    return
   }
 
   throw new Error('Admin only')
