@@ -492,8 +492,9 @@ const getDashboardMetrics = (entities) => {
   return {
     currentPowerKw: toMetricValue(currentPowerKw),
     currentProductionKw: toMetricValue(currentProductionKw),
-    dailyElectricityKwh: toMetricValue(dailyElectricityKwh),
-    monthlyElectricityKwh: toMetricValue(monthlyElectricityKwh),
+    // Daily/monthly electricity always derived from history delta — never from snapshot sensors
+    dailyElectricityKwh: null,
+    monthlyElectricityKwh: null,
     dailyProductionKwh: toMetricValue(dailyProductionKwh),
     monthlyProductionKwh: toMetricValue(monthlyProductionKwh),
     dailyGasM3: toMetricValue(dailyGasM3),
@@ -1002,6 +1003,7 @@ const enrichMetricsWithHistoryFallback = async ({
   baseUrl,
   token,
   environmentId,
+  storedSources,
 }) => {
   if (!metrics || !Array.isArray(entities) || entities.length === 0) {
     return metrics
@@ -1084,43 +1086,69 @@ const enrichMetricsWithHistoryFallback = async ({
   const fallbackSources = {}
 
   if (shouldDeriveElectricityFromTotalHistory || needsElectricityFallback) {
-    const electricityCandidates = pickTotalElectricityCandidates(entities)
+    // Use stored consumption entity IDs from sensor detection (Fix A) if available,
+    // otherwise fall back to auto-detection via pickTotalElectricityCandidates.
+    const storedConsumptionIds = Array.isArray(storedSources?.electricityConsumptionEntityIds) &&
+      storedSources.electricityConsumptionEntityIds.length > 0
+      ? storedSources.electricityConsumptionEntityIds
+      : null
 
-    if (electricityCandidates.length > 0) {
-      const aggregateCandidates = electricityCandidates.filter(
-        (candidate) => candidate.isAggregateLike && !candidate.isTariffLike && !candidate.isPhaseLike,
-      )
+    let selectedCandidates = []
 
-      const strongestAggregate = aggregateCandidates
-        .filter((candidate) => Number.isFinite(candidate.currentValueKwh))
-        .sort((a, b) => {
-          if (b.score !== a.score) {
-            return b.score - a.score
-          }
-          return b.currentValueKwh - a.currentValueKwh
-        })[0]
+    if (storedConsumptionIds) {
+      // Use the pre-detected entity IDs directly — build minimal candidate objects
+      const entityById = new Map(entities.map((e) => [e.entity_id, e]))
+      selectedCandidates = storedConsumptionIds
+        .map((id) => {
+          const entity = entityById.get(id)
+          if (!entity) return null
+          const rawState = parseNumericValue(entity.state)
+          const currentValueKwh = convertEnergyToKwh(rawState, entity.unit_of_measurement)
+          return { entity, currentValueKwh }
+        })
+        .filter(Boolean)
+      console.log('[HA-ENTITIES] Using stored consumption entity IDs:', storedConsumptionIds)
+    } else {
+      const electricityCandidates = pickTotalElectricityCandidates(entities)
 
-      const phaseCandidates = electricityCandidates.filter((candidate) => candidate.isPhaseLike)
-      const tariffCandidates = electricityCandidates.filter((candidate) => candidate.isTariffLike)
+      if (electricityCandidates.length > 0) {
+        const aggregateCandidates = electricityCandidates.filter(
+          (candidate) => candidate.isAggregateLike && !candidate.isTariffLike && !candidate.isPhaseLike,
+        )
 
-      const hasTrustedAggregate = Boolean(
-        strongestAggregate &&
-        (strongestAggregate.stateClass === 'total_increasing' || strongestAggregate.stateClass === 'total'),
-      )
+        const strongestAggregate = aggregateCandidates
+          .filter((candidate) => Number.isFinite(candidate.currentValueKwh))
+          .sort((a, b) => {
+            if (b.score !== a.score) {
+              return b.score - a.score
+            }
+            return b.currentValueKwh - a.currentValueKwh
+          })[0]
 
-      const selectedCandidates = hasTrustedAggregate
-        ? [strongestAggregate]
-        : tariffCandidates.length >= 2
-          ? tariffCandidates.slice(0, 4)
-          : phaseCandidates.length >= 2
-            ? phaseCandidates.slice(0, 3)
-            : (() => {
-                const highestValueCandidate = electricityCandidates
-                  .filter((candidate) => Number.isFinite(candidate.currentValueKwh))
-                  .sort((a, b) => b.currentValueKwh - a.currentValueKwh)[0]
-                return [highestValueCandidate || electricityCandidates[0]]
-              })()
+        const phaseCandidates = electricityCandidates.filter((candidate) => candidate.isPhaseLike)
+        const tariffCandidates = electricityCandidates.filter((candidate) => candidate.isTariffLike)
 
+        const hasTrustedAggregate = Boolean(
+          strongestAggregate &&
+          (strongestAggregate.stateClass === 'total_increasing' || strongestAggregate.stateClass === 'total'),
+        )
+
+        selectedCandidates = hasTrustedAggregate
+          ? [strongestAggregate]
+          : tariffCandidates.length >= 2
+            ? tariffCandidates.slice(0, 4)
+            : phaseCandidates.length >= 2
+              ? phaseCandidates.slice(0, 3)
+              : (() => {
+                  const highestValueCandidate = electricityCandidates
+                    .filter((candidate) => Number.isFinite(candidate.currentValueKwh))
+                    .sort((a, b) => b.currentValueKwh - a.currentValueKwh)[0]
+                  return [highestValueCandidate || electricityCandidates[0]]
+                })()
+      }
+    }
+
+    if (selectedCandidates.length > 0) {
       let dailySum = 0
       let monthlySum = 0
       let hasDaily = false
@@ -1159,6 +1187,8 @@ const enrichMetricsWithHistoryFallback = async ({
       fallbackValues.monthlyElectricityKwh = hasMonthly ? Number(monthlySum.toFixed(3)) : null
       fallbackSources.electricityTotalEntityIds = usedEntityIds
       fallbackSources.electricityTotalEntityId = usedEntityIds[0] || null
+      // Also expose as electricityConsumptionEntityIds so Dashboard.tsx can use them for chart fetch
+      fallbackSources.electricityConsumptionEntityIds = usedEntityIds
 
       console.log(
         '[HA-ENTITIES] Electricity fallback derived from:',
@@ -1171,21 +1201,33 @@ const enrichMetricsWithHistoryFallback = async ({
     }
   }
 
-  // ALWAYS ensure electricityTotalEntityIds is set so the electricity usage statistics chart
-  // can fetch kWh data even when the daily/monthly fallback path was not triggered.
+  // ALWAYS ensure electricityTotalEntityIds and electricityConsumptionEntityIds are set
+  // so the electricity usage statistics chart can fetch kWh data.
   if (!fallbackSources.electricityTotalEntityIds || fallbackSources.electricityTotalEntityIds.length === 0) {
-    const candidates = pickTotalElectricityCandidates(entities)
-    const cumulativeCandidates = candidates.filter(
-      (c) => c.stateClass === 'total_increasing' || c.stateClass === 'total' || String(c.entity?.device_class || '').toLowerCase() === 'energy',
-    )
-    const chosen = (cumulativeCandidates.length > 0 ? cumulativeCandidates : candidates).slice(0, 4)
-    if (chosen.length > 0) {
-      const ids = chosen.map((c) => c.entity.entity_id)
-      fallbackSources.electricityTotalEntityIds = ids
-      if (!fallbackSources.electricityTotalEntityId) {
-        fallbackSources.electricityTotalEntityId = ids[0]
+    const storedConsumptionIds = Array.isArray(storedSources?.electricityConsumptionEntityIds) &&
+      storedSources.electricityConsumptionEntityIds.length > 0
+      ? storedSources.electricityConsumptionEntityIds
+      : null
+
+    if (storedConsumptionIds) {
+      fallbackSources.electricityTotalEntityIds = storedConsumptionIds
+      fallbackSources.electricityTotalEntityId = storedConsumptionIds[0]
+      fallbackSources.electricityConsumptionEntityIds = storedConsumptionIds
+    } else {
+      const candidates = pickTotalElectricityCandidates(entities)
+      const cumulativeCandidates = candidates.filter(
+        (c) => c.stateClass === 'total_increasing' || c.stateClass === 'total' || String(c.entity?.device_class || '').toLowerCase() === 'energy',
+      )
+      const chosen = (cumulativeCandidates.length > 0 ? cumulativeCandidates : candidates).slice(0, 4)
+      if (chosen.length > 0) {
+        const ids = chosen.map((c) => c.entity.entity_id)
+        fallbackSources.electricityTotalEntityIds = ids
+        if (!fallbackSources.electricityTotalEntityId) {
+          fallbackSources.electricityTotalEntityId = ids[0]
+        }
+        fallbackSources.electricityConsumptionEntityIds = ids
+        console.log('[HA-ENTITIES] Computed electricityTotalEntityIds (always-set):', ids)
       }
-      console.log('[HA-ENTITIES] Computed electricityTotalEntityIds (always-set):', ids)
     }
   }
 
@@ -1256,6 +1298,8 @@ const enrichMetricsWithHistoryFallback = async ({
       fallbackValues.monthlyProductionKwh = hasMonthly ? Number(monthlySum.toFixed(3)) : null
       fallbackSources.electricityProductionTotalEntityIds = usedEntityIds
       fallbackSources.electricityProductionTotalEntityId = usedEntityIds[0] || null
+      // Also expose as electricityProductionEntityIds so Dashboard.tsx can use them for chart fetch
+      fallbackSources.electricityProductionEntityIds = usedEntityIds
 
       console.log(
         '[HA-ENTITIES] Production fallback derived from:',
@@ -1607,12 +1651,22 @@ export const handler = async (event) => {
       : []
 
     let metrics = getDashboardMetrics(allEntities)
+
+    // Read stored sensor sources from ha_config (saved by save-ha-environments.js) so that
+    // enrichMetricsWithHistoryFallback can use the pre-detected tariff/production entity IDs.
+    const storedHaConfig = parseHaConfig(metadata.ha_config)
+    const storedEnvSources = storedHaConfig[environmentId]?.sources || null
+    if (storedEnvSources) {
+      console.log('[HA-ENTITIES] Found stored env sources for', environmentId, ':', JSON.stringify(storedEnvSources))
+    }
+
     metrics = await enrichMetricsWithHistoryFallback({
       metrics,
       entities: allEntities,
       baseUrl,
       token,
       environmentId,
+      storedSources: storedEnvSources,
     })
     let entities = allEntities
 

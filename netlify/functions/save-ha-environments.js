@@ -500,12 +500,9 @@ const detectElectricityPeriodEntity = (entities, period) => {
   return candidates[0]?.entity || null
 }
 
-const detectTotalElectricityEntity = (entities) =>
-  findEntityByKeywords(
-    entities,
-    ['energy_total', 'total_energy', 'total_consumption', 'kwh_total', 'consumption_total', 'meter_total'],
-    ['gas', 'price', 'cost', 'tariff', 'tarif', 'tarief'],
-  )
+const PRODUCTION_KEYWORDS_DETECT = [
+  'production', 'export', 'injection', 'teruglever', 'solar', 'pv', 'yield', 'opwek',
+]
 
 const detectEnvironmentSensors = async ({ environmentId, baseUrl, token }) => {
   const normalizedBaseUrl = normalizeText(baseUrl).replace(/\/+$/, '')
@@ -553,12 +550,72 @@ const detectEnvironmentSensors = async ({ environmentId, baseUrl, token }) => {
       }))
     : []
 
-  const powerEntity =
-    entities.find((entity) => (
-      entity.domain === 'sensor' &&
-      String(entity.device_class || '').toLowerCase() === 'power' &&
-      Number.isFinite(parseNumericValue(entity.state))
-    )) ||
+  // --- Electricity consumption sensors (all tariff sensors) ---
+  // Find ALL entities that are cumulative energy sensors (kWh) for consumption (not production)
+  const electricityConsumptionEntities = entities
+    .filter((entity) => {
+      if (entity.domain !== 'sensor') return false
+      const stateClass = String(entity.state_class || '').toLowerCase()
+      if (stateClass !== 'total_increasing' && stateClass !== 'total') return false
+      const deviceClass = String(entity.device_class || '').toLowerCase()
+      if (deviceClass !== 'energy') return false
+      const unit = String(entity.unit_of_measurement || '').trim().toLowerCase()
+      if (unit !== 'kwh') return false
+      const searchable = toSearchable(entity)
+      if (includesAny(searchable, PRODUCTION_KEYWORDS_DETECT)) return false
+      const entityId = entity.entity_id.toLowerCase()
+      if (includesAny(entityId, ['gas', 'price', 'cost', 'tariff_name'])) return false
+      if (!Number.isFinite(parseNumericValue(entity.state))) return false
+      return true
+    })
+    .sort((a, b) => (parseNumericValue(b.state) || 0) - (parseNumericValue(a.state) || 0))
+
+  const electricityConsumptionEntityIds = electricityConsumptionEntities.map((e) => e.entity_id)
+  const electricityTotalEntityId = electricityConsumptionEntityIds[0] || null
+
+  // --- Electricity production sensors (return feed / teruglevering) ---
+  const electricityProductionEntities = entities
+    .filter((entity) => {
+      if (entity.domain !== 'sensor') return false
+      const stateClass = String(entity.state_class || '').toLowerCase()
+      if (stateClass !== 'total_increasing' && stateClass !== 'total') return false
+      const deviceClass = String(entity.device_class || '').toLowerCase()
+      if (deviceClass !== 'energy') return false
+      const unit = String(entity.unit_of_measurement || '').trim().toLowerCase()
+      if (unit !== 'kwh') return false
+      const searchable = toSearchable(entity)
+      if (!includesAny(searchable, PRODUCTION_KEYWORDS_DETECT)) return false
+      if (!Number.isFinite(parseNumericValue(entity.state))) return false
+      return true
+    })
+
+  const electricityProductionEntityIds = electricityProductionEntities.map((e) => e.entity_id)
+
+  // --- Power consumption sensor (live instantaneous value) ---
+  const POWER_CONSUMPTION_PRIORITY = ['power_consumption', 'active_power', 'actueel_vermogen']
+  const powerConsumptionEntity =
+    entities.find((entity) => {
+      if (entity.domain !== 'sensor') return false
+      const deviceClass = String(entity.device_class || '').toLowerCase()
+      if (deviceClass !== 'power') return false
+      const stateClass = String(entity.state_class || '').toLowerCase()
+      if (stateClass === 'total_increasing' || stateClass === 'total') return false
+      const searchable = toSearchable(entity)
+      if (includesAny(searchable, ['production', 'solar', 'pv', 'export'])) return false
+      if (!Number.isFinite(parseNumericValue(entity.state))) return false
+      // Prefer entities with priority keywords in entity_id
+      return POWER_CONSUMPTION_PRIORITY.some((kw) => entity.entity_id.toLowerCase().includes(kw))
+    }) ||
+    entities.find((entity) => {
+      if (entity.domain !== 'sensor') return false
+      const deviceClass = String(entity.device_class || '').toLowerCase()
+      if (deviceClass !== 'power') return false
+      const stateClass = String(entity.state_class || '').toLowerCase()
+      if (stateClass === 'total_increasing' || stateClass === 'total') return false
+      const searchable = toSearchable(entity)
+      if (includesAny(searchable, ['production', 'solar', 'pv', 'export'])) return false
+      return Number.isFinite(parseNumericValue(entity.state))
+    }) ||
     findEntityByKeywords(
       entities,
       [
@@ -575,7 +632,8 @@ const detectEnvironmentSensors = async ({ environmentId, baseUrl, token }) => {
         'current consumption',
         'load',
       ],
-      ['today', 'daily', 'month', 'monthly', 'total', 'kwh', 'energy', 'gas', 'price', 'cost', 'tariff'],
+      ['today', 'daily', 'month', 'monthly', 'total', 'kwh', 'energy', 'gas', 'price', 'cost', 'tariff',
+        'production', 'solar', 'pv', 'export'],
     ) ||
     entities.find((entity) => (
       entity.domain === 'sensor' &&
@@ -583,44 +641,77 @@ const detectEnvironmentSensors = async ({ environmentId, baseUrl, token }) => {
       Number.isFinite(parseNumericValue(entity.state))
     ))
 
-  const dailyElectricityEntity = detectElectricityPeriodEntity(entities, 'daily')
-  const monthlyElectricityEntity = detectElectricityPeriodEntity(entities, 'monthly')
-  const totalElectricityEntity = detectTotalElectricityEntity(entities)
+  const powerConsumptionEntityId = powerConsumptionEntity?.entity_id || null
 
-  const dailyGasEntity = findEntityByKeywords(
-    entities,
-    ['gas_today', 'daily_gas', 'today_gas', 'gas_day', 'gas_verbruik_dag', 'gas_consumption_today'],
-    ['price', 'cost', 'tariff'],
+  // --- Gas total sensor (cumulative meter) ---
+  const GAS_TOTAL_CANDIDATES = [
+    'sensor.gas_meter_gas_consumption',
+    'sensor.gas_meter_gasverbruik',
+    'sensor.gas_total',
+    'sensor.gas_consumption_total',
+  ]
+  const entityById = new Map(entities.map((e) => [e.entity_id.toLowerCase(), e]))
+  const gasTotalEntity =
+    GAS_TOTAL_CANDIDATES.map((id) => entityById.get(id)).find(Boolean) ||
+    entities
+      .filter((entity) => {
+        if (entity.domain !== 'sensor') return false
+        const searchable = toSearchable(entity)
+        if (!searchable.includes('gas')) return false
+        const stateClass = String(entity.state_class || '').toLowerCase()
+        const deviceClass = String(entity.device_class || '').toLowerCase()
+        const unit = String(entity.unit_of_measurement || '').trim().toLowerCase()
+        const isDailyLike = includesAny(searchable, ['today', 'daily', 'day', 'vandaag', 'dag'])
+        const isMonthlyLike = includesAny(searchable, ['month', 'monthly', 'maand'])
+        if (isDailyLike || isMonthlyLike) return false
+        if (includesAny(searchable, ['price', 'cost', 'tariff', 'flow', 'rate'])) return false
+        if (!Number.isFinite(parseNumericValue(entity.state))) return false
+        return (
+          stateClass === 'total_increasing' ||
+          stateClass === 'total' ||
+          deviceClass === 'gas' ||
+          unit === 'm3' || unit === 'm³' || unit === 'ft³'
+        )
+      })
+      .sort((a, b) => {
+        const scoreOf = (e) => {
+          let s = 0
+          const sc = String(e.state_class || '').toLowerCase()
+          const dc = String(e.device_class || '').toLowerCase()
+          if (sc === 'total_increasing') s += 5
+          if (sc === 'total') s += 4
+          if (dc === 'gas') s += 5
+          return s
+        }
+        return scoreOf(b) - scoreOf(a)
+      })[0] || null
+
+  const gasTotalEntityId = gasTotalEntity?.entity_id || null
+
+  const visibleEntityIds = Array.from(new Set([
+    ...electricityConsumptionEntityIds,
+    ...electricityProductionEntityIds,
+    powerConsumptionEntityId,
+    gasTotalEntityId,
+  ].filter(Boolean)))
+
+  console.log(
+    '[sensor-detection] environment=' + environmentId +
+    ' consumption=' + JSON.stringify(electricityConsumptionEntityIds) +
+    ' production=' + JSON.stringify(electricityProductionEntityIds) +
+    ' power=' + powerConsumptionEntityId +
+    ' gas=' + gasTotalEntityId,
   )
-
-  const monthlyGasEntity = findEntityByKeywords(
-    entities,
-    ['gas_month', 'monthly_gas', 'month_gas', 'gas_verbruik_maand', 'gas_consumption_month'],
-    ['price', 'cost', 'tariff'],
-  )
-
-  const visibleEntityIds = [
-    powerEntity?.entity_id,
-    dailyElectricityEntity?.entity_id,
-    monthlyElectricityEntity?.entity_id,
-    totalElectricityEntity?.entity_id,
-    dailyGasEntity?.entity_id,
-    monthlyGasEntity?.entity_id,
-  ].filter((entityId, index, items) => {
-    const normalizedId = normalizeText(entityId)
-    return normalizedId && items.indexOf(entityId) === index
-  })
 
   return {
     entityCount: entities.length,
     visibleEntityIds,
     sources: {
-      currentPowerEntityId: powerEntity?.entity_id || null,
-      dailyElectricityEntityId: dailyElectricityEntity?.entity_id || null,
-      monthlyElectricityEntityId: monthlyElectricityEntity?.entity_id || null,
-      totalElectricityEntityId: totalElectricityEntity?.entity_id || null,
-      dailyGasEntityId: dailyGasEntity?.entity_id || null,
-      monthlyGasEntityId: monthlyGasEntity?.entity_id || null,
+      electricityConsumptionEntityIds,
+      electricityTotalEntityId,
+      electricityProductionEntityIds,
+      powerConsumptionEntityId,
+      gasTotalEntityId,
     },
   }
 }
@@ -711,11 +802,20 @@ export const handler = async (event) => {
 
     await saveBlobEnvironments(event, mergedEnvironments)
 
+    // Persist detected sensor sources into ha_config so ha-entities.js can use them
+    for (const [envId, detectionResult] of autoDetectionByEnvironment.entries()) {
+      if (detectionResult.status === 'ok') {
+        currentHaConfig[envId] = {
+          ...(currentHaConfig[envId] || {}),
+          visible_entity_ids: detectionResult.visibleEntityIds,
+          sources: detectionResult.sources,
+        }
+      }
+    }
+
     let metadataCleanupWarning = null
     try {
-      const serializedHaConfig = typeof metadata.ha_config === 'string'
-        ? metadata.ha_config
-        : JSON.stringify(currentHaConfig)
+      const serializedHaConfig = JSON.stringify(currentHaConfig)
 
       const compactClientMetadata = {
         ...stripShardedEnvironmentMetadata(metadata),
