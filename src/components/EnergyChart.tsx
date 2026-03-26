@@ -159,11 +159,10 @@ export default function EnergyChart({
 
   const smoothingWindow = useMemo(() => {
     if (chartType !== 'line') return 1
-    if (signed) return 1
     if (timeRange === 'today') return 3
     if (timeRange === 'week') return 5
-    return 5
-  }, [chartType, signed, timeRange])
+    return 7
+  }, [chartType, timeRange])
 
   const lineDisplayData = useMemo(
     () => (chartType === 'line' ? smoothLineData(displayData, smoothingWindow) : displayData),
@@ -315,7 +314,7 @@ export default function EnergyChart({
                   dot={false}
                   activeDot={{ r: isMobile ? 4.5 : 6.5, fill: 'rgb(2, 125, 94)' }}
                   isAnimationActive={false}
-                  connectNulls={false}
+                  connectNulls={true}
                 />
                 <Line
                   type="monotone"
@@ -328,7 +327,7 @@ export default function EnergyChart({
                   dot={false}
                   activeDot={{ r: isMobile ? 4.5 : 6.5, fill: 'rgb(250, 204, 21)' }}
                   isAnimationActive={false}
-                  connectNulls={false}
+                  connectNulls={true}
                 />
               </>
             ) : (

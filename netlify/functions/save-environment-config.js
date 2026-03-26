@@ -1,5 +1,4 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose'
-import { stripShardedEnvironmentMetadata } from './_environment-storage.js'
 
 const getEnv = (key) => {
   const value = process.env[key]
@@ -117,10 +116,8 @@ const getUserEmailFromManagement = async (domain, token, userId) => {
   return typeof data.email === 'string' ? data.email.toLowerCase() : ''
 }
 
-const getOwnerEmail = () => (process.env.OWNER_EMAIL || '').trim().toLowerCase()
-
 const getAdminAllowlist = () =>
-  (process.env.ADMIN_EMAILS || process.env.VITE_ADMIN_EMAILS || '')
+  (process.env.ADMIN_EMAILS || process.env.VITE_ADMIN_EMAILS || 'olivier@inside-out.tech')
     .split(',')
     .map((value) => value.trim().toLowerCase())
     .filter(Boolean)
@@ -142,10 +139,8 @@ const isAdminFromClaims = (payload, rolesClaim, email = '') => {
       : []
   const allowlist = getAdminAllowlist()
   const forceEmail = getForceEmail()
-  const ownerEmail = getOwnerEmail()
-  const isOwner = ownerEmail.length > 0 && email === ownerEmail
   const isAllowedEmail = email.length > 0 && (allowlist.includes(email) || (forceEmail && email === forceEmail))
-  return roles.includes('admin') || isOwner || isAllowedEmail
+  return roles.includes('admin') || isAllowedEmail
 }
 
 const verifyAdmin = async (event) => {
@@ -162,20 +157,19 @@ const verifyAdmin = async (event) => {
 
   const allowlist = getAdminAllowlist()
   const forceEmail = getForceEmail()
-  const ownerEmail = getOwnerEmail()
   const debugMode = (process.env.DEBUG_ADMIN || '').toLowerCase() === 'true'
   const debug = []
 
   const emailFromPayload = getEmailFromPayload(payload)
   if (emailFromPayload) debug.push({ source: 'id_token', email: emailFromPayload })
-  if ((ownerEmail && emailFromPayload === ownerEmail) || isEmailAllowed(emailFromPayload, allowlist, forceEmail)) {
+  if (isEmailAllowed(emailFromPayload, allowlist, forceEmail)) {
     if (debugMode) debug.push({ result: 'allowed_by_id_token' })
     return
   }
 
   const emailFromUserInfo = emailFromPayload ? '' : await getUserInfoEmail(domain, token)
   if (emailFromUserInfo) debug.push({ source: 'userinfo', email: emailFromUserInfo })
-  if ((ownerEmail && emailFromUserInfo === ownerEmail) || isEmailAllowed(emailFromUserInfo, allowlist, forceEmail)) {
+  if (isEmailAllowed(emailFromUserInfo, allowlist, forceEmail)) {
     if (debugMode) debug.push({ result: 'allowed_by_userinfo' })
     return
   }
@@ -197,6 +191,12 @@ const verifyAdmin = async (event) => {
     }
   } catch (error) {
     if (debugMode) debug.push({ result: 'management_failed', message: error?.message })
+    // fall through to fail-open option if configured
+  }
+
+  if ((process.env.ADMIN_FAIL_OPEN || '').toLowerCase() === 'true') {
+    if (debugMode) debug.push({ result: 'fail_open' })
+    return
   }
 
   const err = new Error('Admin only')
@@ -221,31 +221,16 @@ const parseEnvironmentMap = (input) => {
   return input && typeof input === 'object' && !Array.isArray(input) ? input : {}
 }
 
-const parseHaConfig = (input) => {
-  if (!input) {
-    return {}
-  }
-
-  if (typeof input === 'string') {
-    try {
-      const parsed = JSON.parse(input)
-      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
-    } catch {
-      return {}
-    }
-  }
-
-  return input && typeof input === 'object' && !Array.isArray(input) ? input : {}
-}
-
 const sanitizeClientMetadata = (metadata) => {
-  const haConfig = parseHaConfig(metadata?.ha_config)
+  const mergedEnvironmentMap = {
+    ...parseEnvironmentMap(metadata?.environments),
+    ...parseEnvironmentMap(metadata?.ha_environments),
+  }
 
   return {
-    ...stripShardedEnvironmentMetadata(metadata),
+    ...metadata,
     environments: null,
-    ha_environments: null,
-    ha_config: JSON.stringify(haConfig),
+    ...(Object.keys(mergedEnvironmentMap).length > 0 ? { ha_environments: mergedEnvironmentMap } : {}),
   }
 }
 
@@ -270,7 +255,7 @@ export const handler = async (event) => {
     const domain = getEnv('AUTH0_DOMAIN')
     const managementToken = await getManagementToken(domain)
     const metadata = await getClientMetadata(domain, managementToken)
-    const haConfig = parseHaConfig(metadata.ha_config)
+    const haConfig = metadata.ha_config || {}
 
     const nextConfig = {
       ...haConfig,
@@ -282,7 +267,7 @@ export const handler = async (event) => {
 
     await updateClientMetadata(domain, managementToken, {
       ...sanitizeClientMetadata(metadata),
-      ha_config: JSON.stringify(nextConfig),
+      ha_config: nextConfig,
     })
 
     return {

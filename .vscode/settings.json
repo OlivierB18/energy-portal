@@ -1,0 +1,22 @@
+{
+  "git.autoRepositoryDetection": "openEditors",
+  "files.watcherExclude": {
+    "**/.git/**": true,
+    "**/node_modules/**": true,
+    "**/dist/**": true,
+    "**/.netlify/**": true,
+    "**/energy-portal.worktrees/**": true
+  },
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/dist": true,
+    "**/.netlify": true,
+    "**/energy-portal.worktrees": true
+  },
+  "files.exclude": {
+    "**/.netlify": true,
+    "**/dist": true
+  },
+  "typescript.tsserver.maxTsServerMemory": 4096,
+  "typescript.disableAutomaticTypeAcquisition": true
+}

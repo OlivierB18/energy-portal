@@ -532,95 +532,6 @@ const normalizeHaMetricsSnapshot = (input: unknown): HaMetricsSnapshot | null =>
   }
 }
 
-interface DetectedEnergyEntities {
-  electricityTotalEntityIds: string[]
-  electricityProductionTotalEntityIds: string[]
-  gasTotalEntityId: string | null
-  powerConsumptionEntityId: string | null
-  powerProductionEntityId: string | null
-}
-
-const PRODUCTION_KEYWORDS = [
-  'production', 'solar', 'pv', 'export', 'injection',
-  'teruglever', 'opwek', 'opgewekt', 'yield', 'returned', 'teruggeleverd',
-]
-
-function detectEnergyEntities(entities: HaEntity[]): DetectedEnergyEntities {
-  const sensors = entities.filter((e) => e.domain === 'sensor')
-
-  const hasProductionKeyword = (e: HaEntity) => {
-    const id = e.entity_id.toLowerCase()
-    const name = (e.friendly_name ?? '').toLowerCase()
-    return PRODUCTION_KEYWORDS.some((kw) => id.includes(kw) || name.includes(kw))
-  }
-
-  const hasGasKeyword = (e: HaEntity) => {
-    const id = e.entity_id.toLowerCase()
-    const name = (e.friendly_name ?? '').toLowerCase()
-    return id.includes('gas') || name.includes('gas')
-  }
-
-  const isTotalClass = (e: HaEntity) =>
-    e.state_class === 'total_increasing' || e.state_class === 'total'
-
-  const isEnergyUnit = (e: HaEntity) => {
-    const unit = (e.unit_of_measurement ?? '').toLowerCase()
-    return unit === 'kwh' || unit === 'wh' || unit === 'mwh'
-  }
-
-  const isGasUnit = (e: HaEntity) => {
-    const unit = (e.unit_of_measurement ?? '').toLowerCase()
-    return unit === 'm³' || unit === 'm3' || unit === 'ft³'
-  }
-
-  const isPowerUnit = (e: HaEntity) => {
-    const unit = (e.unit_of_measurement ?? '').toLowerCase()
-    return unit === 'w' || unit === 'kw' || unit === 'va' || unit === 'kva'
-  }
-
-  // Electricity consumption totals (for Electricity usage bar chart)
-  const electricityTotalEntityIds = sensors
-    .filter((e) => {
-      const isEnergy = e.device_class === 'energy' || isEnergyUnit(e)
-      return isEnergy && isTotalClass(e) && !hasProductionKeyword(e) && !hasGasKeyword(e)
-    })
-    .map((e) => e.entity_id)
-
-  // Electricity production totals
-  const electricityProductionTotalEntityIds = sensors
-    .filter((e) => {
-      const isEnergy = e.device_class === 'energy' || isEnergyUnit(e)
-      return isEnergy && isTotalClass(e) && hasProductionKeyword(e)
-    })
-    .map((e) => e.entity_id)
-
-  // Gas total meter
-  const gasEntity = sensors.find((e) => {
-    const isGas = e.device_class === 'gas' || isGasUnit(e)
-    return isGas && isTotalClass(e)
-  })
-
-  // Power consumption entity (for Power sources chart — instantaneous, not total)
-  const powerConsumptionEntity = sensors.find((e) => {
-    const isPower = e.device_class === 'power' || isPowerUnit(e)
-    return isPower && !isTotalClass(e) && !hasProductionKeyword(e)
-  })
-
-  // Power production entity (for Power sources chart)
-  const powerProductionEntity = sensors.find((e) => {
-    const isPower = e.device_class === 'power' || isPowerUnit(e)
-    return isPower && !isTotalClass(e) && hasProductionKeyword(e)
-  })
-
-  return {
-    electricityTotalEntityIds,
-    electricityProductionTotalEntityIds,
-    gasTotalEntityId: gasEntity?.entity_id ?? null,
-    powerConsumptionEntityId: powerConsumptionEntity?.entity_id ?? null,
-    powerProductionEntityId: powerProductionEntity?.entity_id ?? null,
-  }
-}
-
 export default function Dashboard({
   isAdmin,
   selectedEnvironmentId,
@@ -1424,9 +1335,24 @@ export default function Dashboard({
     const serverMetrics = haMetricsSnapshot
     
     // Helper function to parse numeric values from entity state
-    const parseValue = (state: string): number => {
-      const parsed = parseNumericValue(state)
-      return Number.isFinite(parsed) ? parsed : 0
+    const parseEnergyEntityValue = (entity?: HaEntity | null): number => {
+      if (!entity) {
+        return 0
+      }
+
+      const parsed = parseNumericValue(entity.state)
+      const normalized = convertEnergyToKwh(parsed, entity.unit_of_measurement)
+      return Number.isFinite(normalized) ? normalized : 0
+    }
+
+    const parseGasEntityValue = (entity?: HaEntity | null): number => {
+      if (!entity) {
+        return 0
+      }
+
+      const parsed = parseNumericValue(entity.state)
+      const normalized = convertGasToM3(parsed, entity.unit_of_measurement)
+      return Number.isFinite(normalized) ? normalized : 0
     }
 
     const environmentKey = selectedEnvironment || 'default'
@@ -1756,7 +1682,7 @@ export default function Dashboard({
     if (serverMetrics?.currentPowerKw !== null && serverMetrics?.currentPowerKw !== undefined) {
       currentPower = serverMetrics.currentPowerKw
     } else if (!Number.isFinite(currentPower) && totalEnergyEntity) {
-      currentPower = derivePowerFromEnergyMeter(parseValue(totalEnergyEntity.state))
+      currentPower = derivePowerFromEnergyMeter(parseEnergyEntityValue(totalEnergyEntity))
     }
 
     if (serverMetrics?.currentProductionKw !== null && serverMetrics?.currentProductionKw !== undefined) {
@@ -1839,20 +1765,20 @@ export default function Dashboard({
       dailyUsage = hasServerDailyMetric
         ? Number(serverMetrics?.dailyElectricityKwh)
         : dailyEntity
-          ? parseValue(dailyEntity.state)
+          ? parseEnergyEntityValue(dailyEntity)
           : sampledDailyUsage
 
       monthlyUsage = hasServerMonthlyMetric
         ? Number(serverMetrics?.monthlyElectricityKwh)
         : monthlyEntity
-          ? parseValue(monthlyEntity.state)
+          ? parseEnergyEntityValue(monthlyEntity)
           : sampledMonthlyUsage
 
       // eslint-disable-next-line no-console
       console.log('[Energy] Using server metrics as source of truth - Daily:', dailyUsage, 'kWh, Monthly:', monthlyUsage, 'kWh')
     } else if (dailyEntity || monthlyEntity) {
-      dailyUsage = dailyEntity ? parseValue(dailyEntity.state) : sampledDailyUsage
-      monthlyUsage = monthlyEntity ? parseValue(monthlyEntity.state) : sampledMonthlyUsage
+      dailyUsage = dailyEntity ? parseEnergyEntityValue(dailyEntity) : sampledDailyUsage
+      monthlyUsage = monthlyEntity ? parseEnergyEntityValue(monthlyEntity) : sampledMonthlyUsage
 
       // eslint-disable-next-line no-console
       console.log('[Energy] Using direct HA sensors - Daily:', dailyUsage, 'kWh, Monthly:', monthlyUsage, 'kWh')
@@ -1877,17 +1803,17 @@ export default function Dashboard({
       dailyProduction = hasServerDailyProductionMetric
         ? Number(serverMetrics?.dailyProductionKwh)
         : dailyProductionEntity
-          ? parseValue(dailyProductionEntity.state)
+          ? parseEnergyEntityValue(dailyProductionEntity)
           : sampledDailyProduction
 
       monthlyProduction = hasServerMonthlyProductionMetric
         ? Number(serverMetrics?.monthlyProductionKwh)
         : monthlyProductionEntity
-          ? parseValue(monthlyProductionEntity.state)
+          ? parseEnergyEntityValue(monthlyProductionEntity)
           : sampledMonthlyProduction
     } else if (dailyProductionEntity || monthlyProductionEntity) {
-      dailyProduction = dailyProductionEntity ? parseValue(dailyProductionEntity.state) : sampledDailyProduction
-      monthlyProduction = monthlyProductionEntity ? parseValue(monthlyProductionEntity.state) : sampledMonthlyProduction
+      dailyProduction = dailyProductionEntity ? parseEnergyEntityValue(dailyProductionEntity) : sampledDailyProduction
+      monthlyProduction = monthlyProductionEntity ? parseEnergyEntityValue(monthlyProductionEntity) : sampledMonthlyProduction
     } else if (sampledDailyProduction > 0 || sampledMonthlyProduction > 0) {
       dailyProduction = sampledDailyProduction
       monthlyProduction = sampledMonthlyProduction
@@ -1903,17 +1829,17 @@ export default function Dashboard({
     let gasMonthlyUsage = 0
 
     if (gasDailyEntity || gasMonthlyEntity) {
-      gasDailyUsage = gasDailyEntity ? parseValue(gasDailyEntity.state) : 0
+      gasDailyUsage = gasDailyEntity ? parseGasEntityValue(gasDailyEntity) : 0
       
       if (gasMonthlyEntity) {
-        gasMonthlyUsage = parseValue(gasMonthlyEntity.state)
+        gasMonthlyUsage = parseGasEntityValue(gasMonthlyEntity)
       } else if (gasDailyEntity) {
         // Accumulate when no monthly sensor
         const trackedGas = trackGasFromMeter(0)
         gasMonthlyUsage = trackedGas.monthly + gasDailyUsage
       }
     } else if (gasMeterEntity) {
-      const trackedGas = trackGasFromMeter(parseValue(gasMeterEntity.state))
+      const trackedGas = trackGasFromMeter(parseGasEntityValue(gasMeterEntity))
       gasDailyUsage = trackedGas.daily
       gasMonthlyUsage = trackedGas.monthly
     }
@@ -1926,7 +1852,7 @@ export default function Dashboard({
     }
 
     const gasChartValue = gasFlowEntity
-      ? parseValue(gasFlowEntity.state)
+      ? parseGasEntityValue(gasFlowEntity)
       : gasDailyUsage
 
     // Calculate energy costs using pricing config.
@@ -2484,24 +2410,6 @@ export default function Dashboard({
     }
   }, [selectedEnvironment, isAuthenticated, haEntities.length, environmentInstalledOnMs, getAuthToken])
 
-  // Clear stale bucket/statistic-ID caches when the selected environment changes
-  const prevSelectedEnvironmentRef = useRef<string>('')
-  useEffect(() => {
-    const prev = prevSelectedEnvironmentRef.current
-    if (prev && prev !== selectedEnvironment) {
-      // Clear only keys belonging to the previous environment
-      const keysToRemove = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)).filter(
-        (key): key is string =>
-          key !== null && (
-            key.startsWith(`ha_electricity_buckets_v3_${prev}_`) ||
-            key === `ha_statistic_ids_v1_${prev}`
-          ),
-      )
-      keysToRemove.forEach((k) => localStorage.removeItem(k))
-    }
-    prevSelectedEnvironmentRef.current = selectedEnvironment
-  }, [selectedEnvironment])
-
   // Fetch electricity usage statistics (kWh per hour/day) — matches HA "Electricity usage" bar chart
   useEffect(() => {
     if (!selectedEnvironment || !isAuthenticated) {
@@ -2515,101 +2423,52 @@ export default function Dashboard({
       const now = Date.now()
       const clampedEnd = Math.min(bounds.endMs, now)
 
-      // For month range, clamp start to installed-on date (use the LATER of month-start and install date)
+      // For month range, expand start to installed-on date
       const startMs = timeRange === 'month'
-        ? Math.max(bounds.startMs, environmentInstalledOnMs ?? bounds.startMs)
+        ? Math.min(bounds.startMs, environmentInstalledOnMs ?? bounds.startMs)
         : bounds.startMs
-
-      if (environmentInstalledOnMs && startMs === environmentInstalledOnMs) {
-        console.log('[Usage Stats] startMs:', new Date(startMs).toISOString(), '(from installedOn)')
-      } else {
-        console.log('[Usage Stats] startMs:', new Date(startMs).toISOString())
-      }
 
       if (clampedEnd <= startMs) return
 
       // statistics period: hour for today/week, day for month
       const period = timeRange === 'month' ? 'day' : 'hour'
 
-      // --- Step C: load persistent incremental cache ---
-      const bucketCacheKey = `ha_electricity_buckets_v3_${selectedEnvironment}_${period}`
-      let cachedBuckets: Array<{ timestamp: number; kwh: number }> = []
+      // Cache key (15-min bucket precision)
+      const cacheKey = `ha_usage_v2_${selectedEnvironment}_${period}_${Math.floor(startMs / (15 * 60_000))}_${Math.floor(clampedEnd / (15 * 60_000))}`
+      const cacheTtlMs = clampedEnd < now - 60 * 60_000 ? 12 * 3600_000 : 5 * 60_000
+
       try {
-        const raw = localStorage.getItem(bucketCacheKey)
-        if (raw) {
-          const parsed = JSON.parse(raw)
+        const cached = localStorage.getItem(cacheKey)
+        if (cached) {
+          const parsed = JSON.parse(cached)
+          if (parsed?.fetchTime && (now - parsed.fetchTime) < cacheTtlMs && Array.isArray(parsed.buckets)) {
+            setElectricityUsageBuckets(parsed.buckets)
+            return
+          }
+          // Stale — show immediately while refreshing
           if (Array.isArray(parsed?.buckets)) {
-            cachedBuckets = parsed.buckets
-            // Show cached data immediately so chart is never blank on reload
-            if (!isDisposed) setElectricityUsageBuckets(cachedBuckets)
+            setElectricityUsageBuckets(parsed.buckets)
           }
         }
       } catch { /* ignore */ }
 
-      // Determine incremental fetch range: from (lastCachedBucket - 2h) to now
-      let fetchStartMs = startMs
-      if (cachedBuckets.length > 0) {
-        const lastTs = cachedBuckets[cachedBuckets.length - 1].timestamp
-        // Overlap by 2 hours to handle late-arriving data and bucket boundary alignment
-        fetchStartMs = Math.max(startMs, lastTs - 2 * 3600_000)
-      }
+      // Determine which entities to fetch (tarif 1 + tarif 2 cumulative meters)
+      const sources = haMetricsSnapshotRef.current?.sources
+      const entityIds: string[] = Array.from(new Set([
+        ...(sources?.electricityTotalEntityIds ?? []),
+        sources?.electricityTotalEntityId,
+      ].filter((id): id is string => typeof id === 'string' && id.length > 0)))
 
-      // --- Step A: get confirmed statistic IDs from HA ---
-      const statisticIdCacheKey = `ha_statistic_ids_v1_${selectedEnvironment}`
-      const statisticIdCacheTtlMs = 3600_000 // 1 hour
-      let entityIds: string[] = []
-
-      try {
-        const cachedIds = localStorage.getItem(statisticIdCacheKey)
-        if (cachedIds) {
-          const parsed = JSON.parse(cachedIds)
-          if (
-            parsed?.fetchTime &&
-            now - parsed.fetchTime < statisticIdCacheTtlMs &&
-            Array.isArray(parsed.ids) &&
-            parsed.ids.length > 0
-          ) {
-            entityIds = parsed.ids
-          }
-        }
-      } catch { /* ignore */ }
-
+      // If no configured entities, search haEntities for energy consumption meters
       if (entityIds.length === 0) {
-        try {
-          const token = await getAuthToken()
-          if (isDisposed) return
-          const idsResponse = await fetch(
-            `/.netlify/functions/get-ha-statistic-ids?environmentId=${encodeURIComponent(selectedEnvironment)}`,
-            { headers: { Authorization: `Bearer ${token}` } },
-          )
-          if (!isDisposed && idsResponse.ok) {
-            const idsResult = await idsResponse.json()
-            if (Array.isArray(idsResult?.statistic_ids) && idsResult.statistic_ids.length > 0) {
-              entityIds = idsResult.statistic_ids
-              try {
-                localStorage.setItem(statisticIdCacheKey, JSON.stringify({ fetchTime: Date.now(), ids: entityIds }))
-              } catch { /* ignore quota errors */ }
-            }
-          }
-        } catch (err) {
-          console.warn('[Usage Stats] get-ha-statistic-ids failed, falling back:', err)
-        }
-      }
-
-      // --- Step B: fall back to detectEnergyEntities if HA returned no IDs ---
-      if (entityIds.length === 0) {
-        const sources = haMetricsSnapshotRef.current?.sources
-        const configuredIds: string[] = Array.from(new Set([
-          ...(sources?.electricityTotalEntityIds ?? []),
-          sources?.electricityTotalEntityId,
-        ].filter((id): id is string => typeof id === 'string' && id.length > 0)))
-
-        if (configuredIds.length > 0) {
-          entityIds = configuredIds
-        } else {
-          const detected = detectEnergyEntities(haEntitiesRef.current)
-          entityIds = detected.electricityTotalEntityIds
-        }
+        const currentEntities = haEntitiesRef.current
+        const candidates = currentEntities.filter((e) => {
+          const id = e.entity_id.toLowerCase()
+          return id.startsWith('sensor.') &&
+            (id.includes('energy_consumption') || id.includes('energy_meter') || id.includes('kwh')) &&
+            !id.includes('gas') && !id.includes('price') && !id.includes('cost')
+        }).slice(0, 4)
+        entityIds.push(...candidates.map((e) => e.entity_id))
       }
 
       if (entityIds.length === 0) {
@@ -2617,16 +2476,15 @@ export default function Dashboard({
         return
       }
 
-      console.log('[Usage Stats] Using statistic IDs from HA:', entityIds.join(', '))
-
       setIsLoadingUsage(true)
 
       try {
         const token = await getAuthToken()
         if (isDisposed) return
 
-        const url = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(new Date(fetchStartMs).toISOString())}&endTime=${encodeURIComponent(new Date(clampedEnd).toISOString())}&entityIds=${encodeURIComponent(entityIds.join(','))}&mode=statistics&period=${period}`
+        const url = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(new Date(startMs).toISOString())}&endTime=${encodeURIComponent(new Date(clampedEnd).toISOString())}&entityIds=${encodeURIComponent(entityIds.join(','))}&mode=statistics&period=${period}`
 
+        console.log('[Usage Stats] Fetching', entityIds.join(', '), 'period:', period)
         const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
         if (!response.ok || isDisposed) {
           if (!isDisposed) setIsLoadingUsage(false)
@@ -2639,44 +2497,29 @@ export default function Dashboard({
         const historyData: Array<{ entity_id: string; history: Array<{ timestamp: number; change: number; value: number }> }> =
           Array.isArray(result?.entities) ? result.entities : []
 
-        // Build a merged per-bucket kWh map from the incremental fetch
-        const newBucketMap = new Map<number, number>()
+        console.log('[Usage Stats] Got data for', historyData.length, 'entities')
+
+        // Build a merged per-bucket kWh map: for each timestamp bucket, sum change across all tariff entities
+        const bucketMap = new Map<number, number>()
+
         for (const entry of historyData) {
           if (!entityIds.includes(entry.entity_id)) continue
           for (const row of entry.history) {
             const ts = row.timestamp
             const delta = row.change
             if (!Number.isFinite(ts) || !Number.isFinite(delta) || delta < 0) continue
-            newBucketMap.set(ts, (newBucketMap.get(ts) ?? 0) + delta)
+            bucketMap.set(ts, (bucketMap.get(ts) ?? 0) + delta)
           }
         }
 
-        const newBuckets = Array.from(newBucketMap.entries())
+        const buckets = Array.from(bucketMap.entries())
           .sort((a, b) => a[0] - b[0])
           .map(([timestamp, kwh]) => ({ timestamp, kwh: Number(kwh.toFixed(3)) }))
 
-        // Merge new buckets into cached buckets: overwrite same timestamps, append new ones
-        const mergedMap = new Map<number, number>(cachedBuckets.map((b) => [b.timestamp, b.kwh]))
-        for (const b of newBuckets) {
-          mergedMap.set(b.timestamp, b.kwh)
-        }
-        // Only keep buckets within the current range
-        const mergedBuckets = Array.from(mergedMap.entries())
-          .filter(([ts]) => ts >= startMs && ts <= clampedEnd)
-          .sort((a, b) => a[0] - b[0])
-          .map(([timestamp, kwh]) => ({ timestamp, kwh }))
-
-        if (!isDisposed) setElectricityUsageBuckets(mergedBuckets)
-
-        if (mergedBuckets.length > 0) {
-          const firstDate = new Date(mergedBuckets[0].timestamp).toISOString().slice(0, 10)
-          const lastDate = new Date(mergedBuckets[mergedBuckets.length - 1].timestamp).toISOString().slice(0, 10)
-          console.log(`[Usage Stats] Fetched ${mergedBuckets.length} buckets, range: ${firstDate} → ${lastDate}`)
-        }
+        setElectricityUsageBuckets(buckets)
 
         try {
-          localStorage.setItem(bucketCacheKey, JSON.stringify({ buckets: mergedBuckets }))
-          console.log(`[Usage Stats] Cached ${mergedBuckets.length} buckets to localStorage`)
+          localStorage.setItem(cacheKey, JSON.stringify({ fetchTime: Date.now(), buckets }))
         } catch { /* ignore quota errors */ }
       } catch (err) {
         console.error('[Usage Stats] Error:', err)
@@ -2810,16 +2653,7 @@ export default function Dashboard({
           ? currentHaEntities.find((entity) => entity.entity_id === preferredProductionEntityId)
           : null
 
-        // Auto-detect entities using HA's own classification as reliable fallback
-        const detectedEntities = detectEnergyEntities(currentHaEntities)
-        const detectedPowerEntity = detectedEntities.powerConsumptionEntityId
-          ? currentHaEntities.find((e) => e.entity_id === detectedEntities.powerConsumptionEntityId)
-          : undefined
-        const detectedProductionEntity = detectedEntities.powerProductionEntityId
-          ? currentHaEntities.find((e) => e.entity_id === detectedEntities.powerProductionEntityId)
-          : undefined
-
-        const powerEntity = preferredPowerEntity || detectedPowerEntity || currentHaEntities.find(
+        const powerEntity = preferredPowerEntity || currentHaEntities.find(
             (e) => {
               const id = e.entity_id.toLowerCase()
               // Prioritize electricity meter, exclude binary sensors
@@ -2840,7 +2674,7 @@ export default function Dashboard({
             }
           )
 
-        const productionEntity = preferredProductionEntity || detectedProductionEntity || currentHaEntities.find(
+        const productionEntity = preferredProductionEntity || currentHaEntities.find(
           (e) => {
             const id = e.entity_id.toLowerCase()
             return !id.startsWith('binary_sensor') && id.startsWith('sensor.') && (
@@ -3746,15 +3580,6 @@ export default function Dashboard({
     )
   }, [gasChartData])
 
-  const electricityUsageTotal = useMemo(() => {
-    return parseFloat(
-      electricityUsageBuckets
-        .filter((b) => b.timestamp >= electricityRange.startMs && b.timestamp <= electricityRange.endMs)
-        .reduce((sum, b) => sum + b.kwh, 0)
-        .toFixed(2),
-    )
-  }, [electricityUsageBuckets, electricityRange.startMs, electricityRange.endMs])
-
   // Gas card values: use local meter readings to compute daily/monthly totals
   const gasTodayCardValue = useMemo(() => {
     if (haMetricsSnapshot?.dailyGasM3 !== null && haMetricsSnapshot?.dailyGasM3 !== undefined) {
@@ -3821,6 +3646,29 @@ export default function Dashboard({
       return Number.isFinite(normalized) ? normalized : null
     }
 
+    const isCumulativeSourceEntity = (entityId: string | null) => {
+      if (!entityId) {
+        return false
+      }
+
+      const entity = entitiesForCheck.find(
+        (candidate) => candidate.entity_id.toLowerCase() === entityId.toLowerCase(),
+      )
+      if (!entity) {
+        return false
+      }
+
+      const stateClass = String(entity.state_class || '').toLowerCase()
+      if (stateClass === 'total' || stateClass === 'total_increasing') {
+        return true
+      }
+
+      const searchable = `${entity.entity_id} ${entity.friendly_name || ''}`.toLowerCase()
+      const hasTotalSemantics = searchable.includes('total') || searchable.includes('meter')
+      const hasPeriodSemantics = searchable.includes('today') || searchable.includes('daily') || searchable.includes('month') || searchable.includes('monthly')
+      return hasTotalSemantics && !hasPeriodSemantics
+    }
+
     const addDriftIssue = (
       label: string,
       displayed: number,
@@ -3854,6 +3702,11 @@ export default function Dashboard({
       tolerance: number,
     ) => {
       if (metricValue === null) {
+        return
+      }
+
+      // Day/month metrics are deltas; a cumulative source cannot be compared directly.
+      if (isCumulativeSourceEntity(sourceEntityId)) {
         return
       }
 
@@ -3907,20 +3760,10 @@ export default function Dashboard({
     const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
     if (timeRange === 'today' && selectedStartDate === todayKey && selectedEndDate === todayKey) {
       addDriftIssue('Gas chart day total', gasSelectedPeriodTotal, haMetricsSnapshot.dailyGasM3, 'm3', 0.05)
-      if (electricityUsageBuckets.length > 0 && electricityUsageTotal > 0) {
-        addDriftIssue('Electricity usage chart day total', electricityUsageTotal, haMetricsSnapshot.dailyElectricityKwh, 'kWh', 0.5)
-      }
-    }
-    if (timeRange === 'month') {
-      if (electricityUsageBuckets.length > 0 && electricityUsageTotal > 0) {
-        addDriftIssue('Electricity usage chart month total', electricityUsageTotal, haMetricsSnapshot.monthlyElectricityKwh, 'kWh', 1.0)
-      }
     }
 
     return issues
   }, [
-    electricityUsageBuckets,
-    electricityUsageTotal,
     gasMonthCardValue,
     gasSelectedPeriodTotal,
     gasTodayCardValue,
@@ -4288,26 +4131,19 @@ export default function Dashboard({
 
           {/* Electricity Usage Chart (kWh per hour/day from statistics) */}
           <div className="glass-panel rounded-3xl shadow-2xl p-4 sm:p-6 md:p-8">
-            <div className="mb-6 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-              <h2 className="text-2xl font-heavy text-dark-1 flex items-center gap-2">
-                <Clock className="w-6 h-6 text-brand-2" />
-                Electricity usage
-                {isLoadingUsage && (
-                  <span className="ml-3 inline-flex items-center gap-1.5 text-sm font-normal text-brand-2 opacity-75">
-                    <svg className="animate-spin w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
-                    </svg>
-                    Laden…
-                  </span>
-                )}
-              </h2>
-              {!isLoadingUsage && electricityUsageTotal > 0 && (
-                <span className="inline-flex items-center rounded-full bg-brand-2/15 px-3 py-1 text-sm font-semibold text-brand-2">
-                  +{electricityUsageTotal.toFixed(2)} kWh
+            <h2 className="text-2xl font-heavy text-dark-1 mb-6 flex items-center gap-2">
+              <Clock className="w-6 h-6 text-brand-2" />
+              Electricity usage
+              {isLoadingUsage && (
+                <span className="ml-3 inline-flex items-center gap-1.5 text-sm font-normal text-brand-2 opacity-75">
+                  <svg className="animate-spin w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+                  </svg>
+                  Laden…
                 </span>
               )}
-            </div>
+            </h2>
             <EnergyChart
               data={electricityUsageChartData}
               timeRange={timeRange}
@@ -4320,16 +4156,11 @@ export default function Dashboard({
 
           {/* Gas Chart */}
           <div className="glass-panel rounded-3xl shadow-2xl p-4 sm:p-6 md:p-8">
-            <div className="mb-6 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="mb-6 flex flex-col gap-4">
               <h2 className="text-2xl font-heavy text-dark-1 flex items-center gap-2">
                 <Flame className="w-6 h-6 text-brand-2" />
                 Gas consumption
               </h2>
-              {gasSelectedPeriodTotal > 0 && (
-                <span className="inline-flex items-center rounded-full bg-orange-500/15 px-3 py-1 text-sm font-semibold text-orange-400">
-                  {gasSelectedPeriodTotal.toFixed(2)} m³
-                </span>
-              )}
             </div>
             <EnergyChart
               data={gasChartData}

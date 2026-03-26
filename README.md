@@ -102,6 +102,59 @@ Rules of thumb:
 - Merge everything through Pull Requests.
 - Never commit `.env` files.
 
+## Step-by-Step Daily Workflow (Netjes + Fast)
+
+Use this sequence every time to avoid mixed changes and VS Code slowdown.
+
+1. Start from a clean repository:
+```bash
+npm run git:sync
+git status
+```
+
+2. Create a dedicated Copilot task worktree:
+```bash
+# Example task name: fix-chart-loading
+npm run git:wt:start -- -Name fix-chart-loading
+```
+
+3. Open the new task folder in a new VS Code window:
+```bash
+code -n ../energy-portal.worktrees/fix-chart-loading
+```
+
+4. Do implementation only in that new window.
+	- Keep commits small.
+	- Commit and push to the task branch.
+
+5. Create a Pull Request to `master`.
+	- Use VS Code GitHub Pull Requests extension or GitHub web UI.
+
+6. After merge, clean local task workspace:
+```bash
+npm run git:wt:clean -- -Name fix-chart-loading -DeleteLocalBranch
+npm run git:sync
+```
+
+## Agent Collaboration Flow
+
+1. You create one task worktree.
+2. You ask Copilot in that worktree to implement the task.
+3. Copilot edits only task files in that branch.
+4. You review, test, commit, push.
+5. You create PR and handle review comments in the same branch.
+6. After merge, remove worktree and start the next task fresh.
+
+## Fix VS Code Freezes (10s wait)
+
+If VS Code still hangs:
+
+1. Open only one active task folder at a time.
+2. Stop extra terminals running watchers/servers.
+3. Run `Developer: Reload Window`.
+4. Keep the main repo and worktrees out of the same open multi-root workspace.
+5. Prefer storing active repos outside OneDrive for best file watcher performance.
+
 ## Project Structure
 
 ```
