@@ -627,6 +627,7 @@ function detectEnergyEntities(entities: HaEntity[]): DetectedEnergyEntities {
 
 // Module-level throttle map for snapshot saves — one per environment, max once per 5 minutes
 const snapshotSaveLastSentMs = new Map<string, number>()
+const SNAPSHOT_SAVE_THROTTLE_MS = 5 * 60 * 1000 // 5 minutes
 
 export default function Dashboard({
   isAdmin,
@@ -1349,9 +1350,8 @@ export default function Dashboard({
         // Persist latest known values to Netlify Blobs for offline fallback
         // Fire-and-forget: do NOT await, do NOT block rendering, do NOT show errors
         if (metrics && selectedEnvironment) {
-          const SNAPSHOT_THROTTLE_MS = 5 * 60 * 1000 // 5 minutes
           const lastSent = snapshotSaveLastSentMs.get(selectedEnvironment) ?? 0
-          if (Date.now() - lastSent > SNAPSHOT_THROTTLE_MS) {
+          if (Date.now() - lastSent > SNAPSHOT_SAVE_THROTTLE_MS) {
             snapshotSaveLastSentMs.set(selectedEnvironment, Date.now())
             getAuthToken().then((authToken: string) => {
               return fetch('/.netlify/functions/save-snapshot', {
