@@ -2567,6 +2567,7 @@ export default function Dashboard({
         (key): key is string =>
           key !== null && (
             key.startsWith(`ha_electricity_buckets_v3_${prev}_`) ||
+            key.startsWith(`ha_electricity_buckets_v4_${prev}_`) ||
             key === `ha_statistic_ids_v1_${prev}`
           ),
       )
@@ -2605,7 +2606,7 @@ export default function Dashboard({
       const period = timeRange === 'month' ? 'day' : 'hour'
 
       // --- Step C: load persistent incremental cache ---
-      const bucketCacheKey = `ha_electricity_buckets_v3_${selectedEnvironment}_${period}`
+      const bucketCacheKey = `ha_electricity_buckets_v4_${selectedEnvironment}_${period}`
       let cachedBuckets: Array<{ timestamp: number; kwh: number }> = []
       try {
         const raw = localStorage.getItem(bucketCacheKey)
@@ -2730,8 +2731,52 @@ export default function Dashboard({
         const result = await response.json()
         if (isDisposed) return
 
-        const historyData: Array<{ entity_id: string; is_production: boolean; history: Array<{ timestamp: number; change: number; value: number }> }> =
+        let historyData: Array<{ entity_id: string; is_production: boolean; history: Array<{ timestamp: number; change: number; value: number }> }> =
           Array.isArray(result?.entities) ? result.entities : []
+
+        if (historyData.length === 0 && storedConsumptionIds.length > 0) {
+          console.warn('[Usage Stats] Stored IDs returned no rows, retrying with recorder statistic IDs')
+          try {
+            const idsResponse = await fetch(
+              `/.netlify/functions/get-ha-statistic-ids?environmentId=${encodeURIComponent(selectedEnvironment)}`,
+              { headers: { Authorization: `Bearer ${token}` } },
+            )
+
+            if (idsResponse.ok && !isDisposed) {
+              const idsResult = await idsResponse.json()
+              const fallbackIds = Array.isArray(idsResult?.statistic_ids)
+                ? idsResult.statistic_ids.filter((id: unknown): id is string => typeof id === 'string' && id.length > 0)
+                : []
+
+              if (fallbackIds.length > 0) {
+                entityIds = fallbackIds
+
+                const fallbackSet = new Set(fallbackIds.map((id: string) => id.toLowerCase()))
+                productionEntityIdsForFetch = storedProductionIds.filter((id) => fallbackSet.has(id.toLowerCase()))
+
+                if (productionEntityIdsForFetch.length === 0) {
+                  const productionKeywords = ['production', 'export', 'injection', 'teruglever', 'opwek', 'solar', 'pv', 'yield']
+                  productionEntityIdsForFetch = fallbackIds.filter((id: string) =>
+                    productionKeywords.some((keyword) => id.toLowerCase().includes(keyword)),
+                  )
+                }
+
+                let retryUrl = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(new Date(fetchStartMs).toISOString())}&endTime=${encodeURIComponent(new Date(clampedEnd).toISOString())}&entityIds=${encodeURIComponent(entityIds.join(','))}&mode=statistics&period=${period}`
+                if (productionEntityIdsForFetch.length > 0) {
+                  retryUrl += `&productionEntityIds=${encodeURIComponent(productionEntityIdsForFetch.join(','))}`
+                }
+
+                const retryResponse = await fetch(retryUrl, { headers: { Authorization: `Bearer ${token}` } })
+                if (retryResponse.ok && !isDisposed) {
+                  const retryResult = await retryResponse.json()
+                  historyData = Array.isArray(retryResult?.entities) ? retryResult.entities : []
+                }
+              }
+            }
+          } catch (retryError) {
+            console.warn('[Usage Stats] Retry via recorder statistic IDs failed:', retryError)
+          }
+        }
 
         // Build separate consumption and production bucket maps, then compute net
         const consumptionMap = new Map<number, number>()

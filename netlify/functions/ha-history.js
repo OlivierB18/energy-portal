@@ -389,9 +389,31 @@ const formatStatisticsPayload = (statisticsData, entityIdsList, productionEntity
 
         return {
           timestamp,
-          value: Number.isFinite(parsedValue) ? parsedValue : 0,
-          change: Number.isFinite(changeValue) ? changeValue : 0,
+          value: Number.isFinite(parsedValue) ? parsedValue : null,
+          change: Number.isFinite(changeValue) ? changeValue : null,
           state: String(row?.state ?? row?.sum ?? row?.mean ?? ''),
+        }
+      })
+      .sort((a, b) => a.timestamp - b.timestamp)
+      .map((row, index, rows) => {
+        let derivedChange = row.change
+
+        // Some HA statistics payloads omit `change`; derive it from cumulative value deltas.
+        if (!Number.isFinite(derivedChange) && Number.isFinite(row.value) && index > 0) {
+          const previousRow = rows[index - 1]
+          if (Number.isFinite(previousRow?.value)) {
+            derivedChange = row.value - previousRow.value
+          }
+        }
+
+        if (!Number.isFinite(derivedChange)) {
+          derivedChange = 0
+        }
+
+        return {
+          ...row,
+          value: Number.isFinite(row.value) ? row.value : 0,
+          change: Math.max(0, derivedChange),
         }
       })
       .filter(Boolean)

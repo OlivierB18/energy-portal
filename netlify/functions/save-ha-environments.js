@@ -774,7 +774,16 @@ export const handler = async (event) => {
         ? previousEnvConfig.visible_entity_ids
         : []
 
-      const shouldDetect = credentialsChanged || previousVisibleEntityIds.length === 0
+      const previousSources = previousEnvConfig?.sources || {}
+      const hasConsumptionSourceList = Array.isArray(previousSources.electricityConsumptionEntityIds)
+      const hasProductionSourceList = Array.isArray(previousSources.electricityProductionEntityIds)
+      const hasPowerSource = typeof previousSources.powerConsumptionEntityId === 'string' &&
+        previousSources.powerConsumptionEntityId.trim().length > 0
+      const hasGasSource = typeof previousSources.gasTotalEntityId === 'string' &&
+        previousSources.gasTotalEntityId.trim().length > 0
+      const hasNewSourceShape = hasConsumptionSourceList && hasProductionSourceList && hasPowerSource && hasGasSource
+
+      const shouldDetect = credentialsChanged || previousVisibleEntityIds.length === 0 || !hasNewSourceShape
       if (!shouldDetect) {
         continue
       }
