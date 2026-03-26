@@ -62,6 +62,8 @@ interface HaMetricSources {
   monthlyGasEntityId: string | null
   electricityTotalEntityId: string | null
   electricityTotalEntityIds: string[] | null
+  electricityConsumptionEntityIds: string[] | null
+  electricityProductionEntityIds: string[] | null
   electricityProductionTotalEntityId: string | null
   electricityProductionTotalEntityIds: string[] | null
   gasTotalEntityId: string | null
@@ -513,6 +515,8 @@ const normalizeHaMetricsSnapshot = (input: unknown): HaMetricsSnapshot | null =>
     monthlyGasEntityId: toStringOrNull(rawSources.monthlyGasEntityId),
     electricityTotalEntityId: toStringOrNull(rawSources.electricityTotalEntityId),
     electricityTotalEntityIds: toStringArrayOrNull(rawSources.electricityTotalEntityIds),
+    electricityConsumptionEntityIds: toStringArrayOrNull(rawSources.electricityConsumptionEntityIds),
+    electricityProductionEntityIds: toStringArrayOrNull(rawSources.electricityProductionEntityIds),
     electricityProductionTotalEntityId: toStringOrNull(rawSources.electricityProductionTotalEntityId),
     electricityProductionTotalEntityIds: toStringArrayOrNull(rawSources.electricityProductionTotalEntityIds),
     gasTotalEntityId: toStringOrNull(rawSources.gasTotalEntityId),
@@ -620,6 +624,10 @@ function detectEnergyEntities(entities: HaEntity[]): DetectedEnergyEntities {
     powerProductionEntityId: powerProductionEntity?.entity_id ?? null,
   }
 }
+
+// Module-level throttle map for snapshot saves — one per environment, max once per 5 minutes
+const snapshotSaveLastSentMs = new Map<string, number>()
+const SNAPSHOT_SAVE_THROTTLE_MS = 5 * 60 * 1000 // 5 minutes
 
 export default function Dashboard({
   isAdmin,
@@ -1212,6 +1220,43 @@ export default function Dashboard({
     }
   }, [haEntitiesCacheKey, selectedEnvironment])
 
+  // Load last known good values from Blobs — shown before live data arrives
+  useEffect(() => {
+    if (!selectedEnvironment || !isAuthenticated) {
+      return
+    }
+
+    let isCancelled = false
+
+    const loadSnapshot = async () => {
+      try {
+        const token = await getAuthToken()
+        if (isCancelled) return
+        const response = await fetch(
+          `/.netlify/functions/save-snapshot?environmentId=${encodeURIComponent(selectedEnvironment)}`,
+          { headers: { Authorization: `Bearer ${token}` } },
+        )
+        if (isCancelled || !response.ok) return
+        const result = await response.json()
+        const snapshot = result?.snapshot
+        if (!snapshot || typeof snapshot !== 'object') return
+
+        // Only populate from snapshot if we don't have live data yet
+        if (!haMetricsSnapshot) {
+          const snapMetrics = normalizeHaMetricsSnapshot(snapshot)
+          if (snapMetrics) {
+            setHaMetricsSnapshot(snapMetrics)
+          }
+        }
+      } catch {
+        // Silently ignore network errors — snapshot load is best-effort
+      }
+    }
+
+    void loadSnapshot()
+    return () => { isCancelled = true }
+  }, [selectedEnvironment, isAuthenticated, getAuthToken, haMetricsSnapshot])
+
   // Close settings dropdown when clicking outside
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -1301,6 +1346,34 @@ export default function Dashboard({
         storeLocalJson(haEntitiesCacheKey, { entities, metrics })
         setHaConnectionStatus('connected')
         setHaError(null)
+
+        // Persist latest known values to Netlify Blobs for offline fallback
+        // Fire-and-forget: do NOT await, do NOT block rendering, do NOT show errors
+        if (metrics && selectedEnvironment) {
+          const lastSent = snapshotSaveLastSentMs.get(selectedEnvironment) ?? 0
+          if (Date.now() - lastSent > SNAPSHOT_SAVE_THROTTLE_MS) {
+            snapshotSaveLastSentMs.set(selectedEnvironment, Date.now())
+            getAuthToken().then((authToken: string) => {
+              return fetch('/.netlify/functions/save-snapshot', {
+                method: 'POST',
+                headers: {
+                  Authorization: `Bearer ${authToken}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  environmentId: selectedEnvironment,
+                  snapshot: {
+                    dailyElectricityKwh: metrics.dailyElectricityKwh,
+                    monthlyElectricityKwh: metrics.monthlyElectricityKwh,
+                    dailyGasM3: metrics.dailyGasM3,
+                    monthlyGasM3: metrics.monthlyGasM3,
+                    savedAt: Date.now(),
+                  },
+                }),
+              })
+            }).catch(() => { /* ignore errors — offline fallback is best-effort */ })
+          }
+        }
         
         if (!silent) {
           setIsInitialLoading(false) // Only set false on successful initial load
@@ -2555,58 +2628,75 @@ export default function Dashboard({
       }
 
       // --- Step A: get confirmed statistic IDs from HA ---
-      const statisticIdCacheKey = `ha_statistic_ids_v1_${selectedEnvironment}`
-      const statisticIdCacheTtlMs = 3600_000 // 1 hour
+      // Priority 1: use electricityConsumptionEntityIds + electricityProductionEntityIds from sources
+      // (set by ha-entities.js enrichMetricsWithHistoryFallback from stored detection in Fix A)
+      const sources = haMetricsSnapshotRef.current?.sources
+      const storedConsumptionIds: string[] = Array.from(new Set([
+        ...(sources?.electricityConsumptionEntityIds ?? []),
+        ...(sources?.electricityTotalEntityIds ?? []),
+        sources?.electricityTotalEntityId,
+      ].filter((id): id is string => typeof id === 'string' && id.length > 0)))
+      const storedProductionIds: string[] = Array.from(new Set([
+        ...(sources?.electricityProductionEntityIds ?? []),
+        ...(sources?.electricityProductionTotalEntityIds ?? []),
+      ].filter((id): id is string => typeof id === 'string' && id.length > 0)))
+
+      // All entity IDs to fetch statistics for (consumption + production together)
       let entityIds: string[] = []
+      // Track which IDs are production so we can build the net map
+      let productionEntityIdsForFetch: string[] = []
 
-      try {
-        const cachedIds = localStorage.getItem(statisticIdCacheKey)
-        if (cachedIds) {
-          const parsed = JSON.parse(cachedIds)
-          if (
-            parsed?.fetchTime &&
-            now - parsed.fetchTime < statisticIdCacheTtlMs &&
-            Array.isArray(parsed.ids) &&
-            parsed.ids.length > 0
-          ) {
-            entityIds = parsed.ids
-          }
+      if (storedConsumptionIds.length > 0) {
+        // Priority 1: use stored detection results
+        entityIds = [...storedConsumptionIds, ...storedProductionIds]
+        productionEntityIdsForFetch = storedProductionIds
+        console.log('[Usage Stats] Using stored consumption IDs:', storedConsumptionIds.join(', '))
+        if (storedProductionIds.length > 0) {
+          console.log('[Usage Stats] Using stored production IDs:', storedProductionIds.join(', '))
         }
-      } catch { /* ignore */ }
+      } else {
+        // Priority 2: try get-ha-statistic-ids then fall back to detectEnergyEntities
+        const statisticIdCacheKey = `ha_statistic_ids_v1_${selectedEnvironment}`
+        const statisticIdCacheTtlMs = 3600_000 // 1 hour
 
-      if (entityIds.length === 0) {
         try {
-          const token = await getAuthToken()
-          if (isDisposed) return
-          const idsResponse = await fetch(
-            `/.netlify/functions/get-ha-statistic-ids?environmentId=${encodeURIComponent(selectedEnvironment)}`,
-            { headers: { Authorization: `Bearer ${token}` } },
-          )
-          if (!isDisposed && idsResponse.ok) {
-            const idsResult = await idsResponse.json()
-            if (Array.isArray(idsResult?.statistic_ids) && idsResult.statistic_ids.length > 0) {
-              entityIds = idsResult.statistic_ids
-              try {
-                localStorage.setItem(statisticIdCacheKey, JSON.stringify({ fetchTime: Date.now(), ids: entityIds }))
-              } catch { /* ignore quota errors */ }
+          const cachedIds = localStorage.getItem(statisticIdCacheKey)
+          if (cachedIds) {
+            const parsed = JSON.parse(cachedIds)
+            if (
+              parsed?.fetchTime &&
+              now - parsed.fetchTime < statisticIdCacheTtlMs &&
+              Array.isArray(parsed.ids) &&
+              parsed.ids.length > 0
+            ) {
+              entityIds = parsed.ids
             }
           }
-        } catch (err) {
-          console.warn('[Usage Stats] get-ha-statistic-ids failed, falling back:', err)
+        } catch { /* ignore */ }
+
+        if (entityIds.length === 0) {
+          try {
+            const token = await getAuthToken()
+            if (isDisposed) return
+            const idsResponse = await fetch(
+              `/.netlify/functions/get-ha-statistic-ids?environmentId=${encodeURIComponent(selectedEnvironment)}`,
+              { headers: { Authorization: `Bearer ${token}` } },
+            )
+            if (!isDisposed && idsResponse.ok) {
+              const idsResult = await idsResponse.json()
+              if (Array.isArray(idsResult?.statistic_ids) && idsResult.statistic_ids.length > 0) {
+                entityIds = idsResult.statistic_ids
+                try {
+                  localStorage.setItem(statisticIdCacheKey, JSON.stringify({ fetchTime: Date.now(), ids: entityIds }))
+                } catch { /* ignore quota errors */ }
+              }
+            }
+          } catch (err) {
+            console.warn('[Usage Stats] get-ha-statistic-ids failed, falling back:', err)
+          }
         }
-      }
 
-      // --- Step B: fall back to detectEnergyEntities if HA returned no IDs ---
-      if (entityIds.length === 0) {
-        const sources = haMetricsSnapshotRef.current?.sources
-        const configuredIds: string[] = Array.from(new Set([
-          ...(sources?.electricityTotalEntityIds ?? []),
-          sources?.electricityTotalEntityId,
-        ].filter((id): id is string => typeof id === 'string' && id.length > 0)))
-
-        if (configuredIds.length > 0) {
-          entityIds = configuredIds
-        } else {
+        if (entityIds.length === 0) {
           const detected = detectEnergyEntities(haEntitiesRef.current)
           entityIds = detected.electricityTotalEntityIds
         }
@@ -2625,7 +2715,11 @@ export default function Dashboard({
         const token = await getAuthToken()
         if (isDisposed) return
 
-        const url = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(new Date(fetchStartMs).toISOString())}&endTime=${encodeURIComponent(new Date(clampedEnd).toISOString())}&entityIds=${encodeURIComponent(entityIds.join(','))}&mode=statistics&period=${period}`
+        let url = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(new Date(fetchStartMs).toISOString())}&endTime=${encodeURIComponent(new Date(clampedEnd).toISOString())}&entityIds=${encodeURIComponent(entityIds.join(','))}&mode=statistics&period=${period}`
+
+        if (productionEntityIdsForFetch.length > 0) {
+          url += `&productionEntityIds=${encodeURIComponent(productionEntityIdsForFetch.join(','))}`
+        }
 
         const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
         if (!response.ok || isDisposed) {
@@ -2636,22 +2730,40 @@ export default function Dashboard({
         const result = await response.json()
         if (isDisposed) return
 
-        const historyData: Array<{ entity_id: string; history: Array<{ timestamp: number; change: number; value: number }> }> =
+        const historyData: Array<{ entity_id: string; is_production: boolean; history: Array<{ timestamp: number; change: number; value: number }> }> =
           Array.isArray(result?.entities) ? result.entities : []
 
-        // Build a merged per-bucket kWh map from the incremental fetch
-        const newBucketMap = new Map<number, number>()
+        // Build separate consumption and production bucket maps, then compute net
+        const consumptionMap = new Map<number, number>()
+        const productionMap = new Map<number, number>()
+
         for (const entry of historyData) {
           if (!entityIds.includes(entry.entity_id)) continue
           for (const row of entry.history) {
             const ts = row.timestamp
             const delta = row.change
             if (!Number.isFinite(ts) || !Number.isFinite(delta) || delta < 0) continue
-            newBucketMap.set(ts, (newBucketMap.get(ts) ?? 0) + delta)
+            if (entry.is_production) {
+              productionMap.set(ts, (productionMap.get(ts) ?? 0) + delta)
+            } else {
+              consumptionMap.set(ts, (consumptionMap.get(ts) ?? 0) + delta)
+            }
           }
         }
 
-        const newBuckets = Array.from(newBucketMap.entries())
+        // Net map: consumption - production (values can be negative = net return feed hour)
+        const netMap = new Map<number, number>()
+        for (const [ts, consVal] of consumptionMap) {
+          netMap.set(ts, consVal - (productionMap.get(ts) ?? 0))
+        }
+        // Also include any production-only buckets (if production > consumption for a bucket)
+        for (const [ts, prodVal] of productionMap) {
+          if (!netMap.has(ts)) {
+            netMap.set(ts, -(prodVal))
+          }
+        }
+
+        const newBuckets = Array.from(netMap.entries())
           .sort((a, b) => a[0] - b[0])
           .map(([timestamp, kwh]) => ({ timestamp, kwh: Number(kwh.toFixed(3)) }))
 
@@ -2697,6 +2809,7 @@ export default function Dashboard({
     getAuthToken,
     haEntities.length,
     haMetricsSnapshot?.sources?.electricityTotalEntityId,
+    haMetricsSnapshot?.sources?.electricityConsumptionEntityIds,
   ])
 
   // Fetch electricity history
@@ -3755,6 +3868,22 @@ export default function Dashboard({
     )
   }, [electricityUsageBuckets, electricityRange.startMs, electricityRange.endMs])
 
+  // Card total always equals sum of chart buckets — single source of truth
+  // When viewing today: use today chart total; when viewing month: use month chart total.
+  const electricityTodayCardValue = useMemo(() => {
+    if (timeRange === 'today' && electricityUsageTotal > 0) {
+      return electricityUsageTotal
+    }
+    return realTimeData.dailyUsage
+  }, [timeRange, electricityUsageTotal, realTimeData.dailyUsage])
+
+  const electricityMonthCardValue = useMemo(() => {
+    if (timeRange === 'month' && electricityUsageTotal > 0) {
+      return electricityUsageTotal
+    }
+    return realTimeData.monthlyUsage
+  }, [timeRange, electricityUsageTotal, realTimeData.monthlyUsage])
+
   // Gas card values: use local meter readings to compute daily/monthly totals
   const gasTodayCardValue = useMemo(() => {
     if (haMetricsSnapshot?.dailyGasM3 !== null && haMetricsSnapshot?.dailyGasM3 !== undefined) {
@@ -4154,14 +4283,14 @@ export default function Dashboard({
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
           <EnergyCard
             title="Electricity Today"
-            value={realTimeData.dailyUsage}
+            value={electricityTodayCardValue}
             unit="kWh"
             cost={realTimeData.electricityCostToday}
             icon="zap"
           />
           <EnergyCard
             title="Electricity This Month"
-            value={realTimeData.monthlyUsage}
+            value={electricityMonthCardValue}
             unit="kWh"
             cost={realTimeData.electricityCostMonth}
             icon="calendar"

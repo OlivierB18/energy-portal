@@ -367,8 +367,9 @@ const formatHistoryPayload = (historyData) => {
   })
 }
 
-const formatStatisticsPayload = (statisticsData, entityIdsList) => {
+const formatStatisticsPayload = (statisticsData, entityIdsList, productionEntityIds = []) => {
   const safeData = statisticsData && typeof statisticsData === 'object' ? statisticsData : {}
+  const productionSet = new Set(productionEntityIds.map((id) => String(id).toLowerCase()))
 
   return entityIdsList.map((entityId) => {
     const statsRows = Array.isArray(safeData[entityId]) ? safeData[entityId] : []
@@ -400,6 +401,7 @@ const formatStatisticsPayload = (statisticsData, entityIdsList) => {
     return {
       entity_id: entityId,
       history: mappedRows,
+      is_production: productionSet.has(entityId.toLowerCase()),
     }
   })
 }
@@ -425,6 +427,9 @@ export const handler = async (event) => {
     const entityIds = event.queryStringParameters?.entityIds
     const mode = String(event.queryStringParameters?.mode || 'history').toLowerCase()
     const statisticsPeriod = String(event.queryStringParameters?.period || 'hour').toLowerCase()
+    const productionEntityIds = event.queryStringParameters?.productionEntityIds
+      ? event.queryStringParameters.productionEntityIds.split(',').map((id) => id.trim()).filter(Boolean)
+      : []
 
     if (!startTime || !endTime || !entityIds) {
       console.error('[HA History] Missing query parameters:', { startTime, endTime, entityIds })
@@ -545,7 +550,7 @@ export const handler = async (event) => {
         }
       })
 
-      const formatted = formatStatisticsPayload(statisticsData, entityIdsList)
+      const formatted = formatStatisticsPayload(statisticsData, entityIdsList, productionEntityIds)
 
       return {
         statusCode: 200,
