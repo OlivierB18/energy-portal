@@ -373,18 +373,34 @@ const formatStatisticsPayload = (statisticsData, entityIdsList, productionEntity
 
   return entityIdsList.map((entityId) => {
     const statsRows = Array.isArray(safeData[entityId]) ? safeData[entityId] : []
+    const isProduction = productionSet.has(entityId.toLowerCase())
     const mappedRows = statsRows
-      .map((row) => {
+      .map((row, idx) => {
         const timestampRaw = row?.start || row?.end || row?.last_reset
         const timestamp = timestampRaw ? new Date(timestampRaw).getTime() : NaN
         const parsedValue = parseNumericState(
           row?.state ?? row?.sum ?? row?.mean ?? row?.max ?? row?.min,
         )
 
-        const changeValue = parseNumericState(row?.change)
+        let changeValue = parseNumericState(row?.change)
+
+        // If change is null/NaN but sum is available, derive it as delta from the previous row's sum
+        if (!Number.isFinite(changeValue) && idx > 0) {
+          const prevRow = statsRows[idx - 1]
+          const currSum = parseNumericState(row?.sum)
+          const prevSum = parseNumericState(prevRow?.sum)
+          if (Number.isFinite(currSum) && Number.isFinite(prevSum)) {
+            changeValue = currSum - prevSum
+          }
+        }
 
         if (!Number.isFinite(timestamp) || (!Number.isFinite(parsedValue) && !Number.isFinite(changeValue))) {
           return null
+        }
+
+        // Clamp negative change to 0 for consumption entities (meter resets or data anomalies)
+        if (!isProduction && Number.isFinite(changeValue) && changeValue < 0) {
+          changeValue = 0
         }
 
         return {
@@ -396,12 +412,13 @@ const formatStatisticsPayload = (statisticsData, entityIdsList, productionEntity
       })
       .filter(Boolean)
 
-    console.log('[HA History] Statistics entity', entityId, 'rows:', mappedRows.length)
+    const totalChange = mappedRows.reduce((sum, r) => sum + r.change, 0)
+    console.log('[HA History] Statistics entity', entityId, 'rows:', mappedRows.length, 'total change:', Number.isFinite(totalChange) ? totalChange.toFixed(3) : String(totalChange))
 
     return {
       entity_id: entityId,
       history: mappedRows,
-      is_production: productionSet.has(entityId.toLowerCase()),
+      is_production: isProduction,
     }
   })
 }

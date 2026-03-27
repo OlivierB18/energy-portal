@@ -2410,7 +2410,9 @@ export default function Dashboard({
     const fetchGasHourly = async () => {
       try {
         const token = await getAuthToken()
-        const url = `/.netlify/functions/get-gas-hourly?environmentId=${encodeURIComponent(selectedEnvironment)}&hoursBack=200`
+        const gasEntityId = haMetricsSnapshotRef.current?.sources?.gasTotalEntityId
+        const url = `/.netlify/functions/get-gas-hourly?environmentId=${encodeURIComponent(selectedEnvironment)}&hoursBack=200${gasEntityId ? `&entityId=${encodeURIComponent(gasEntityId)}` : ''}`
+        console.log('[Gas Hourly] Using entity:', gasEntityId || '(default)')
         
         const response = await fetch(url, {
           headers: { Authorization: `Bearer ${token}` },
@@ -2567,6 +2569,7 @@ export default function Dashboard({
         (key): key is string =>
           key !== null && (
             key.startsWith(`ha_electricity_buckets_v3_${prev}_`) ||
+            key.startsWith(`ha_electricity_buckets_v4_${prev}_`) ||
             key === `ha_statistic_ids_v1_${prev}`
           ),
       )
@@ -2603,29 +2606,6 @@ export default function Dashboard({
 
       // statistics period: hour for today/week, day for month
       const period = timeRange === 'month' ? 'day' : 'hour'
-
-      // --- Step C: load persistent incremental cache ---
-      const bucketCacheKey = `ha_electricity_buckets_v3_${selectedEnvironment}_${period}`
-      let cachedBuckets: Array<{ timestamp: number; kwh: number }> = []
-      try {
-        const raw = localStorage.getItem(bucketCacheKey)
-        if (raw) {
-          const parsed = JSON.parse(raw)
-          if (Array.isArray(parsed?.buckets)) {
-            cachedBuckets = parsed.buckets
-            // Show cached data immediately so chart is never blank on reload
-            if (!isDisposed) setElectricityUsageBuckets(cachedBuckets)
-          }
-        }
-      } catch { /* ignore */ }
-
-      // Determine incremental fetch range: from (lastCachedBucket - 2h) to now
-      let fetchStartMs = startMs
-      if (cachedBuckets.length > 0) {
-        const lastTs = cachedBuckets[cachedBuckets.length - 1].timestamp
-        // Overlap by 2 hours to handle late-arriving data and bucket boundary alignment
-        fetchStartMs = Math.max(startMs, lastTs - 2 * 3600_000)
-      }
 
       // --- Step A: get confirmed statistic IDs from HA ---
       // Priority 1: use electricityConsumptionEntityIds + electricityProductionEntityIds from sources
@@ -2708,6 +2688,31 @@ export default function Dashboard({
       }
 
       console.log('[Usage Stats] Using statistic IDs from HA:', entityIds.join(', '))
+
+      // --- Step C: load persistent incremental cache ---
+      // Cache key includes a hash of entity IDs so stale data is automatically discarded when sensors change
+      const entityHash = [...entityIds].sort().join(',').split('').reduce((h, c) => (Math.imul(31, h) + c.charCodeAt(0)) | 0, 0)
+      const bucketCacheKey = `ha_electricity_buckets_v4_${selectedEnvironment}_${period}_${entityHash}`
+      let cachedBuckets: Array<{ timestamp: number; kwh: number }> = []
+      try {
+        const raw = localStorage.getItem(bucketCacheKey)
+        if (raw) {
+          const parsed = JSON.parse(raw)
+          if (Array.isArray(parsed?.buckets)) {
+            cachedBuckets = parsed.buckets
+            // Show cached data immediately so chart is never blank on reload
+            if (!isDisposed) setElectricityUsageBuckets(cachedBuckets)
+          }
+        }
+      } catch { /* ignore */ }
+
+      // Determine incremental fetch range: from (lastCachedBucket - 2h) to now
+      let fetchStartMs = startMs
+      if (cachedBuckets.length > 0) {
+        const lastTs = cachedBuckets[cachedBuckets.length - 1].timestamp
+        // Overlap by 2 hours to handle late-arriving data and bucket boundary alignment
+        fetchStartMs = Math.max(startMs, lastTs - 2 * 3600_000)
+      }
 
       setIsLoadingUsage(true)
 

@@ -1020,7 +1020,7 @@ const enrichMetricsWithHistoryFallback = async ({
   // net meter history to align with HA Energy dashboard totals.
   const shouldDeriveElectricityFromTotalHistory = true
   const shouldDeriveProductionFromTotalHistory = true
-  const shouldDeriveGasFromTotalHistory = false
+  const shouldDeriveGasFromTotalHistory = true
 
   if (
     !shouldDeriveElectricityFromTotalHistory &&
@@ -1133,10 +1133,10 @@ const enrichMetricsWithHistoryFallback = async ({
           (strongestAggregate.stateClass === 'total_increasing' || strongestAggregate.stateClass === 'total'),
         )
 
-        selectedCandidates = hasTrustedAggregate
-          ? [strongestAggregate]
-          : tariffCandidates.length >= 2
-            ? tariffCandidates.slice(0, 4)
+        selectedCandidates = tariffCandidates.length >= 2
+          ? tariffCandidates.slice(0, 4)
+          : hasTrustedAggregate
+            ? [strongestAggregate]
             : phaseCandidates.length >= 2
               ? phaseCandidates.slice(0, 3)
               : (() => {
