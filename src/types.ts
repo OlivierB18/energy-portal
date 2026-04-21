@@ -15,6 +15,7 @@ export interface Environment {
   status: 'online' | 'offline' | 'connecting'
   currentPower?: number
   dailyUsage?: number
+  dailyGasUsage?: number
   lastUpdate?: string
 }
 

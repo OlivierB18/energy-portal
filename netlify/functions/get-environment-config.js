@@ -1,4 +1,5 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose'
+import { resolveEnvironmentReference } from './_environment-storage.js'
 
 const getEnv = (key) => {
   const value = process.env[key]
@@ -6,6 +7,11 @@ const getEnv = (key) => {
     throw new Error(`Missing ${key}`)
   }
   return value
+}
+
+const getOptionalEnv = (key) => {
+  const value = process.env[key]
+  return value && value.trim().length > 0 ? value : null
 }
 
 const getManagementToken = async (domain) => {
@@ -88,14 +94,31 @@ export const handler = async (event) => {
     const managementToken = await getManagementToken(domain)
     const metadata = await getClientMetadata(domain, managementToken)
     const haConfig = parseHaConfig(metadata.ha_config)
-    const envConfig = haConfig[environmentId] || {}
+    let aliases = [environmentId]
+    let canonicalEnvironmentId = environmentId
+    try {
+      const resolved = await resolveEnvironmentReference({
+        event,
+        metadata,
+        environmentId,
+        getOptionalEnv,
+      })
+      canonicalEnvironmentId = resolved.environmentId
+      aliases = resolved.aliases
+    } catch {
+      // Keep direct key lookup fallback.
+    }
+
+    const envConfig = aliases
+      .map((key) => haConfig[key])
+      .find((value) => value && typeof value === 'object') || {}
     const visibleEntityIds = Array.isArray(envConfig.visible_entity_ids)
       ? envConfig.visible_entity_ids
       : []
 
     return {
       statusCode: 200,
-      body: JSON.stringify({ visibleEntityIds }),
+      body: JSON.stringify({ visibleEntityIds, environmentId: canonicalEnvironmentId }),
     }
   } catch (error) {
     return {

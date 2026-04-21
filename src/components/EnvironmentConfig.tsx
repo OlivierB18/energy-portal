@@ -8,12 +8,46 @@ interface EnvironmentConfigProps {
   onClose: () => void
 }
 
+const toEnvironmentSlug = (value: string) => {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[()]/g, ' ')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 50)
+
+  return normalized || 'environment'
+}
+
+const buildUniqueSlug = (base: string, used: Set<string>) => {
+  if (!used.has(base)) {
+    used.add(base)
+    return base
+  }
+
+  let index = 2
+  while (index < 10000) {
+    const suffix = `-${index}`
+    const room = Math.max(1, 50 - suffix.length)
+    const candidate = `${base.slice(0, room)}${suffix}`
+    if (!used.has(candidate)) {
+      used.add(candidate)
+      return candidate
+    }
+    index += 1
+  }
+
+  return base
+}
+
 export default function EnvironmentConfig({ environments: initialEnvironments, onSave, onClose }: EnvironmentConfigProps) {
   const [environments, setEnvironments] = useState<Environment[]>(initialEnvironments)
 
   const addEnvironment = () => {
     const newEnv: Environment = {
-      id: `env_${Date.now()}`,
+      id: `tmp_${Date.now()}`,
       name: `Environment ${environments.length + 1}`,
       type: 'home_assistant',
       config: {
@@ -31,7 +65,7 @@ export default function EnvironmentConfig({ environments: initialEnvironments, o
     setEnvironments(environments.filter(env => env.id !== id))
   }
 
-  const updateEnvironment = (id: string, field: 'id' | 'name' | 'type', value: string) => {
+  const updateEnvironment = (id: string, field: 'name' | 'type', value: string) => {
     setEnvironments(environments.map(env =>
       env.id === id ? { ...env, [field]: value } : env
     ))
@@ -44,7 +78,18 @@ export default function EnvironmentConfig({ environments: initialEnvironments, o
   }
 
   const handleSave = () => {
-    onSave(environments)
+    const used = new Set<string>()
+    const normalized = environments.map((env) => {
+      const nextId = buildUniqueSlug(toEnvironmentSlug(env.name), used)
+      const legacyIds = env.id && env.id !== nextId ? [env.id] : []
+      return {
+        ...env,
+        id: nextId,
+        ...(legacyIds.length > 0 ? { legacyIds } : {}),
+      }
+    })
+
+    onSave(normalized)
   }
 
   return (
@@ -92,18 +137,6 @@ export default function EnvironmentConfig({ environments: initialEnvironments, o
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-light-1 mb-1">
-                      Environment ID
-                    </label>
-                    <input
-                      type="text"
-                      value={env.id}
-                      onChange={(e) => updateEnvironment(env.id, 'id', e.target.value)}
-                      className="w-full px-3 py-2 border border-dark-2 border-opacity-20 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-2"
-                      placeholder="e.g., vacation"
-                    />
-                  </div>
                   <div>
                     <label className="block text-sm font-medium text-light-1 mb-1">
                       Environment Name

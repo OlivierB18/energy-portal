@@ -1,6 +1,6 @@
 # Energy Portal
 
-A modern web portal for monitoring energy consumption, inspired by HomeWizard energy app.
+A modern web portal for monitoring energy consumption.
 
 ## Features
 
@@ -105,6 +105,11 @@ Rules of thumb:
 ## Project Structure
 
 ```
+agent/               # InsideOut Plan Foxtrot gateway agent
+├── insideout-agent.js
+├── .env.example
+└── README.md
+
 src/
 ├── components/       # Reusable React components
 │   ├── EnergyCard.tsx
@@ -120,6 +125,7 @@ src/
 ## Future Integrations
 
 - Home Assistant API connection for real-time data
+- InsideOut gateway command orchestration via the agent layer
 - User authentication
 - Multiple home support
 - Detailed device breakdown

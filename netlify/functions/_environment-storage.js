@@ -13,10 +13,46 @@ const ENV_METADATA_PREFIX = 'ha_env_v1_'
 const normalizeText = (value) => (typeof value === 'string' ? value.trim() : '')
 const normalizeKey = (value) => normalizeText(value).toLowerCase()
 
+const toEnvironmentSlug = (value) => {
+  const normalized = normalizeText(value)
+    .toLowerCase()
+    .replace(/[()]/g, ' ')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 50)
+
+  return normalized || 'environment'
+}
+
+const uniqueSlug = (base, used) => {
+  if (!used.has(base)) {
+    used.add(base)
+    return base
+  }
+
+  let index = 2
+  while (index < 10000) {
+    const suffix = `-${index}`
+    const room = Math.max(1, 50 - suffix.length)
+    const candidate = `${base.slice(0, room)}${suffix}`
+    if (!used.has(candidate)) {
+      used.add(candidate)
+      return candidate
+    }
+    index += 1
+  }
+
+  return base
+}
+
 const normalizeEnvironment = (env = {}) => ({
   id: normalizeText(env.id),
   name: normalizeText(env.name || env.id),
   type: normalizeText(env.type) || 'home_assistant',
+  legacyIds: Array.isArray(env.legacyIds)
+    ? env.legacyIds.map((id) => normalizeText(id)).filter(Boolean)
+    : [],
   config: {
     baseUrl: normalizeText(env.config?.baseUrl || env.config?.base_url || env.baseUrl || env.base_url || env.url),
     apiKey: normalizeText(env.config?.apiKey || env.config?.api_key || env.apiKey || env.api_key || env.token),
@@ -30,9 +66,25 @@ const normalizeEnvironments = (environments) => {
     return []
   }
 
+  const usedIds = new Set()
+
   return environments
     .map((env) => normalizeEnvironment(env))
-    .filter((env) => env.id && env.name)
+    .filter((env) => env.name)
+    .map((env) => {
+      const generatedId = toEnvironmentSlug(env.name)
+      const canonicalId = uniqueSlug(generatedId, usedIds)
+      const legacyIds = Array.from(new Set([
+        ...env.legacyIds,
+        env.id && env.id !== canonicalId ? env.id : '',
+      ].filter(Boolean)))
+
+      return {
+        ...env,
+        id: canonicalId,
+        legacyIds,
+      }
+    })
 }
 
 export const sanitizeEnvironments = (environments) => {
@@ -147,8 +199,11 @@ export const loadBlobEnvironments = async (event) => {
 
   const sanitized = normalizeAndSanitizeEnvironments(rawEnvironments)
 
-  // Self-heal duplicate or malformed stored entries once read.
-  if (Array.isArray(rawEnvironments) && rawEnvironments.length > sanitized.length) {
+  const storedJson = JSON.stringify(rawEnvironments || [])
+  const sanitizedJson = JSON.stringify(sanitized)
+
+  // Self-heal malformed entries and migrate legacy IDs to canonical slug IDs on read.
+  if (Array.isArray(rawEnvironments) && storedJson !== sanitizedJson) {
     await store.setJSON(ENVIRONMENT_STORE_KEY, {
       environments: sanitized,
       updatedAt: new Date().toISOString(),
@@ -222,6 +277,8 @@ export const resolveEnvironmentConfig = async ({ event, metadata = {}, environme
   const lowerRequestedId = requestedId.toLowerCase()
   const matched = environments.find((env) => env.id === requestedId)
     || environments.find((env) => env.id.toLowerCase() === lowerRequestedId)
+    || environments.find((env) => normalizeText(env.name).toLowerCase() === lowerRequestedId)
+    || environments.find((env) => Array.isArray(env.legacyIds) && env.legacyIds.some((id) => normalizeKey(id) === lowerRequestedId))
 
   if (!matched) {
     throw new Error(`Unknown environment: ${environmentId}`)
@@ -238,5 +295,29 @@ export const resolveEnvironmentConfig = async ({ event, metadata = {}, environme
     baseUrl,
     token,
     environment: matched,
+  }
+}
+
+export const resolveEnvironmentReference = async ({ event, metadata = {}, environmentId, getOptionalEnv }) => {
+  const requestedId = normalizeText(environmentId)
+  if (!requestedId) {
+    throw new Error('Missing environmentId')
+  }
+
+  const { environments } = await getMergedEnvironments({ event, metadata, getOptionalEnv })
+  const lowerRequestedId = requestedId.toLowerCase()
+  const matched = environments.find((env) => env.id === requestedId)
+    || environments.find((env) => env.id.toLowerCase() === lowerRequestedId)
+    || environments.find((env) => normalizeText(env.name).toLowerCase() === lowerRequestedId)
+    || environments.find((env) => Array.isArray(env.legacyIds) && env.legacyIds.some((id) => normalizeKey(id) === lowerRequestedId))
+
+  if (!matched) {
+    throw new Error(`Unknown environment: ${environmentId}`)
+  }
+
+  return {
+    environmentId: matched.id,
+    environment: matched,
+    aliases: Array.from(new Set([matched.id, ...(matched.legacyIds || [])])),
   }
 }

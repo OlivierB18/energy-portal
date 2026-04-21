@@ -1,5 +1,6 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { resolveEnvironmentConfig } from './_environment-storage.js'
+import { detectEnergyEntities } from './shared/entity-detection.js'
 
 const getEnv = (key) => {
   const value = process.env[key]
@@ -322,7 +323,17 @@ const getDashboardMetrics = (entities) => {
     return null
   }
 
-  const powerEntity =
+  const detected = detectEnergyEntities(entities)
+
+  const findById = (entityId) => {
+    if (!entityId) return null
+    return entities.find((entity) => String(entity.entity_id || '') === entityId) || null
+  }
+
+  const detectedPowerEntity = findById(detected.currentPower)
+  const detectedProductionPowerEntity = findById(detected.currentProduction)
+
+  const powerEntity = detectedPowerEntity ||
     entities.find((entity) => (
       entity.domain === 'sensor' &&
       String(entity.device_class || '').toLowerCase() === 'power' &&
@@ -352,7 +363,7 @@ const getDashboardMetrics = (entities) => {
       Number.isFinite(parseNumericValue(entity.state))
     ))
 
-  const productionPowerEntity =
+  const productionPowerEntity = detectedProductionPowerEntity ||
     findEntityByKeywords(
       entities,
       PRODUCTION_KEYWORDS,
@@ -489,12 +500,15 @@ const getDashboardMetrics = (entities) => {
     ? parseNumericValue(monthlyGasEntity.state)
     : NaN
 
+  const derivedConsumptionIds = detected.consumptionEntities
+  const derivedExportIds = detected.exportEntities
+  const gasTotalEntity = findById(detected.gasEntity)
+
   return {
     currentPowerKw: toMetricValue(currentPowerKw),
     currentProductionKw: toMetricValue(currentProductionKw),
-    // Daily/monthly electricity always derived from history delta — never from snapshot sensors
-    dailyElectricityKwh: null,
-    monthlyElectricityKwh: null,
+    dailyElectricityKwh: toMetricValue(dailyElectricityKwh),
+    monthlyElectricityKwh: toMetricValue(monthlyElectricityKwh),
     dailyProductionKwh: toMetricValue(dailyProductionKwh),
     monthlyProductionKwh: toMetricValue(monthlyProductionKwh),
     dailyGasM3: toMetricValue(dailyGasM3),
@@ -502,12 +516,21 @@ const getDashboardMetrics = (entities) => {
     sources: {
       currentPowerEntityId: powerEntity?.entity_id || null,
       currentProductionEntityId: productionPowerEntity?.entity_id || null,
+      consumptionEntityIds: derivedConsumptionIds.length > 0 ? derivedConsumptionIds : null,
+      exportEntityIds: derivedExportIds.length > 0 ? derivedExportIds : null,
+      solarEntityId: detected.solarEntity || null,
+      gasEntityId: detected.gasEntity || null,
       dailyElectricityEntityId: dailyElectricityEntity?.entity_id || null,
       monthlyElectricityEntityId: monthlyElectricityEntity?.entity_id || null,
       dailyProductionEntityId: dailyProductionEntity?.entity_id || null,
       monthlyProductionEntityId: monthlyProductionEntity?.entity_id || null,
       dailyGasEntityId: dailyGasEntity?.entity_id || null,
       monthlyGasEntityId: monthlyGasEntity?.entity_id || null,
+      electricityTotalEntityId: derivedConsumptionIds[0] || null,
+      electricityTotalEntityIds: derivedConsumptionIds.length > 0 ? derivedConsumptionIds : null,
+      electricityConsumptionEntityIds: derivedConsumptionIds.length > 0 ? derivedConsumptionIds : null,
+      electricityProductionEntityIds: derivedExportIds.length > 0 ? derivedExportIds : null,
+      gasTotalEntityId: gasTotalEntity?.entity_id || null,
     },
   }
 }
@@ -946,7 +969,7 @@ const getSeriesValueAtTime = (series, targetTimestamp) => {
   return before ? before.value : null
 }
 
-const deriveDailyMonthlyDeltas = (series, latestValueOverride = null, nowTimestampOverride = null) => {
+const deriveDailyMonthlyDeltas = (series, latestValueOverride = null, nowTimestampOverride = null, tzOffsetMinutes = 0) => {
   if (!Array.isArray(series) || series.length === 0) {
     return { daily: null, monthly: null }
   }
@@ -968,17 +991,15 @@ const deriveDailyMonthlyDeltas = (series, latestValueOverride = null, nowTimesta
     return { daily: null, monthly: null }
   }
 
-  const nowDate = new Date(latest.timestamp)
+  // Shift the "now" timestamp into the client's local timezone for day/month boundary calculation
+  const offsetMs = tzOffsetMinutes * 60_000
+  const localNow = new Date(latest.timestamp + offsetMs)
   const dayStart = new Date(
-    nowDate.getFullYear(),
-    nowDate.getMonth(),
-    nowDate.getDate(),
-    0,
-    0,
-    0,
-    0,
-  ).getTime()
-  const monthStart = new Date(nowDate.getFullYear(), nowDate.getMonth(), 1, 0, 0, 0, 0).getTime()
+    Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), localNow.getUTCDate(), 0, 0, 0, 0)
+  ).getTime() - offsetMs
+  const monthStart = new Date(
+    Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), 1, 0, 0, 0, 0)
+  ).getTime() - offsetMs
 
   const dayStartValue = getSeriesValueAtTime(series, dayStart)
   const monthStartValue = getSeriesValueAtTime(series, monthStart)
@@ -1004,6 +1025,7 @@ const enrichMetricsWithHistoryFallback = async ({
   token,
   environmentId,
   storedSources,
+  tzOffsetMinutes = 0,
 }) => {
   if (!metrics || !Array.isArray(entities) || entities.length === 0) {
     return metrics
@@ -1133,11 +1155,13 @@ const enrichMetricsWithHistoryFallback = async ({
           (strongestAggregate.stateClass === 'total_increasing' || strongestAggregate.stateClass === 'total'),
         )
 
-        selectedCandidates = tariffCandidates.length >= 2
-          ? tariffCandidates.slice(0, 4)
-          : hasTrustedAggregate
-            ? [strongestAggregate]
+        selectedCandidates = hasTrustedAggregate
+          ? [strongestAggregate]
+          : tariffCandidates.length >= 2
+            ? tariffCandidates.slice(0, 4)
             : phaseCandidates.length >= 2
+
+
               ? phaseCandidates.slice(0, 3)
               : (() => {
                   const highestValueCandidate = electricityCandidates
@@ -1169,7 +1193,7 @@ const enrichMetricsWithHistoryFallback = async ({
           nowIso,
         )
         const liveValue = Number.isFinite(candidate.currentValueKwh) ? candidate.currentValueKwh : null
-        const deltas = deriveDailyMonthlyDeltas(electricitySeries, liveValue, nowMs)
+        const deltas = deriveDailyMonthlyDeltas(electricitySeries, liveValue, nowMs, tzOffsetMinutes)
 
         if (deltas.daily !== null) {
           dailySum += deltas.daily
@@ -1231,6 +1255,13 @@ const enrichMetricsWithHistoryFallback = async ({
     }
   }
 
+  // Ensure electricityConsumptionEntityIds is always set, even when electricityTotalEntityIds
+  // was already populated by the derivation loop above (tariff candidates set totalEntityIds
+  // but consumptionEntityIds might still be missing from the final sources).
+  if (!fallbackSources.electricityConsumptionEntityIds || fallbackSources.electricityConsumptionEntityIds.length === 0) {
+    fallbackSources.electricityConsumptionEntityIds = fallbackSources.electricityTotalEntityIds || []
+  }
+
   if (shouldDeriveProductionFromTotalHistory || needsProductionFallback) {
     const productionCandidates = pickTotalElectricityProductionCandidates(entities)
 
@@ -1280,7 +1311,7 @@ const enrichMetricsWithHistoryFallback = async ({
           nowIso,
         )
         const liveValue = Number.isFinite(candidate.currentValueKwh) ? candidate.currentValueKwh : null
-        const deltas = deriveDailyMonthlyDeltas(productionSeries, liveValue, nowMs)
+        const deltas = deriveDailyMonthlyDeltas(productionSeries, liveValue, nowMs, tzOffsetMinutes)
 
         if (deltas.daily !== null) {
           dailySum += deltas.daily
@@ -1324,7 +1355,7 @@ const enrichMetricsWithHistoryFallback = async ({
         nowIso,
       )
       const liveGasValue = convertGasToM3(parseNumericValue(gasTotalEntity.state), gasTotalEntity.unit_of_measurement)
-      const deltas = deriveDailyMonthlyDeltas(gasSeries, liveGasValue, nowMs)
+      const deltas = deriveDailyMonthlyDeltas(gasSeries, liveGasValue, nowMs, tzOffsetMinutes)
       fallbackValues.dailyGasM3 = deltas.daily
       fallbackValues.monthlyGasM3 = deltas.monthly
       fallbackSources.gasTotalEntityId = gasTotalEntity.entity_id
@@ -1606,12 +1637,30 @@ export const handler = async (event) => {
     })
     
     console.log('Fetching from Home Assistant:', baseUrl);
-    const response = await fetch(`${baseUrl}/api/states`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-    })
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 10_000)
+    let response
+
+    try {
+      response = await fetch(`${baseUrl}/api/states`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        signal: controller.signal,
+      })
+    } catch (fetchError) {
+      const isAbort = fetchError instanceof Error && fetchError.name === 'AbortError'
+      return {
+        statusCode: 502,
+        body: JSON.stringify({
+          error: isAbort ? 'Home Assistant state request timed out after 10s' : 'Unable to fetch Home Assistant state',
+          details: fetchError instanceof Error ? fetchError.message : String(fetchError),
+        }),
+      }
+    } finally {
+      clearTimeout(timeout)
+    }
     
     if (!response.ok) {
       const body = await response.text();
@@ -1652,22 +1701,8 @@ export const handler = async (event) => {
 
     let metrics = getDashboardMetrics(allEntities)
 
-    // Read stored sensor sources from ha_config (saved by save-ha-environments.js) so that
-    // enrichMetricsWithHistoryFallback can use the pre-detected tariff/production entity IDs.
-    const storedHaConfig = parseHaConfig(metadata.ha_config)
-    const storedEnvSources = storedHaConfig[environmentId]?.sources || null
-    if (storedEnvSources) {
-      console.log('[HA-ENTITIES] Found stored env sources for', environmentId, ':', JSON.stringify(storedEnvSources))
-    }
-
-    metrics = await enrichMetricsWithHistoryFallback({
-      metrics,
-      entities: allEntities,
-      baseUrl,
-      token,
-      environmentId,
-      storedSources: storedEnvSources,
-    })
+    // Round-3 performance mode: keep ha-entities states-only.
+    // No history/statistics lookups here to avoid long cold-load stalls.
     let entities = allEntities
 
     if (metrics?.sources) {
@@ -1694,6 +1729,13 @@ export const handler = async (event) => {
     }
 
     console.log('Filtered to useful entities:', entities.length);
+
+    // Ensure sources.electricityConsumptionEntityIds is always an array in the response
+    if (metrics && metrics.sources) {
+      if (!Array.isArray(metrics.sources.electricityConsumptionEntityIds) || metrics.sources.electricityConsumptionEntityIds.length === 0) {
+        metrics.sources.electricityConsumptionEntityIds = metrics.sources.electricityTotalEntityIds || []
+      }
+    }
 
     return {
       statusCode: 200,

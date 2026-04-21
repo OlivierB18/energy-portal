@@ -212,11 +212,49 @@ const normalizeEnvironments = (environments) => {
     return []
   }
 
+  const toEnvironmentSlug = (value) => {
+    const normalized = String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[()]/g, ' ')
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '')
+      .slice(0, 50)
+
+    return normalized || 'environment'
+  }
+
+  const used = new Set()
+  const uniqueSlug = (base) => {
+    if (!used.has(base)) {
+      used.add(base)
+      return base
+    }
+
+    let index = 2
+    while (index < 10000) {
+      const suffix = `-${index}`
+      const room = Math.max(1, 50 - suffix.length)
+      const candidate = `${base.slice(0, room)}${suffix}`
+      if (!used.has(candidate)) {
+        used.add(candidate)
+        return candidate
+      }
+      index += 1
+    }
+
+    return base
+  }
+
   return environments
     .map((env) => ({
-      id: String(env.id || '').trim(),
       name: String(env.name || '').trim(),
       type: String(env.type || 'home_assistant').trim(),
+      previousId: String(env.id || '').trim(),
+      legacyIds: Array.isArray(env.legacyIds)
+        ? env.legacyIds.map((id) => String(id || '').trim()).filter(Boolean)
+        : [],
       config: {
         baseUrl: String(env.config?.baseUrl || env.baseUrl || env.url || '').trim(),
         apiKey: String(env.config?.apiKey || env.apiKey || env.token || '').trim(),
@@ -224,7 +262,22 @@ const normalizeEnvironments = (environments) => {
         notes: String(env.config?.notes || env.notes || '').trim(),
       },
     }))
-    .filter((env) => env.id && env.name)
+    .filter((env) => env.name)
+    .map((env) => {
+      const generatedId = uniqueSlug(toEnvironmentSlug(env.name))
+      const legacyIds = Array.from(new Set([
+        ...env.legacyIds,
+        env.previousId && env.previousId !== generatedId ? env.previousId : '',
+      ].filter(Boolean)))
+
+      return {
+        id: generatedId,
+        name: env.name,
+        type: env.type,
+        legacyIds,
+        config: env.config,
+      }
+    })
 }
 
 const ENV_METADATA_PREFIX = 'ha_env_v1_'
@@ -748,6 +801,21 @@ export const handler = async (event) => {
 
     const mergedById = new Map(existingEnvironments.map((env) => [env.id, env]))
     for (const env of incomingEnvironments) {
+      // Name is the source of truth: replace any existing environment with the same name.
+      const incomingNameKey = normalizeText(env.name).toLowerCase()
+      for (const [existingId, existingEnv] of mergedById.entries()) {
+        const existingNameKey = normalizeText(existingEnv.name).toLowerCase()
+        if (incomingNameKey && existingNameKey === incomingNameKey && existingId !== env.id) {
+          mergedById.delete(existingId)
+        }
+      }
+
+      for (const legacyId of env.legacyIds || []) {
+        if (legacyId && legacyId !== env.id && mergedById.has(legacyId)) {
+          mergedById.delete(legacyId)
+        }
+      }
+
       mergedById.set(env.id, env)
     }
     const mergedEnvironments = sanitizeEnvironments(Array.from(mergedById.values()))

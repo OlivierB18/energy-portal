@@ -3,7 +3,7 @@ import EnergyCard from '../components/EnergyCard'
 import EnergyChart from '../components/EnergyChart'
 import HomeAssistantConfig from '../components/HomeAssistantConfig'
 import EnergyPriceModal from '../components/EnergyPriceModal'
-import { Zap, Clock, Home, Settings, DollarSign, Flame, Users as UsersIcon, LogOut } from 'lucide-react'
+import { Zap, Clock, Home, Settings, DollarSign, Flame, Users as UsersIcon, LogOut, ChevronDown } from 'lucide-react'
 import { useAuth0 } from '@auth0/auth0-react'
 import {
   CartesianGrid,
@@ -15,6 +15,13 @@ import {
   YAxis,
 } from 'recharts'
 import { HaEntity, EnergyPricingConfig } from '../types'
+import {
+  getDashboardResponseCache,
+  getOverviewLiveSnapshot,
+  makeDashboardCacheKey,
+  setOverviewLiveSnapshot,
+  setDashboardResponseCache,
+} from '../lib/dashboardRuntimeCache'
 
 interface EnvironmentConfig {
   id: string
@@ -54,6 +61,10 @@ interface HistoryArchivePayload {
 interface HaMetricSources {
   currentPowerEntityId: string | null
   currentProductionEntityId: string | null
+  consumptionEntityIds: string[] | null
+  exportEntityIds: string[] | null
+  solarEntityId: string | null
+  gasEntityId: string | null
   dailyElectricityEntityId: string | null
   monthlyElectricityEntityId: string | null
   dailyProductionEntityId: string | null
@@ -98,12 +109,18 @@ interface DynamicPriceChartPoint {
   fixedProducerPrice: number | null
 }
 
+interface CachedOverviewStatusSnapshot {
+  status?: 'online' | 'offline' | 'connecting'
+  lastSeenAt?: number
+}
+
 const GAS_METER_ENTITY_ID = 'sensor.gas_meter_gas_consumption'
 const DYNAMIC_PRICE_CHART_EVENT = 'energy-dynamic-chart-visibility-changed'
 const HA_ENVIRONMENTS_UPDATED_EVENT = 'ha-environments-updated'
+const OVERVIEW_STATUS_CACHE_KEY = 'overview_status_cache_v2'
 const MAX_LIVE_SAMPLE_POINTS = 8000
 const MAX_ARCHIVE_HOURLY_POINTS = 60000
-const ARCHIVE_LOOKBACK_DAYS = 365 * 6
+const ARCHIVE_LOOKBACK_DAYS = 45
 const ARCHIVE_REFRESH_TTL_MS = 12 * 60 * 60_000
 const configuredDefaultGasPrice = Number(import.meta.env.VITE_DEFAULT_GAS_PRICE_EUR_PER_M3)
 const DEFAULT_GAS_PRICE_PER_M3 = Number.isFinite(configuredDefaultGasPrice) && configuredDefaultGasPrice > 0
@@ -118,13 +135,69 @@ const DEFAULT_DYNAMIC_GAS_KWH_PER_M3 = Number.isFinite(configuredDynamicGasProxy
   ? configuredDynamicGasProxy
   : 10.55
 
-const storeLocalJson = (key: string, value: unknown) => {
+const pruneLocalStorageCache = () => {
   try {
-    localStorage.setItem(key, JSON.stringify(value))
-  } catch (error) {
-    // eslint-disable-next-line no-console
-    console.warn('[Storage] Failed to persist local cache for key:', key, error)
+    const removablePrefixes = [
+      'ha_history_archive_',
+      'ha_history_v5_',
+      'ha_electricity_buckets_',
+      'energy_live_power_samples_',
+      'energy_live_production_samples_',
+    ]
+
+    const removableKeys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i))
+      .filter((key): key is string => Boolean(key))
+      .filter((key) => removablePrefixes.some((prefix) => key.startsWith(prefix)))
+
+    // Remove a limited set first; avoid nuking all caches every write.
+    removableKeys.slice(0, 8).forEach((key) => localStorage.removeItem(key))
+  } catch {
+    // Ignore cleanup failures.
   }
+}
+
+const storeLocalJson = (key: string, value: unknown) => {
+  const serialized = JSON.stringify(value)
+
+  try {
+    localStorage.setItem(key, serialized)
+  } catch {
+    // Try targeted eviction first; fallback to clear only as last resort.
+    try {
+      pruneLocalStorageCache()
+      localStorage.setItem(key, serialized)
+      return
+    } catch {
+      try {
+        localStorage.clear()
+        localStorage.setItem(key, serialized)
+      } catch {
+        // Ignore storage failures.
+      }
+    }
+  }
+}
+
+const storeLocalValue = (key: string, value: string) => {
+  try {
+    localStorage.setItem(key, value)
+  } catch {
+    try {
+      pruneLocalStorageCache()
+      localStorage.setItem(key, value)
+    } catch {
+      // Ignore storage failures.
+    }
+  }
+}
+
+const trimSamplesToRecentWindow = (
+  samples: PowerSample[],
+  windowMs: number = 24 * 60 * 60_000,
+) => {
+  const now = Date.now()
+  const startMs = now - windowMs
+  return samples.filter((sample) => sample.timestamp >= startMs && sample.timestamp <= now)
 }
 
 const mergePowerSamples = (
@@ -183,6 +256,173 @@ const sanitizePowerSampleArray = (input: unknown): PowerSample[] => {
     ],
     { resolutionMs: 10_000 },
   )
+}
+
+const getHistoryResolution = (range: 'today' | 'week' | 'month') => {
+  if (range === 'today') return 'raw'
+  if (range === 'week') return '5min'
+  return 'hourly'
+}
+
+const getLttbTarget = (range: 'today' | 'week' | 'month') => {
+  if (range === 'today') return 1000
+  if (range === 'week') return 800
+  return 500
+}
+
+const downsampleLTTB = (samples: PowerSample[], threshold: number): PowerSample[] => {
+  if (!Array.isArray(samples) || samples.length <= threshold || threshold < 3) {
+    return samples
+  }
+
+  const sampled: PowerSample[] = []
+  const every = (samples.length - 2) / (threshold - 2)
+
+  let a = 0
+  sampled.push(samples[a])
+
+  for (let i = 0; i < threshold - 2; i += 1) {
+    const avgRangeStart = Math.floor((i + 1) * every) + 1
+    const avgRangeEnd = Math.floor((i + 2) * every) + 1
+    const avgRangeEndClamped = Math.min(avgRangeEnd, samples.length)
+
+    let avgX = 0
+    let avgY = 0
+    let avgRangeLength = avgRangeEndClamped - avgRangeStart
+    if (avgRangeLength <= 0) {
+      avgRangeLength = 1
+    }
+
+    for (let j = avgRangeStart; j < avgRangeEndClamped; j += 1) {
+      avgX += samples[j].timestamp
+      avgY += samples[j].power
+    }
+    avgX /= avgRangeLength
+    avgY /= avgRangeLength
+
+    const rangeOffs = Math.floor(i * every) + 1
+    const rangeTo = Math.floor((i + 1) * every) + 1
+    const rangeToClamped = Math.min(rangeTo, samples.length - 1)
+
+    const pointAX = samples[a].timestamp
+    const pointAY = samples[a].power
+
+    let maxArea = -1
+    let nextA = rangeOffs
+
+    for (let j = rangeOffs; j <= rangeToClamped; j += 1) {
+      const area = Math.abs(
+        (pointAX - avgX) * (samples[j].power - pointAY) -
+        (pointAX - samples[j].timestamp) * (avgY - pointAY),
+      )
+      if (area > maxArea) {
+        maxArea = area
+        nextA = j
+      }
+    }
+
+    sampled.push(samples[nextA])
+    a = nextA
+  }
+
+  sampled.push(samples[samples.length - 1])
+  return sampled
+}
+
+const runOnIdle = (callback: () => void) => {
+  if (typeof window === 'undefined') {
+    return () => undefined
+  }
+
+  const withIdle = window as Window & {
+    requestIdleCallback?: (cb: IdleRequestCallback, options?: IdleRequestOptions) => number
+    cancelIdleCallback?: (id: number) => void
+  }
+
+  if (typeof withIdle.requestIdleCallback === 'function') {
+    const idleId = withIdle.requestIdleCallback(() => callback(), { timeout: 1200 })
+    return () => withIdle.cancelIdleCallback?.(idleId)
+  }
+
+  const timer = window.setTimeout(callback, 350)
+  return () => window.clearTimeout(timer)
+}
+
+const inflightRequests = new Map<string, Promise<Response>>()
+const MAX_CONCURRENT_REQUESTS = 3
+let activeRequestCount = 0
+const requestQueue: Array<() => void> = []
+
+const sleepMs = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms))
+
+const runWithRequestLimit = async <T,>(operation: () => Promise<T>): Promise<T> => {
+  if (activeRequestCount >= MAX_CONCURRENT_REQUESTS) {
+    await new Promise<void>((resolve) => {
+      requestQueue.push(resolve)
+    })
+  }
+
+  activeRequestCount += 1
+  try {
+    return await operation()
+  } finally {
+    activeRequestCount = Math.max(0, activeRequestCount - 1)
+    const next = requestQueue.shift()
+    if (next) {
+      next()
+    }
+  }
+}
+
+const throttledAuthFetch = async (
+  url: string,
+  token: string,
+  {
+    retriesMs = [1000, 3000],
+    signal,
+  }: {
+    retriesMs?: number[]
+    signal?: AbortSignal
+  } = {},
+): Promise<Response> => {
+  const execute = () => runWithRequestLimit(() => fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+    signal,
+  }))
+
+  let response = await execute()
+
+  for (let i = 0; i < retriesMs.length && response.status === 403; i += 1) {
+    await sleepMs(retriesMs[i])
+    response = await execute()
+  }
+
+  return response
+}
+
+const deduplicatedAuthFetch = async (
+  url: string,
+  token: string,
+  {
+    retriesMs = [1000, 3000],
+  }: {
+    retriesMs?: number[]
+  } = {},
+): Promise<Response> => {
+  const key = `GET::${url}`
+  const existing = inflightRequests.get(key)
+  if (existing) {
+    return existing.then((response) => response.clone())
+  }
+
+  const requestPromise = (async () => {
+    return throttledAuthFetch(url, token, { retriesMs })
+  })().finally(() => {
+    inflightRequests.delete(key)
+  })
+
+  inflightRequests.set(key, requestPromise)
+  return requestPromise.then((response) => response.clone())
 }
 
 const normalizeEnvironmentConfigs = (input: unknown): EnvironmentConfig[] => {
@@ -395,18 +635,21 @@ const findGasConsumptionEntity = (entities: HaEntity[]) => {
 const formatChartAxisLabel = (timestamp: number, range: 'today' | 'week' | 'month'): string => {
   const date = new Date(timestamp)
   const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  const dateStr = date.toLocaleDateString([], { day: '2-digit', month: '2-digit' })
+  const dayNum = String(date.getDate()).padStart(2, '0')
+  const monthNum = String(date.getMonth() + 1).padStart(2, '0')
+  const dateStr = `${dayNum}-${monthNum}`
 
   if (range === 'today') {
-    return `${time}\n${dateStr}`
+    return time
   }
 
   if (range === 'week') {
-    const dayStr = date.toLocaleDateString([], { weekday: 'short' })
+    const dayStr = date.toLocaleDateString('nl-NL', { weekday: 'short' })
     return `${time}\n${dayStr} ${dateStr}`
   }
 
-  return `${time}\n${dateStr}`
+  // month: daily buckets — show just date
+  return dateStr
 }
 
 const parseInputDate = (value: string): Date | null => {
@@ -507,6 +750,10 @@ const normalizeHaMetricsSnapshot = (input: unknown): HaMetricsSnapshot | null =>
   const sources: HaMetricSources = {
     currentPowerEntityId: toStringOrNull(rawSources.currentPowerEntityId),
     currentProductionEntityId: toStringOrNull(rawSources.currentProductionEntityId),
+    consumptionEntityIds: toStringArrayOrNull(rawSources.consumptionEntityIds),
+    exportEntityIds: toStringArrayOrNull(rawSources.exportEntityIds),
+    solarEntityId: toStringOrNull(rawSources.solarEntityId),
+    gasEntityId: toStringOrNull(rawSources.gasEntityId),
     dailyElectricityEntityId: toStringOrNull(rawSources.dailyElectricityEntityId),
     monthlyElectricityEntityId: toStringOrNull(rawSources.monthlyElectricityEntityId),
     dailyProductionEntityId: toStringOrNull(rawSources.dailyProductionEntityId),
@@ -645,6 +892,7 @@ export default function Dashboard({
   }
 
   const [selectedEnvironment, setSelectedEnvironment] = useState<string>(selectedEnvironmentId ?? '')
+  const [stableSelectedEnvironment, setStableSelectedEnvironment] = useState<string>(selectedEnvironmentId ?? '')
   const [timeRange, setTimeRange] = useState<'today' | 'week' | 'month'>('today')
   const todayInput = formatDateForInput(new Date())
   const [selectedStartDate, setSelectedStartDate] = useState<string>(todayInput)
@@ -655,6 +903,9 @@ export default function Dashboard({
   const [envLoading, setEnvLoading] = useState(false)
   const [_envError, setEnvError] = useState<string | null>(null)
   const [haEntities, setHaEntities] = useState<HaEntity[]>([])
+  const [entitiesLoaded, setEntitiesLoaded] = useState(false)
+  const [isEnvironmentOffline, setIsEnvironmentOffline] = useState(false)
+  const [offlineLastSeenAt, setOfflineLastSeenAt] = useState<number | null>(null)
   // Laatst bekende sensoren (blijven altijd staan bij error)
   const [lastKnownHaEntities, setLastKnownHaEntities] = useState<HaEntity[]>([])
   const [haMetricsSnapshot, setHaMetricsSnapshot] = useState<HaMetricsSnapshot | null>(null)
@@ -671,11 +922,12 @@ export default function Dashboard({
   const [archivedPowerSamples, setArchivedPowerSamples] = useState<PowerSample[]>([])
   const [archivedProductionSamples, setArchivedProductionSamples] = useState<PowerSample[]>([])
   const [isLoadingHistory, setIsLoadingHistory] = useState(false)
-  const [electricityUsageBuckets, setElectricityUsageBuckets] = useState<Array<{ timestamp: number; kwh: number }>>([])
+  const [electricityUsageBuckets, setElectricityUsageBuckets] = useState<Array<{ timestamp: number; importKwh: number; exportKwh: number }>>([])
   const [isLoadingUsage, setIsLoadingUsage] = useState(false)
   const [gasMeterReadings, setGasMeterReadings] = useState<Array<{ timestamp: number; value: number }>>([])
   const [showPriceModal, setShowPriceModal] = useState(false)
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false)
+  const [showDatePicker, setShowDatePicker] = useState(false)
   const [pricingConfig, setPricingConfig] = useState<EnergyPricingConfig | null>(null)
   const [dynamicConsumerPriceKwh, setDynamicConsumerPriceKwh] = useState<number | null>(null)
   const [dynamicGasPricePerM3, setDynamicGasPricePerM3] = useState<number | null>(null)
@@ -689,16 +941,14 @@ export default function Dashboard({
   // Sensor connection status: 'connecting' | 'connected' | 'error'
   const [haConnectionStatus, setHaConnectionStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   const { isAuthenticated, getIdTokenClaims, getAccessTokenSilently, user } = useAuth0()
-
-  const handleStartDateChange = useCallback((nextStartDate: string) => {
-    setSelectedStartDate(nextStartDate)
-    setSelectedEndDate((currentEndDate) => (nextStartDate > currentEndDate ? nextStartDate : currentEndDate))
-  }, [])
-
-  const handleEndDateChange = useCallback((nextEndDate: string) => {
-    setSelectedEndDate(nextEndDate)
-    setSelectedStartDate((currentStartDate) => (nextEndDate < currentStartDate ? nextEndDate : currentStartDate))
-  }, [])
+  const perfDashboardTimerStartedRef = useRef(false)
+  const perfViewSwitchTimerStartedRef = useRef(false)
+  const perfHaEntitiesTimerStartedRef = useRef(false)
+  const perfPowerSourcesDataTimerStartedRef = useRef(false)
+  const initialHaLoadKeyRef = useRef('')
+  const silentHaRefreshInProgressRef = useRef(false)
+  const lastHaEntitiesFetchAtRef = useRef(0)
+  const lastGasFetchKeyRef = useRef('')
 
   const getAuthToken = useCallback(async () => {
     const audience = import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined
@@ -712,11 +962,158 @@ export default function Dashboard({
     const source = user?.sub || user?.email || 'anonymous'
     return String(source).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80)
   }, [user?.email, user?.sub])
-  const haEntitiesCacheKey = `ha_entities_cache_v4_${selectedEnvironment || 'default'}_${userCacheScope}`
+  const selectedEnvironmentRequestId = useMemo(() => {
+    const selected = environments.find((env) => env.id === selectedEnvironment)
+    if (!selected) {
+      return selectedEnvironment
+    }
+
+    const rawId = String(selected.id || '').trim()
+    const rawName = String(selected.name || '').trim()
+    const legacyIds = new Set(['vacation', 'brouwer', 'brouwer test'])
+
+    if (legacyIds.has(rawId.toLowerCase()) && rawName && rawName.toLowerCase() !== rawId.toLowerCase()) {
+      return rawName
+    }
+
+    return rawId
+  }, [environments, selectedEnvironment])
+
+  const stableSelectedEnvironmentRequestId = useMemo(() => {
+    const selected = environments.find((env) => env.id === stableSelectedEnvironment)
+    if (!selected) {
+      return stableSelectedEnvironment
+    }
+
+    const rawId = String(selected.id || '').trim()
+    const rawName = String(selected.name || '').trim()
+    const legacyIds = new Set(['vacation', 'brouwer', 'brouwer test'])
+
+    if (legacyIds.has(rawId.toLowerCase()) && rawName && rawName.toLowerCase() !== rawId.toLowerCase()) {
+      return rawName
+    }
+
+    return rawId
+  }, [environments, stableSelectedEnvironment])
+  const environmentScope = selectedEnvironmentRequestId || 'default'
+  const isEnvironmentSelectionSettled = !selectedEnvironmentId || selectedEnvironmentId === selectedEnvironment
+
+  const haEntitiesCacheKey = `ha_entities_cache_v4_${environmentScope}_${userCacheScope}`
   const userEnvironmentIdsCacheKey = `user_environment_ids_cache_v1_${userCacheScope}`
-  const dynamicPriceCacheKey = `energy_dynamic_price_${selectedEnvironment || 'default'}`
-  const dynamicPriceChartPreferenceKey = `energy_dynamic_chart_visible_${selectedEnvironment || 'default'}`
-  const dynamicPriceFixedLinesPreferenceKey = `energy_dynamic_chart_show_fixed_lines_${selectedEnvironment || 'default'}`
+  const dynamicPriceCacheKey = `energy_dynamic_price_${environmentScope}`
+  const dynamicPriceChartPreferenceKey = `energy_dynamic_chart_visible_${environmentScope}`
+  const dynamicPriceFixedLinesPreferenceKey = `energy_dynamic_chart_show_fixed_lines_${environmentScope}`
+
+  const readCachedOverviewStatus = useCallback((environmentId: string) => {
+    try {
+      const raw = localStorage.getItem(OVERVIEW_STATUS_CACHE_KEY)
+      if (!raw) {
+        return null
+      }
+
+      const parsed = JSON.parse(raw) as Record<string, CachedOverviewStatusSnapshot>
+      const snapshot = parsed?.[environmentId]
+      if (!snapshot || typeof snapshot !== 'object') {
+        return null
+      }
+
+      return {
+        status: snapshot.status,
+        lastSeenAt: typeof snapshot.lastSeenAt === 'number' ? snapshot.lastSeenAt : null,
+      }
+    } catch {
+      return null
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!selectedEnvironment) {
+      return
+    }
+
+    const snapshot = getOverviewLiveSnapshot(selectedEnvironment)
+    if (!snapshot) {
+      return
+    }
+
+    if (snapshot.status === 'online') {
+      setHaConnectionStatus('connected')
+      setIsInitialLoading(false)
+      setIsEnvironmentOffline(false)
+      setEntitiesLoaded(true)
+    }
+
+    if (Number.isFinite(snapshot.currentPower) || Number.isFinite(snapshot.dailyUsage)) {
+      setHaMetricsSnapshot((prev) => ({
+        currentPowerKw: Number.isFinite(snapshot.currentPower) ? Number(snapshot.currentPower) : prev?.currentPowerKw ?? null,
+        currentProductionKw: prev?.currentProductionKw ?? null,
+        dailyElectricityKwh: Number.isFinite(snapshot.dailyUsage) ? Number(snapshot.dailyUsage) : prev?.dailyElectricityKwh ?? null,
+        monthlyElectricityKwh: prev?.monthlyElectricityKwh ?? null,
+        dailyProductionKwh: prev?.dailyProductionKwh ?? null,
+        monthlyProductionKwh: prev?.monthlyProductionKwh ?? null,
+        dailyGasM3: prev?.dailyGasM3 ?? null,
+        monthlyGasM3: prev?.monthlyGasM3 ?? null,
+        powerEntityId: prev?.powerEntityId ?? null,
+        sources: prev?.sources ?? {
+          currentPowerEntityId: null,
+          currentProductionEntityId: null,
+          consumptionEntityIds: null,
+          exportEntityIds: null,
+          solarEntityId: null,
+          gasEntityId: null,
+          dailyElectricityEntityId: null,
+          monthlyElectricityEntityId: null,
+          dailyProductionEntityId: null,
+          monthlyProductionEntityId: null,
+          dailyGasEntityId: null,
+          monthlyGasEntityId: null,
+          electricityTotalEntityId: null,
+          electricityTotalEntityIds: null,
+          electricityConsumptionEntityIds: null,
+          electricityProductionEntityIds: null,
+          electricityProductionTotalEntityId: null,
+          electricityProductionTotalEntityIds: null,
+          gasTotalEntityId: null,
+        },
+      }))
+    }
+  }, [selectedEnvironment])
+
+  useEffect(() => {
+    if (!selectedEnvironment) {
+      return
+    }
+
+    if (!perfDashboardTimerStartedRef.current) {
+      console.time('[PERF] Dashboard total load')
+      perfDashboardTimerStartedRef.current = true
+    }
+
+    return () => {
+      if (perfDashboardTimerStartedRef.current) {
+        console.timeEnd('[PERF] Dashboard total load')
+        perfDashboardTimerStartedRef.current = false
+      }
+    }
+  }, [selectedEnvironment])
+
+  useEffect(() => {
+    if (!selectedEnvironment) {
+      return
+    }
+
+    if (!perfViewSwitchTimerStartedRef.current) {
+      console.time('[PERF] View switch')
+      perfViewSwitchTimerStartedRef.current = true
+    }
+
+    return () => {
+      if (perfViewSwitchTimerStartedRef.current) {
+        console.timeEnd('[PERF] View switch')
+        perfViewSwitchTimerStartedRef.current = false
+      }
+    }
+  }, [selectedEnvironment, timeRange, selectedStartDate, selectedEndDate])
 
   useEffect(() => {
     let isDisposed = false
@@ -770,7 +1167,7 @@ export default function Dashboard({
         if (!isDisposed) {
           setEnvironments(next)
         }
-        localStorage.setItem(haEnvironmentsCacheKey, JSON.stringify(next))
+        storeLocalJson(haEnvironmentsCacheKey, next)
       } catch (error) {
         if (!isDisposed) {
           setEnvError(error instanceof Error ? error.message : 'Unable to load environments')
@@ -911,7 +1308,6 @@ export default function Dashboard({
 
   useEffect(() => {
     if (visibleEnvironments.length === 0) {
-      setSelectedEnvironment('')
       return
     }
 
@@ -927,6 +1323,20 @@ export default function Dashboard({
   }, [selectedEnvironment, selectedEnvironmentId])
 
   useEffect(() => {
+    if (!selectedEnvironment) {
+      return
+    }
+
+    const timer = window.setTimeout(() => {
+      setStableSelectedEnvironment(selectedEnvironment)
+    }, 100)
+
+    return () => {
+      window.clearTimeout(timer)
+    }
+  }, [selectedEnvironment])
+
+  useEffect(() => {
     let isMounted = true
 
     const loadPricing = async () => {
@@ -935,7 +1345,13 @@ export default function Dashboard({
         return
       }
 
-      const key = `energy_pricing_${selectedEnvironment}`
+      const key = `energy_pricing_${environmentScope}`
+      const runtimePricingKey = makeDashboardCacheKey(['pricing', environmentScope])
+
+      const runtimePricing = getDashboardResponseCache<EnergyPricingConfig>(runtimePricingKey)
+      if (runtimePricing) {
+        setPricingConfig(runtimePricing)
+      }
 
       try {
         const cached = localStorage.getItem(key)
@@ -955,7 +1371,7 @@ export default function Dashboard({
 
       try {
         const token = await getAuthToken()
-        const response = await fetch(`/.netlify/functions/get-energy-pricing?environmentId=${encodeURIComponent(selectedEnvironment)}`, {
+        const response = await fetch(`/.netlify/functions/get-energy-pricing?environmentId=${encodeURIComponent(selectedEnvironmentRequestId)}`, {
           headers: { Authorization: `Bearer ${token}` },
         })
 
@@ -972,7 +1388,8 @@ export default function Dashboard({
 
         if (normalized) {
           setPricingConfig(normalized)
-          localStorage.setItem(key, JSON.stringify(normalized))
+          storeLocalJson(key, normalized)
+          setDashboardResponseCache(runtimePricingKey, normalized, 30 * 60_000)
         } else {
           setPricingConfig(null)
         }
@@ -986,7 +1403,7 @@ export default function Dashboard({
     return () => {
       isMounted = false
     }
-  }, [selectedEnvironment, isAuthenticated, getAuthToken])
+  }, [environmentScope, getAuthToken, isAuthenticated, selectedEnvironment, selectedEnvironmentRequestId])
 
   useEffect(() => {
     if (!selectedEnvironment) {
@@ -1099,12 +1516,12 @@ export default function Dashboard({
             setDynamicGasPricePerM3(resolvedGasPrice)
           }
 
-          localStorage.setItem(dynamicPriceCacheKey, JSON.stringify({
+          storeLocalJson(dynamicPriceCacheKey, {
             value: resolvedPrice,
             electricityValue: resolvedPrice,
             gasValue: resolvedGasPrice,
             updatedAt: new Date().toISOString(),
-          }))
+          })
         }
       } catch (error) {
         if (!isMounted) {
@@ -1166,6 +1583,71 @@ export default function Dashboard({
   }, [dynamicPriceCacheKey, pricingConfig?.type, selectedEnvironment])
 
   useEffect(() => {
+    if (!selectedEnvironment) {
+      setIsEnvironmentOffline(false)
+      setOfflineLastSeenAt(null)
+      return
+    }
+
+    const cached = readCachedOverviewStatus(selectedEnvironment)
+    if (cached?.status === 'offline') {
+      setIsEnvironmentOffline(true)
+      setOfflineLastSeenAt(cached.lastSeenAt ?? null)
+      return
+    }
+
+    setIsEnvironmentOffline(false)
+    setOfflineLastSeenAt(cached?.lastSeenAt ?? null)
+  }, [readCachedOverviewStatus, selectedEnvironment])
+
+  useEffect(() => {
+    if (!selectedEnvironment || !isAuthenticated || !isEnvironmentOffline) {
+      return
+    }
+
+    let isDisposed = false
+
+    const checkEnvironmentHealth = async () => {
+      try {
+        const token = await getAuthToken()
+        if (isDisposed) {
+          return
+        }
+
+        const response = await fetch(`/.netlify/functions/ha-health?environmentId=${encodeURIComponent(selectedEnvironmentRequestId)}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+
+        if (isDisposed) {
+          return
+        }
+
+        if (response.ok) {
+          setIsEnvironmentOffline(false)
+          setHaConnectionStatus('connecting')
+          return
+        }
+
+        if (response.status === 502) {
+          console.warn(`[HA] Environment ${selectedEnvironmentRequestId} is unreachable`)
+        }
+      } catch {
+        // Keep offline state and retry on next interval.
+      }
+    }
+
+    void checkEnvironmentHealth()
+    const interval = window.setInterval(() => {
+      void checkEnvironmentHealth()
+    }, 5 * 60 * 1000)
+
+    return () => {
+      isDisposed = true
+      window.clearInterval(interval)
+    }
+  }, [getAuthToken, isAuthenticated, isEnvironmentOffline, selectedEnvironment, selectedEnvironmentRequestId])
+
+  useEffect(() => {
     // Keep current data visible while switching environment.
     // Fresh data is loaded in the background to avoid visible flashes.
     if (!selectedEnvironment) {
@@ -1192,6 +1674,7 @@ export default function Dashboard({
       if (cachedMetrics) {
         setHaMetricsSnapshot(cachedMetrics)
         setIsInitialLoading(false)
+        setEntitiesLoaded(true)
       }
 
       if (!Array.isArray(cachedEntities) || cachedEntities.length === 0) {
@@ -1214,6 +1697,7 @@ export default function Dashboard({
         setHaEntities(normalized)
         setLastKnownHaEntities(normalized)
         setIsInitialLoading(false)
+        setEntitiesLoaded(true)
       }
     } catch {
       // Ignore entity cache parse errors.
@@ -1222,7 +1706,7 @@ export default function Dashboard({
 
   // Load last known good values from Blobs — shown before live data arrives
   useEffect(() => {
-    if (!selectedEnvironment || !isAuthenticated) {
+    if (!stableSelectedEnvironment || stableSelectedEnvironment !== selectedEnvironment || !isAuthenticated) {
       return
     }
 
@@ -1233,7 +1717,7 @@ export default function Dashboard({
         const token = await getAuthToken()
         if (isCancelled) return
         const response = await fetch(
-          `/.netlify/functions/save-snapshot?environmentId=${encodeURIComponent(selectedEnvironment)}`,
+          `/.netlify/functions/save-snapshot?environmentId=${encodeURIComponent(selectedEnvironmentRequestId)}`,
           { headers: { Authorization: `Bearer ${token}` } },
         )
         if (isCancelled || !response.ok) return
@@ -1273,9 +1757,21 @@ export default function Dashboard({
   useEffect(() => {
     let isDisposed = false
     let latestRequestId = 0
+    let activeController: AbortController | null = null
 
     const loadHaEntities = async (silent = false) => {
       const requestId = ++latestRequestId
+
+      if (silent) {
+        if (silentHaRefreshInProgressRef.current) {
+          return
+        }
+
+        // Entity list changes infrequently; avoid hammering ha-entities in silent mode.
+        if (Date.now() - lastHaEntitiesFetchAtRef.current < 5 * 60_000) {
+          return
+        }
+      }
 
       if (!isAuthenticated) {
         if (!silent) {
@@ -1283,9 +1779,22 @@ export default function Dashboard({
         }
         return
       }
-      if (!selectedEnvironment) {
+      if (!isEnvironmentSelectionSettled) {
+        return
+      }
+      if (!stableSelectedEnvironment || stableSelectedEnvironment !== selectedEnvironment) {
         if (!silent) {
           setHaConnectionStatus('error')
+        }
+        return
+      }
+
+      if (isEnvironmentOffline) {
+        if (!silent) {
+          setHaLoading(false)
+          setHaConnectionStatus('error')
+          setHaError(null)
+          setIsInitialLoading(false)
         }
         return
       }
@@ -1293,10 +1802,23 @@ export default function Dashboard({
       if (!silent) {
         setHaLoading(true)
         setHaError(null)
-        setHaConnectionStatus('connecting')
+        if (!perfHaEntitiesTimerStartedRef.current) {
+          console.time('[PERF] ha-entities')
+          perfHaEntitiesTimerStartedRef.current = true
+        }
+        const overviewSnapshot = getOverviewLiveSnapshot(selectedEnvironment)
+        if (overviewSnapshot?.status === 'online') {
+          setHaConnectionStatus('connected')
+        } else {
+          setHaConnectionStatus('connecting')
+        }
       }
       
       try {
+        if (silent) {
+          silentHaRefreshInProgressRef.current = true
+        }
+
         const token = await getAuthToken()
         if (isDisposed || requestId !== latestRequestId) {
           return
@@ -1304,10 +1826,17 @@ export default function Dashboard({
 
         // eslint-disable-next-line no-console
         console.log(`[HA] ${silent ? '🔄 SILENT' : '📥 INITIAL'} refresh starting...`)
+
+        activeController?.abort()
+        activeController = new AbortController()
         
-        const response = await fetch(`/.netlify/functions/ha-entities?environmentId=${selectedEnvironment}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        })
+        const response = await throttledAuthFetch(
+          `/.netlify/functions/ha-entities?environmentId=${encodeURIComponent(stableSelectedEnvironmentRequestId)}&tzOffset=${new Date().getTimezoneOffset() * -1}`,
+          token,
+          {
+            signal: activeController.signal,
+          },
+        )
 
         if (isDisposed || requestId !== latestRequestId) {
           return
@@ -1318,8 +1847,19 @@ export default function Dashboard({
         
         if (!response.ok) {
           const data = await response.json().catch(() => null)
-          // eslint-disable-next-line no-console
-          console.error(`[HA] Error: ${data?.error || 'Unknown error'}`)
+          if (response.status === 502) {
+            console.warn(`[HA] Environment ${selectedEnvironmentRequestId} is unreachable`)
+            setIsEnvironmentOffline(true)
+            setOfflineLastSeenAt(Date.now())
+            setOverviewLiveSnapshot({
+              environmentId: selectedEnvironment,
+              status: 'offline',
+              lastSeenAt: Date.now(),
+            })
+          } else {
+            // eslint-disable-next-line no-console
+            console.error(`[HA] Error: ${data?.error || 'Unknown error'}`)
+          }
           if (!silent) {
             setHaConnectionStatus('error')
             setHaError(data?.error || 'Unable to load sensor data')
@@ -1329,23 +1869,55 @@ export default function Dashboard({
           return
         }
         
-        const data = await response.json()
+        let data = await response.json()
         if (isDisposed || requestId !== latestRequestId) {
           return
         }
 
-        const entities = Array.isArray(data?.entities) ? data.entities : []
-        const metrics = normalizeHaMetricsSnapshot(data?.metrics)
+        let entities = Array.isArray(data?.entities) ? data.entities : []
+        let metrics = normalizeHaMetricsSnapshot(data?.metrics)
+
+        if (entities.length === 0 && stableSelectedEnvironmentRequestId !== selectedEnvironment) {
+          const retryResponse = await throttledAuthFetch(
+            `/.netlify/functions/ha-entities?environmentId=${encodeURIComponent(selectedEnvironment)}&tzOffset=${new Date().getTimezoneOffset() * -1}`,
+            token,
+            {
+              signal: activeController.signal,
+              retriesMs: [],
+            },
+          )
+
+          if (retryResponse.ok) {
+            data = await retryResponse.json()
+            entities = Array.isArray(data?.entities) ? data.entities : []
+            metrics = normalizeHaMetricsSnapshot(data?.metrics)
+          }
+        }
         // eslint-disable-next-line no-console
         console.log(`[HA] ✅ Loaded ${entities.length} entities`)
         
         // Update entities AND keep them as last known
         setHaEntities(entities)
         setLastKnownHaEntities(entities)
+        setEntitiesLoaded(true)
+        setIsEnvironmentOffline(false)
         setHaMetricsSnapshot(metrics)
         storeLocalJson(haEntitiesCacheKey, { entities, metrics })
         setHaConnectionStatus('connected')
         setHaError(null)
+        setOverviewLiveSnapshot({
+          environmentId: selectedEnvironment,
+          status: 'online',
+          currentPower: metrics?.currentPowerKw ?? undefined,
+          dailyUsage: metrics?.dailyElectricityKwh ?? undefined,
+          lastUpdate: new Date().toLocaleTimeString(),
+          lastSeenAt: Date.now(),
+        })
+        lastHaEntitiesFetchAtRef.current = Date.now()
+        if (perfHaEntitiesTimerStartedRef.current) {
+          console.timeEnd('[PERF] ha-entities')
+          perfHaEntitiesTimerStartedRef.current = false
+        }
 
         // Persist latest known values to Netlify Blobs for offline fallback
         // Fire-and-forget: do NOT await, do NOT block rendering, do NOT show errors
@@ -1383,37 +1955,55 @@ export default function Dashboard({
           return
         }
 
+        if (error instanceof Error && error.name === 'AbortError') {
+          return
+        }
+
         // eslint-disable-next-line no-console
         console.error('[HA] Fetch error:', error);
         if (!silent) {
           setHaError(error instanceof Error ? error.message : 'Unable to load sensor data')
           setHaConnectionStatus('error')
           setIsInitialLoading(false) // Set false on error too so we show last known data
+          if (perfHaEntitiesTimerStartedRef.current) {
+            console.timeEnd('[PERF] ha-entities')
+            perfHaEntitiesTimerStartedRef.current = false
+          }
         }
         // NEVER clear entities on error - keep showing last known data
       } finally {
+        if (silent) {
+          silentHaRefreshInProgressRef.current = false
+        }
         if (!silent) {
           setHaLoading(false)
         }
       }
     }
     
-    // Initial load 
-    // eslint-disable-next-line no-console
-    console.log('[HA] Starting initial load...')
-    void loadHaEntities(false)
+    if (stableSelectedEnvironment && stableSelectedEnvironment === selectedEnvironment && isEnvironmentSelectionSettled) {
+      const nextLoadKey = `${stableSelectedEnvironmentRequestId}::${haRefreshKey}`
+      if (initialHaLoadKeyRef.current !== nextLoadKey) {
+        initialHaLoadKeyRef.current = nextLoadKey
+        // Initial load
+        // eslint-disable-next-line no-console
+        console.log('[HA] Starting initial load...')
+        void loadHaEntities(false)
+      }
+    }
     
-    // Auto-refresh every 10 seconds - ALWAYS silent, NEVER affects UI on error
+    // Auto-refresh every 30 seconds - ALWAYS silent, NEVER affects UI on error
     const interval = setInterval(() => {
       void loadHaEntities(true)
-    }, 10000)
+    }, 30000)
     
     return () => {
       isDisposed = true
       latestRequestId += 1
+      activeController?.abort()
       clearInterval(interval)
     }
-  }, [getAuthToken, haEntitiesCacheKey, isAuthenticated, selectedEnvironment, haRefreshKey])
+  }, [getAuthToken, haEntitiesCacheKey, isAuthenticated, selectedEnvironment, haRefreshKey, isEnvironmentOffline, stableSelectedEnvironment, stableSelectedEnvironmentRequestId, isEnvironmentSelectionSettled])
 
   const getControlActions = (domain: string) => {
     switch (domain) {
@@ -1457,9 +2047,11 @@ export default function Dashboard({
         throw new Error(data?.error || 'Unable to run action')
       }
 
-      const refresh = await fetch(`/.netlify/functions/ha-entities?environmentId=${selectedEnvironment}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
+      const refresh = await throttledAuthFetch(
+        `/.netlify/functions/ha-entities?environmentId=${encodeURIComponent(selectedEnvironmentRequestId)}&tzOffset=${new Date().getTimezoneOffset() * -1}`,
+        token,
+        { retriesMs: [] },
+      )
 
       if (refresh.ok) {
         const data = await refresh.json()
@@ -1495,6 +2087,7 @@ export default function Dashboard({
   const realTimeData = useMemo(() => {
     const entities = haEntities.length > 0 ? haEntities : lastKnownHaEntities
     const serverMetrics = haMetricsSnapshot
+    const overviewSnapshot = selectedEnvironment ? getOverviewLiveSnapshot(selectedEnvironment) : null
     
     // Helper function to parse numeric values from entity state
     const parseValue = (state: string): number => {
@@ -1502,7 +2095,7 @@ export default function Dashboard({
       return Number.isFinite(parsed) ? parsed : 0
     }
 
-    const environmentKey = selectedEnvironment || 'default'
+    const environmentKey = environmentScope
 
     const toSearchable = (entity: HaEntity) =>
       `${entity.entity_id} ${entity.friendly_name || ''}`.toLowerCase()
@@ -1700,8 +2293,8 @@ export default function Dashboard({
       const previousTotal = parseFloat(localStorage.getItem(keys.total) || '')
       const previousTs = parseInt(localStorage.getItem(keys.ts) || '', 10)
 
-      localStorage.setItem(keys.total, meterTotalKwh.toString())
-      localStorage.setItem(keys.ts, now.toString())
+      storeLocalValue(keys.total, meterTotalKwh.toString())
+      storeLocalValue(keys.ts, now.toString())
 
       if (!Number.isFinite(previousTotal) || !Number.isFinite(previousTs)) {
         return 0
@@ -1774,14 +2367,14 @@ export default function Dashboard({
 
       if (storedDailyDate !== today || !Number.isFinite(storedDailyBase)) {
         dailyBase = gasMeterTotal
-        localStorage.setItem(keys.dailyDate, today)
-        localStorage.setItem(keys.dailyBase, gasMeterTotal.toString())
+        storeLocalValue(keys.dailyDate, today)
+        storeLocalValue(keys.dailyBase, gasMeterTotal.toString())
       }
 
       if (storedMonthValue !== thisMonth || !Number.isFinite(storedMonthBase)) {
         monthBase = gasMeterTotal
-        localStorage.setItem(keys.monthValue, thisMonth)
-        localStorage.setItem(keys.monthBase, gasMeterTotal.toString())
+        storeLocalValue(keys.monthValue, thisMonth)
+        storeLocalValue(keys.monthBase, gasMeterTotal.toString())
       }
 
       return {
@@ -1828,6 +2421,8 @@ export default function Dashboard({
 
     if (serverMetrics?.currentPowerKw !== null && serverMetrics?.currentPowerKw !== undefined) {
       currentPower = serverMetrics.currentPowerKw
+    } else if (!Number.isFinite(currentPower) && Number.isFinite(overviewSnapshot?.currentPower)) {
+      currentPower = Number(overviewSnapshot?.currentPower)
     } else if (!Number.isFinite(currentPower) && totalEnergyEntity) {
       currentPower = derivePowerFromEnergyMeter(parseValue(totalEnergyEntity.state))
     }
@@ -2073,18 +2668,18 @@ export default function Dashboard({
     return String(source).replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 120)
   }, [haMetricsSnapshot?.sources?.currentProductionEntityId])
 
-  const livePowerStorageKey = `energy_live_power_samples_v3_${selectedEnvironment || 'default'}_${powerHistoryScope}`
-  const liveProductionStorageKey = `energy_live_production_samples_v2_${selectedEnvironment || 'default'}_${productionHistoryScope}`
-  const liveGasStorageKey = `energy_gas_hourly_data_${selectedEnvironment || 'default'}`
-  const historyArchiveStorageKey = `energy_history_archive_hourly_v2_${selectedEnvironment || 'default'}`
+  const livePowerStorageKey = `energy_live_power_samples_v3_${environmentScope}_${powerHistoryScope}`
+  const liveProductionStorageKey = `energy_live_production_samples_v2_${environmentScope}_${productionHistoryScope}`
+  const liveGasStorageKey = `energy_gas_hourly_data_${environmentScope}`
+  const historyArchiveStorageKey = `energy_history_archive_hourly_v2_${environmentScope}`
   const legacyHistoryArchiveStorageKeys = useMemo(
     () => [
-      `energy_history_archive_hourly_v1_${selectedEnvironment || 'default'}_${powerHistoryScope}_${productionHistoryScope}`,
-      `energy_history_archive_hourly_v1_${selectedEnvironment || 'default'}_fallback_fallback`,
+      `energy_history_archive_hourly_v1_${environmentScope}_${powerHistoryScope}_${productionHistoryScope}`,
+      `energy_history_archive_hourly_v1_${environmentScope}_fallback_fallback`,
     ],
-    [selectedEnvironment, powerHistoryScope, productionHistoryScope],
+    [environmentScope, powerHistoryScope, productionHistoryScope],
   )
-  const environmentInstalledOnStorageKey = `energy_environment_installed_on_v3_${selectedEnvironment || 'default'}`
+  const environmentInstalledOnStorageKey = `energy_environment_installed_on_v3_${environmentScope}`
   const latestPowerRef = useRef(realTimeData.currentPower)
   const latestProductionRef = useRef(realTimeData.currentProduction)
   const haEntitiesRef = useRef(haEntities)
@@ -2110,7 +2705,7 @@ export default function Dashboard({
     try {
       const stored = localStorage.getItem(livePowerStorageKey)
       if (!stored) {
-        setPowerSamples([])
+        // Keep current in-memory samples while new key is still warming up.
         return
       }
 
@@ -2118,7 +2713,7 @@ export default function Dashboard({
       const cleaned = sanitizePowerSampleArray(parsed).slice(-MAX_LIVE_SAMPLE_POINTS)
       setPowerSamples(cleaned)
     } catch {
-      setPowerSamples([])
+      // Keep existing samples on parse errors.
     }
   }, [livePowerStorageKey])
 
@@ -2126,7 +2721,7 @@ export default function Dashboard({
     try {
       const stored = localStorage.getItem(liveProductionStorageKey)
       if (!stored) {
-        setProductionSamples([])
+        // Keep current in-memory samples while new key is still warming up.
         return
       }
 
@@ -2134,7 +2729,7 @@ export default function Dashboard({
       const cleaned = sanitizePowerSampleArray(parsed).slice(-MAX_LIVE_SAMPLE_POINTS)
       setProductionSamples(cleaned)
     } catch {
-      setProductionSamples([])
+      // Keep existing samples on parse errors.
     }
   }, [liveProductionStorageKey])
 
@@ -2216,7 +2811,7 @@ export default function Dashboard({
   }, [environmentInstalledOnStorageKey])
 
   useEffect(() => {
-    if (!selectedEnvironment || !isAuthenticated) {
+    if (!stableSelectedEnvironment || stableSelectedEnvironment !== selectedEnvironment || !isAuthenticated) {
       return
     }
 
@@ -2244,7 +2839,7 @@ export default function Dashboard({
 
         pushEntityId(metricSources?.electricityTotalEntityId)
         pushEntityId(metricSources?.electricityProductionTotalEntityId)
-        pushEntityId(metricSources?.gasTotalEntityId)
+        pushEntityId(metricSources?.gasEntityId || metricSources?.gasTotalEntityId)
         pushEntityId(metricSources?.dailyElectricityEntityId)
         pushEntityId(metricSources?.monthlyElectricityEntityId)
         pushEntityId(metricSources?.dailyProductionEntityId)
@@ -2303,14 +2898,10 @@ export default function Dashboard({
         const now = Date.now()
         const startTimeIso = new Date(now - ARCHIVE_LOOKBACK_DAYS * 24 * 60 * 60_000).toISOString()
         const endTimeIso = new Date(now).toISOString()
-        const selectedIds = prioritizedIds.slice(0, 30)
+        const selectedIds = prioritizedIds.slice(0, 8)
 
-        const url = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(startTimeIso)}&endTime=${encodeURIComponent(endTimeIso)}&entityIds=${encodeURIComponent(selectedIds.join(','))}&mode=history`
-        const response = await fetch(url, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        })
+        const url = `/.netlify/functions/energy-data?environmentId=${encodeURIComponent(stableSelectedEnvironmentRequestId)}&startTime=${encodeURIComponent(startTimeIso)}&endTime=${encodeURIComponent(endTimeIso)}&entityIds=${encodeURIComponent(selectedIds.join(','))}&mode=history&resolution=hourly`
+        const response = await deduplicatedAuthFetch(url, token)
 
         if (!response.ok || isDisposed) {
           return
@@ -2341,7 +2932,7 @@ export default function Dashboard({
             const canonicalInstalledOnMs = Number.isFinite(persistedInstalledOnMs) && persistedInstalledOnMs > 0
               ? Math.min(persistedInstalledOnMs, mergedWithPrevious)
               : mergedWithPrevious
-            localStorage.setItem(environmentInstalledOnStorageKey, String(canonicalInstalledOnMs))
+            storeLocalValue(environmentInstalledOnStorageKey, String(canonicalInstalledOnMs))
             return canonicalInstalledOnMs
           } catch {
             return mergedWithPrevious
@@ -2373,7 +2964,154 @@ export default function Dashboard({
     haMetricsSnapshot?.sources?.monthlyGasEntityId,
     haMetricsSnapshot?.sources?.currentPowerEntityId,
     haMetricsSnapshot?.sources?.currentProductionEntityId,
+    entitiesLoaded,
+    isEnvironmentOffline,
   ])
+
+  useEffect(() => {
+    if (!selectedEnvironment || !isAuthenticated || !entitiesLoaded || isEnvironmentOffline) {
+      return
+    }
+
+    let cancelled = false
+
+    const warmupParallel = async () => {
+      try {
+        const token = await getAuthToken()
+        if (cancelled) return
+
+        const bounds = getBoundsFromInputDates(selectedStartDate, selectedEndDate)
+        const startIso = new Date(Math.max(0, bounds.startMs - 60 * 60_000)).toISOString()
+        const endIso = new Date(Math.min(bounds.endMs, Date.now())).toISOString()
+        const preferredPowerEntityId = haMetricsSnapshotRef.current?.powerEntityId
+        const historyResolution = getHistoryResolution(timeRange)
+
+        const historyUrl = preferredPowerEntityId
+          ? `/.netlify/functions/energy-data?environmentId=${encodeURIComponent(stableSelectedEnvironmentRequestId)}&startTime=${encodeURIComponent(startIso)}&endTime=${encodeURIComponent(endIso)}&entityIds=${encodeURIComponent(preferredPowerEntityId)}&resolution=${encodeURIComponent(historyResolution)}`
+          : null
+
+        const gasEntityId = haMetricsSnapshotRef.current?.sources?.gasEntityId || haMetricsSnapshotRef.current?.sources?.gasTotalEntityId
+        const gasHoursBack = Math.max(200, Math.ceil((Date.now() - bounds.startMs) / 3_600_000) + 24)
+        const gasUrl = `/.netlify/functions/energy-data?environmentId=${encodeURIComponent(stableSelectedEnvironmentRequestId)}&hoursBack=${gasHoursBack}${gasEntityId ? `&entityId=${encodeURIComponent(gasEntityId)}` : ''}`
+
+        const pricingUrl = `/.netlify/functions/get-energy-pricing?environmentId=${encodeURIComponent(stableSelectedEnvironmentRequestId)}`
+
+        const sources = haMetricsSnapshotRef.current?.sources
+        const usageEntityIds = [
+          ...(sources?.consumptionEntityIds ?? []),
+          ...(sources?.exportEntityIds ?? []),
+        ]
+          .filter((id): id is string => typeof id === 'string' && id.length > 0)
+          .filter((id, index, all) => all.indexOf(id) === index)
+          .join(',')
+        const usagePeriod = timeRange === 'month' ? 'day' : 'hour'
+        const usageUrl = usageEntityIds
+          ? `/.netlify/functions/energy-data?environmentId=${encodeURIComponent(stableSelectedEnvironmentRequestId)}&startTime=${encodeURIComponent(new Date(bounds.startMs).toISOString())}&endTime=${encodeURIComponent(new Date(Math.min(bounds.endMs, Date.now())).toISOString())}&entityIds=${encodeURIComponent(usageEntityIds)}&mode=statistics&period=${usagePeriod}&resolution=${encodeURIComponent(historyResolution)}&tzOffset=${new Date().getTimezoneOffset() * -1}`
+          : null
+
+        const tasks: Promise<Response>[] = [
+          deduplicatedAuthFetch(pricingUrl, token),
+          deduplicatedAuthFetch(gasUrl, token),
+        ]
+
+        if (historyUrl) tasks.push(deduplicatedAuthFetch(historyUrl, token))
+        if (usageUrl) tasks.push(deduplicatedAuthFetch(usageUrl, token))
+
+        await Promise.all(tasks.map((task) => task.catch(() => null)))
+      } catch {
+        // Ignore warmup failures.
+      }
+    }
+
+    void warmupParallel()
+    return () => {
+      cancelled = true
+    }
+  }, [entitiesLoaded, getAuthToken, isAuthenticated, isEnvironmentOffline, selectedEndDate, selectedEnvironment, selectedStartDate, stableSelectedEnvironmentRequestId, timeRange])
+
+  useEffect(() => {
+    if (!selectedEnvironment || !isAuthenticated || !entitiesLoaded || isEnvironmentOffline) {
+      return
+    }
+
+    const nextRange = timeRange === 'today' ? 'week' : timeRange === 'week' ? 'month' : null
+    if (!nextRange) {
+      return
+    }
+
+    const cancelIdle = runOnIdle(() => {
+      void (async () => {
+        try {
+          const preferredPowerEntityId = haMetricsSnapshotRef.current?.powerEntityId
+          if (!preferredPowerEntityId) {
+            return
+          }
+
+          const now = new Date()
+          const endDate = formatDateForInput(now)
+          const startDate = (() => {
+            if (nextRange === 'week') {
+              const dayOfWeek = now.getDay()
+              const diffToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1
+              const monday = new Date(now)
+              monday.setDate(now.getDate() - diffToMonday)
+              return formatDateForInput(monday)
+            }
+            const firstOfMonth = new Date(now.getFullYear(), now.getMonth(), 1)
+            return formatDateForInput(firstOfMonth)
+          })()
+
+          const bounds = getBoundsFromInputDates(startDate, endDate)
+          const startMs = bounds.startMs
+          const endMs = Math.min(bounds.endMs, Date.now())
+          const resolution = getHistoryResolution(nextRange)
+
+          const cacheKey = makeDashboardCacheKey([
+            'history',
+            environmentScope,
+            startMs,
+            endMs,
+            resolution,
+            preferredPowerEntityId,
+          ])
+
+          if (getDashboardResponseCache(cacheKey)) {
+            return
+          }
+
+          const token = await getAuthToken()
+          const startIso = new Date(startMs - 60 * 60_000).toISOString()
+          const endIso = new Date(endMs).toISOString()
+          const url = `/.netlify/functions/energy-data?environmentId=${encodeURIComponent(stableSelectedEnvironmentRequestId)}&startTime=${encodeURIComponent(startIso)}&endTime=${encodeURIComponent(endIso)}&entityIds=${encodeURIComponent(preferredPowerEntityId)}&resolution=${encodeURIComponent(resolution)}`
+          const response = await deduplicatedAuthFetch(url, token)
+          if (!response.ok) {
+            return
+          }
+
+          const result = await response.json()
+          const historyData = Array.isArray(result?.entities) ? result.entities : []
+          const raw = historyData[0]?.history || []
+          const parsed = raw
+            .map((state: any) => ({
+              timestamp: Number(state?.timestamp),
+              power: Number(state?.value),
+            }))
+            .filter((sample: PowerSample) => Number.isFinite(sample.timestamp) && Number.isFinite(sample.power))
+          const downsampled = downsampleLTTB(parsed, getLttbTarget(nextRange))
+          setDashboardResponseCache(cacheKey, {
+            powerSamples: downsampled,
+            productionSamples: [],
+          }, nextRange === 'week' ? 15 * 60_000 : 30 * 60_000)
+        } catch {
+          // Ignore prefetch failures.
+        }
+      })()
+    })
+
+    return () => {
+      cancelIdle()
+    }
+  }, [entitiesLoaded, environmentScope, getAuthToken, isAuthenticated, isEnvironmentOffline, selectedEnvironment, stableSelectedEnvironmentRequestId, timeRange])
 
   // Load stored gas data from localStorage immediately (before async fetch)
   useEffect(() => {
@@ -2403,27 +3141,91 @@ export default function Dashboard({
 
   // Fetch hourly gas consumption
   useEffect(() => {
-    if (!selectedEnvironment || !isAuthenticated) {
+    if (!stableSelectedEnvironment || stableSelectedEnvironment !== selectedEnvironment || !isAuthenticated) {
+      return
+    }
+    if (!entitiesLoaded || isEnvironmentOffline) {
       return
     }
 
     const fetchGasHourly = async () => {
       try {
         const token = await getAuthToken()
-        const gasEntityId = haMetricsSnapshotRef.current?.sources?.gasTotalEntityId
-        const url = `/.netlify/functions/get-gas-hourly?environmentId=${encodeURIComponent(selectedEnvironment)}&hoursBack=200${gasEntityId ? `&entityId=${encodeURIComponent(gasEntityId)}` : ''}`
-        console.log('[Gas Hourly] Using entity:', gasEntityId || '(default)')
+        // Read entity ID from reactive state (not ref) so it's available when the dependency triggers this effect
+        const gasEntityId =
+          haMetricsSnapshot?.sources?.gasEntityId ||
+          haMetricsSnapshot?.sources?.gasTotalEntityId ||
+          haMetricsSnapshotRef.current?.sources?.gasEntityId ||
+          haMetricsSnapshotRef.current?.sources?.gasTotalEntityId
+        // Compute hoursBack to cover the full selected date range (week/month)
+        const gasBounds = getBoundsFromInputDates(selectedStartDate, selectedEndDate)
+        // For month view, expand start to installation date so gas chart matches electricity range
+        const gasStartMs = timeRange === 'month' && environmentInstalledOnMs
+          ? Math.min(gasBounds.startMs, environmentInstalledOnMs)
+          : gasBounds.startMs
+        const hoursBack = Math.max(200, Math.ceil((Date.now() - gasStartMs) / 3_600_000) + 24)
+        const isTodayRange = selectedStartDate === selectedEndDate && selectedEndDate === formatDateForInput(new Date())
+        const gasTtlMs = timeRange === 'today'
+          ? (isTodayRange ? 2 * 60_000 : 60 * 60_000)
+          : timeRange === 'week'
+            ? 15 * 60_000
+            : 30 * 60_000
+        const runtimeGasCacheKey = makeDashboardCacheKey([
+          'gas-hourly',
+          environmentScope,
+          gasEntityId || 'default',
+          hoursBack,
+          timeRange,
+          selectedStartDate,
+          selectedEndDate,
+        ])
+
+        const fetchKey = `${stableSelectedEnvironmentRequestId}::${hoursBack}::${gasEntityId || 'default'}::${timeRange}::${selectedStartDate}::${selectedEndDate}`
+        if (fetchKey === lastGasFetchKeyRef.current) {
+          return
+        }
+        lastGasFetchKeyRef.current = fetchKey
+
+        const runtimeGasHit = getDashboardResponseCache<Array<{ timestamp: number; value: number }>>(runtimeGasCacheKey)
+        if (runtimeGasHit && runtimeGasHit.length > 0) {
+          setGasMeterReadings(runtimeGasHit)
+        }
+
+        const url = `/.netlify/functions/energy-data?environmentId=${encodeURIComponent(stableSelectedEnvironmentRequestId)}&hoursBack=${hoursBack}${gasEntityId ? `&entityId=${encodeURIComponent(gasEntityId)}` : ''}`
+        console.log('[Gas Hourly DEBUG] === fetchGasHourly START ===')
+        console.log('[Gas Hourly DEBUG] gasEntityId:', gasEntityId || '(default → sensor.gas_meter_gas_consumption)')
+        console.log('[Gas Hourly DEBUG] haMetricsSnapshot?.sources?.gasTotalEntityId:', haMetricsSnapshot?.sources?.gasTotalEntityId)
+        console.log('[Gas Hourly DEBUG] haMetricsSnapshotRef.current?.sources?.gasTotalEntityId:', haMetricsSnapshotRef.current?.sources?.gasTotalEntityId)
+        console.log('[Gas Hourly DEBUG] selectedStartDate:', selectedStartDate, 'selectedEndDate:', selectedEndDate)
+        console.log('[Gas Hourly DEBUG] hoursBack:', hoursBack, 'gasBounds.startMs:', new Date(gasBounds.startMs).toISOString())
+        console.log('[Gas Hourly DEBUG] Full URL:', url)
         
-        const response = await fetch(url, {
-          headers: { Authorization: `Bearer ${token}` },
-        })
+        const response = await deduplicatedAuthFetch(url, token)
 
         if (!response.ok) {
-          console.error('[Gas Hourly] Fetch failed:', response.status)
+          lastGasFetchKeyRef.current = ''
+          if (response.status === 502) {
+            console.warn(`[HA] Environment ${selectedEnvironmentRequestId} is unreachable`)
+            setIsEnvironmentOffline(true)
+            setOfflineLastSeenAt(Date.now())
+          } else {
+            console.error('[Gas Hourly] Fetch failed:', response.status)
+          }
           return
         }
 
         const data = await response.json()
+        console.log('[Gas Hourly DEBUG] Response entity_id:', data.entity_id)
+        console.log('[Gas Hourly DEBUG] hourly array length:', data.hourly?.length)
+        console.log('[Gas Hourly DEBUG] totalReadings:', data.totalReadings)
+        console.log('[Gas Hourly DEBUG] timeRange:', JSON.stringify(data.timeRange))
+        if (data.message) console.log('[Gas Hourly DEBUG] message:', data.message)
+        if (Array.isArray(data.hourly) && data.hourly.length > 0) {
+          const nonZero = data.hourly.filter((h: any) => h.delta > 0)
+          console.log('[Gas Hourly DEBUG] Non-zero hourly deltas:', nonZero.length, 'total delta:', nonZero.reduce((s: number, h: any) => s + h.delta, 0).toFixed(3))
+          console.log('[Gas Hourly DEBUG] First hourly:', JSON.stringify(data.hourly[0]))
+          console.log('[Gas Hourly DEBUG] Last hourly:', JSON.stringify(data.hourly[data.hourly.length - 1]))
+        }
         console.log('[Gas Hourly] Got', data.hourly?.length, 'hourly readings')
 
         // Convert hourly deltas to meter readings (cumulative)
@@ -2438,13 +3240,17 @@ export default function Dashboard({
           }
 
           setGasMeterReadings(readings)
+          setDashboardResponseCache(runtimeGasCacheKey, readings, gasTtlMs)
+          console.log('[Gas Hourly DEBUG] Set gasMeterReadings:', readings.length, 'cumulative readings')
+          console.log('[Gas Hourly DEBUG] First reading:', JSON.stringify(readings[0]), 'Last reading:', JSON.stringify(readings[readings.length - 1]))
           // Cache in localStorage for instant display on next load
-          localStorage.setItem(liveGasStorageKey, JSON.stringify(readings))
+          storeLocalJson(liveGasStorageKey, readings)
         } else {
           console.log('[Gas Hourly] No hourly data')
           setGasMeterReadings([])
         }
       } catch (error) {
+        lastGasFetchKeyRef.current = ''
         console.error('[Gas Hourly] Error:', error)
       }
     }
@@ -2452,11 +3258,14 @@ export default function Dashboard({
     fetchGasHourly()
     const interval = window.setInterval(fetchGasHourly, 5 * 60 * 1000) // Refresh every 5 min
     return () => window.clearInterval(interval)
-  }, [getAuthToken, isAuthenticated, liveGasStorageKey, selectedEnvironment])
+  }, [environmentInstalledOnMs, entitiesLoaded, getAuthToken, haMetricsSnapshot?.sources?.gasEntityId, haMetricsSnapshot?.sources?.gasTotalEntityId, isAuthenticated, isEnvironmentOffline, liveGasStorageKey, selectedEndDate, selectedEnvironment, selectedStartDate, stableSelectedEnvironment, stableSelectedEnvironmentRequestId, timeRange])
 
   // Pre-warm cache for week and month ranges so switching is instant
   useEffect(() => {
     if (!selectedEnvironment || !isAuthenticated || haEntities.length === 0) {
+      return
+    }
+    if (!entitiesLoaded || isEnvironmentOffline) {
       return
     }
 
@@ -2470,7 +3279,7 @@ export default function Dashboard({
       // Warm the same cache key that fetchHistoricalData reads (history mode, 15-min buckets, 5-min TTL)
       const cacheStartKey = Math.floor(startMs / (15 * 60_000))
       const cacheEndKey = Math.floor(clampedEnd / (15 * 60_000))
-      const cacheKey = `ha_history_v5_${selectedEnvironment}_${cacheStartKey}_${cacheEndKey}`
+      const cacheKey = `ha_history_v5_${environmentScope}_${cacheStartKey}_${cacheEndKey}`
 
       try {
         const cached = localStorage.getItem(cacheKey)
@@ -2509,8 +3318,10 @@ export default function Dashboard({
         if (isDisposed) return
 
         // Use history mode (power/kW entities are not in HA long-term statistics)
-        const url = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(new Date(startMs).toISOString())}&endTime=${encodeURIComponent(new Date(clampedEnd).toISOString())}&entityIds=${encodeURIComponent(entityIds.join(','))}`
-        const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
+        const spanMs = Math.max(0, clampedEnd - startMs)
+        const inferredResolution = spanMs > 14 * 24 * 60 * 60_000 ? 'hourly' : '5min'
+        const url = `/.netlify/functions/energy-data?environmentId=${encodeURIComponent(stableSelectedEnvironmentRequestId)}&startTime=${encodeURIComponent(new Date(startMs).toISOString())}&endTime=${encodeURIComponent(new Date(clampedEnd).toISOString())}&entityIds=${encodeURIComponent(entityIds.join(','))}&resolution=${encodeURIComponent(inferredResolution)}`
+        const response = await deduplicatedAuthFetch(url, token)
         if (!response.ok || isDisposed) return
 
         const result = await response.json()
@@ -2536,7 +3347,7 @@ export default function Dashboard({
         const productionSamples = toSamples(prodData?.history)
 
         if (powerSamples.length > 0) {
-          localStorage.setItem(cacheKey, JSON.stringify({ fetchTime: Date.now(), powerSamples, productionSamples }))
+          storeLocalJson(cacheKey, { fetchTime: Date.now(), powerSamples, productionSamples })
           console.log('[Prefetch] Cached', powerSamples.length, 'samples for range', new Date(startMs).toLocaleDateString())
         }
       } catch { /* ignore prefetch errors */ }
@@ -2557,14 +3368,40 @@ export default function Dashboard({
       window.clearTimeout(t1)
       window.clearTimeout(t2)
     }
-  }, [selectedEnvironment, isAuthenticated, haEntities.length, environmentInstalledOnMs, getAuthToken])
+  }, [selectedEnvironment, isAuthenticated, haEntities.length, environmentInstalledOnMs, getAuthToken, entitiesLoaded, isEnvironmentOffline, stableSelectedEnvironmentRequestId])
 
   // Clear stale bucket/statistic-ID caches when the selected environment changes
   const prevSelectedEnvironmentRef = useRef<string>('')
   useEffect(() => {
     const prev = prevSelectedEnvironmentRef.current
     if (prev && prev !== selectedEnvironment) {
-      // Clear only keys belonging to the previous environment
+      // Privacy: immediately clear all environment-specific in-memory state
+      // so data from the previous environment is never visible during loading.
+      setHaEntities([])
+      setEntitiesLoaded(false)
+      setIsEnvironmentOffline(false)
+      setOfflineLastSeenAt(null)
+      setLastKnownHaEntities([])
+      setHaMetricsSnapshot(null)
+      setPowerSamples([])
+      setProductionSamples([])
+      setHistoricalRangeSamples([])
+      setHistoricalProductionRangeSamples([])
+      setArchivedPowerSamples([])
+      setArchivedProductionSamples([])
+      setElectricityUsageBuckets([])
+      setGasMeterReadings([])
+      setHaError(null)
+      setHaConnectionStatus('connecting')
+      setIsInitialLoading(true)
+      setEnvironmentInstalledOnMs(null)
+      setPricingConfig(null)
+      setDynamicPricePoints([])
+      setDynamicPriceUpdatedAt(null)
+      setDynamicConsumerPriceKwh(null)
+      setDynamicGasPricePerM3(null)
+
+      // Clear only localStorage keys belonging to the previous environment
       const keysToRemove = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)).filter(
         (key): key is string =>
           key !== null && (
@@ -2578,9 +3415,33 @@ export default function Dashboard({
     prevSelectedEnvironmentRef.current = selectedEnvironment
   }, [selectedEnvironment])
 
+  // Derive a stable entity-ID key for the statistics effect.
+  // This prevents re-fires when the snapshot object churns (null → cached → blob → ha-entities)
+  // but the actual entity IDs to fetch haven't changed.
+  const statisticsEntityIdsKey = useMemo(() => {
+    const s = haMetricsSnapshot?.sources
+    if (!s) return ''
+    const consumption = [
+      ...(s.consumptionEntityIds ?? []),
+    ].filter((id): id is string => typeof id === 'string' && id.length > 0)
+    const production = [
+      ...(s.exportEntityIds ?? []),
+    ].filter((id): id is string => typeof id === 'string' && id.length > 0)
+    const all = [...new Set([...consumption, ...production])].sort()
+    return all.join(',')
+  }, [haMetricsSnapshot?.sources])
+
   // Fetch electricity usage statistics (kWh per hour/day) — matches HA "Electricity usage" bar chart
   useEffect(() => {
-    if (!selectedEnvironment || !isAuthenticated) {
+    if (!stableSelectedEnvironment || stableSelectedEnvironment !== selectedEnvironment || !isAuthenticated) {
+      return
+    }
+    if (!entitiesLoaded || isEnvironmentOffline) {
+      return
+    }
+    // Wait until we have usable entity IDs from the server snapshot.
+    // An empty key means sources are absent or all null (e.g. blob fallback without sources).
+    if (!statisticsEntityIdsKey) {
       return
     }
 
@@ -2592,9 +3453,18 @@ export default function Dashboard({
       const clampedEnd = Math.min(bounds.endMs, now)
 
       // For month range, clamp start to installed-on date (use the LATER of month-start and install date)
-      const startMs = timeRange === 'month'
-        ? Math.max(bounds.startMs, environmentInstalledOnMs ?? bounds.startMs)
+      const startMs = timeRange === 'month' && environmentInstalledOnMs
+        ? Math.min(bounds.startMs, environmentInstalledOnMs)
         : bounds.startMs
+
+      console.log('[Usage Stats DEBUG] === fetchUsageStatistics START ===')
+      console.log('[Usage Stats DEBUG] timeRange:', timeRange, 'selectedStartDate:', selectedStartDate, 'selectedEndDate:', selectedEndDate)
+      console.log('[Usage Stats DEBUG] bounds:', { startMs: new Date(bounds.startMs).toISOString(), endMs: new Date(bounds.endMs).toISOString() })
+      console.log('[Usage Stats DEBUG] clampedEnd:', new Date(clampedEnd).toISOString(), 'startMs:', new Date(startMs).toISOString())
+      console.log('[Usage Stats DEBUG] environmentInstalledOnMs:', environmentInstalledOnMs ? new Date(environmentInstalledOnMs).toISOString() : 'null')
+      console.log('[Usage Stats DEBUG] haMetricsSnapshot exists:', !!haMetricsSnapshot)
+      console.log('[Usage Stats DEBUG] haMetricsSnapshotRef.current exists:', !!haMetricsSnapshotRef.current)
+      console.log('[Usage Stats DEBUG] haMetricsSnapshotRef.current?.sources:', JSON.stringify(haMetricsSnapshotRef.current?.sources ?? null))
 
       if (environmentInstalledOnMs && startMs === environmentInstalledOnMs) {
         console.log('[Usage Stats] startMs:', new Date(startMs).toISOString(), '(from installedOn)')
@@ -2606,19 +3476,22 @@ export default function Dashboard({
 
       // statistics period: hour for today/week, day for month
       const period = timeRange === 'month' ? 'day' : 'hour'
+      const isTodayRange = selectedStartDate === selectedEndDate && selectedEndDate === formatDateForInput(new Date())
+      const usageTtlMs = timeRange === 'today'
+        ? (isTodayRange ? 2 * 60_000 : 60 * 60_000)
+        : timeRange === 'week'
+          ? 15 * 60_000
+          : 30 * 60_000
 
       // --- Step A: get confirmed statistic IDs from HA ---
       // Priority 1: use electricityConsumptionEntityIds + electricityProductionEntityIds from sources
       // (set by ha-entities.js enrichMetricsWithHistoryFallback from stored detection in Fix A)
       const sources = haMetricsSnapshotRef.current?.sources
       const storedConsumptionIds: string[] = Array.from(new Set([
-        ...(sources?.electricityConsumptionEntityIds ?? []),
-        ...(sources?.electricityTotalEntityIds ?? []),
-        sources?.electricityTotalEntityId,
+        ...(sources?.consumptionEntityIds ?? []),
       ].filter((id): id is string => typeof id === 'string' && id.length > 0)))
       const storedProductionIds: string[] = Array.from(new Set([
-        ...(sources?.electricityProductionEntityIds ?? []),
-        ...(sources?.electricityProductionTotalEntityIds ?? []),
+        ...(sources?.exportEntityIds ?? []),
       ].filter((id): id is string => typeof id === 'string' && id.length > 0)))
 
       // All entity IDs to fetch statistics for (consumption + production together)
@@ -2628,7 +3501,7 @@ export default function Dashboard({
 
       if (storedConsumptionIds.length > 0) {
         // Priority 1: use stored detection results
-        entityIds = [...storedConsumptionIds, ...storedProductionIds]
+        entityIds = Array.from(new Set([...storedConsumptionIds, ...storedProductionIds]))
         productionEntityIdsForFetch = storedProductionIds
         console.log('[Usage Stats] Using stored consumption IDs:', storedConsumptionIds.join(', '))
         if (storedProductionIds.length > 0) {
@@ -2636,7 +3509,7 @@ export default function Dashboard({
         }
       } else {
         // Priority 2: try get-ha-statistic-ids then fall back to detectEnergyEntities
-        const statisticIdCacheKey = `ha_statistic_ids_v1_${selectedEnvironment}`
+        const statisticIdCacheKey = `ha_statistic_ids_v1_${environmentScope}`
         const statisticIdCacheTtlMs = 3600_000 // 1 hour
 
         try {
@@ -2659,7 +3532,7 @@ export default function Dashboard({
             const token = await getAuthToken()
             if (isDisposed) return
             const idsResponse = await fetch(
-              `/.netlify/functions/get-ha-statistic-ids?environmentId=${encodeURIComponent(selectedEnvironment)}`,
+              `/.netlify/functions/get-ha-statistic-ids?environmentId=${encodeURIComponent(selectedEnvironmentRequestId)}`,
               { headers: { Authorization: `Bearer ${token}` } },
             )
             if (!isDisposed && idsResponse.ok) {
@@ -2667,7 +3540,7 @@ export default function Dashboard({
               if (Array.isArray(idsResult?.statistic_ids) && idsResult.statistic_ids.length > 0) {
                 entityIds = idsResult.statistic_ids
                 try {
-                  localStorage.setItem(statisticIdCacheKey, JSON.stringify({ fetchTime: Date.now(), ids: entityIds }))
+                  storeLocalJson(statisticIdCacheKey, { fetchTime: Date.now(), ids: entityIds })
                 } catch { /* ignore quota errors */ }
               }
             }
@@ -2677,41 +3550,57 @@ export default function Dashboard({
         }
 
         if (entityIds.length === 0) {
-          const detected = detectEnergyEntities(haEntitiesRef.current)
-          entityIds = detected.electricityTotalEntityIds
+          entityIds = []
         }
       }
 
       if (entityIds.length === 0) {
-        console.log('[Usage Stats] No energy total entities found')
+        console.log('[Usage Stats DEBUG] No energy total entities found — RETURNING EARLY')
+        console.log('[Usage Stats DEBUG] storedConsumptionIds was:', storedConsumptionIds)
+        console.log('[Usage Stats DEBUG] haEntitiesRef.current.length:', haEntitiesRef.current.length)
         return
       }
+
+      entityIds = Array.from(new Set(entityIds.filter((id): id is string => typeof id === 'string' && id.length > 0)))
+      productionEntityIdsForFetch = Array.from(new Set(productionEntityIdsForFetch.filter((id): id is string => typeof id === 'string' && id.length > 0)))
 
       console.log('[Usage Stats] Using statistic IDs from HA:', entityIds.join(', '))
 
       // --- Step C: load persistent incremental cache ---
       // Cache key includes a hash of entity IDs so stale data is automatically discarded when sensors change
       const entityHash = [...entityIds].sort().join(',').split('').reduce((h, c) => (Math.imul(31, h) + c.charCodeAt(0)) | 0, 0)
-      const bucketCacheKey = `ha_electricity_buckets_v4_${selectedEnvironment}_${period}_${entityHash}`
-      let cachedBuckets: Array<{ timestamp: number; kwh: number }> = []
-      try {
-        const raw = localStorage.getItem(bucketCacheKey)
-        if (raw) {
-          const parsed = JSON.parse(raw)
-          if (Array.isArray(parsed?.buckets)) {
-            cachedBuckets = parsed.buckets
-            // Show cached data immediately so chart is never blank on reload
-            if (!isDisposed) setElectricityUsageBuckets(cachedBuckets)
-          }
-        }
-      } catch { /* ignore */ }
+      const runtimeUsageCacheKey = makeDashboardCacheKey([
+        'usage',
+        environmentScope,
+        period,
+        startMs,
+        clampedEnd,
+        entityHash,
+      ])
 
-      // Determine incremental fetch range: from (lastCachedBucket - 2h) to now
+      const runtimeUsageHit = getDashboardResponseCache<Array<{ timestamp: number; importKwh: number; exportKwh: number }>>(runtimeUsageCacheKey)
+      if (runtimeUsageHit && runtimeUsageHit.length > 0) {
+        setElectricityUsageBuckets(runtimeUsageHit)
+      }
+
+      let cachedBuckets: Array<{ timestamp: number; importKwh: number; exportKwh: number }> = []
+
+      // Determine incremental fetch range
       let fetchStartMs = startMs
       if (cachedBuckets.length > 0) {
+        const firstTs = cachedBuckets[0].timestamp
         const lastTs = cachedBuckets[cachedBuckets.length - 1].timestamp
-        // Overlap by 2 hours to handle late-arriving data and bucket boundary alignment
-        fetchStartMs = Math.max(startMs, lastTs - 2 * 3600_000)
+        // Only use incremental fetch if the cache already covers the START of the range.
+        // When switching from day→week, the cache only has today's data so firstTs >> startMs.
+        // In that case we must do a full fetch for the entire week/month.
+        const bucketSizeMs = period === 'day' ? 86_400_000 : 3_600_000
+        if (firstTs <= startMs + bucketSizeMs) {
+          const overlapMs = period === 'day' ? 26 * 3600_000 : 3 * 3600_000
+          const incrementalStart = lastTs - overlapMs
+          if (incrementalStart > startMs) {
+            fetchStartMs = incrementalStart
+          }
+        }
       }
 
       setIsLoadingUsage(true)
@@ -2720,23 +3609,55 @@ export default function Dashboard({
         const token = await getAuthToken()
         if (isDisposed) return
 
-        let url = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(new Date(fetchStartMs).toISOString())}&endTime=${encodeURIComponent(new Date(clampedEnd).toISOString())}&entityIds=${encodeURIComponent(entityIds.join(','))}&mode=statistics&period=${period}`
+        let url = `/.netlify/functions/energy-data?environmentId=${encodeURIComponent(stableSelectedEnvironmentRequestId)}&startTime=${encodeURIComponent(new Date(fetchStartMs).toISOString())}&endTime=${encodeURIComponent(new Date(clampedEnd).toISOString())}&entityIds=${encodeURIComponent(entityIds.join(','))}&mode=statistics&period=${period}&resolution=raw&tzOffset=${new Date().getTimezoneOffset() * -1}`
 
         if (productionEntityIdsForFetch.length > 0) {
           url += `&productionEntityIds=${encodeURIComponent(productionEntityIdsForFetch.join(','))}`
         }
 
-        const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
-        if (!response.ok || isDisposed) {
+        console.log('[Usage Stats DEBUG] Fetching energy-data URL:', url)
+        console.log('[Usage Stats DEBUG] fetchStartMs:', new Date(fetchStartMs).toISOString(), 'clampedEnd:', new Date(clampedEnd).toISOString())
+
+        // Use AbortController with timeout to prevent hanging forever
+        const controller = new AbortController()
+        const timeoutId = setTimeout(() => {
+          console.error('[Usage Stats DEBUG] \u26a0\ufe0f FETCH TIMED OUT after 30s')
+          controller.abort()
+        }, 30_000)
+
+        let response: Response
+        try {
+          response = await deduplicatedAuthFetch(url, token)
+        } catch (fetchErr) {
+          clearTimeout(timeoutId)
+          console.error('[Usage Stats DEBUG] \u274c Fetch threw:', fetchErr)
           if (!isDisposed) setIsLoadingUsage(false)
+          return
+        }
+        clearTimeout(timeoutId)
+        console.log('[Usage Stats DEBUG] Fetch completed, status:', response.status)
+        if (!response.ok || isDisposed) {
+          if (!isDisposed) {
+            console.error('[Usage Stats] API returned', response.status, await response.text().catch(() => ''))
+            setIsLoadingUsage(false)
+          }
           return
         }
 
         const result = await response.json()
         if (isDisposed) return
 
+        // Log debug info from statistics API
+        if (result?._debug) {
+          console.log('[Usage Stats] Debug:', JSON.stringify(result._debug, null, 2))
+        }
+
         const historyData: Array<{ entity_id: string; is_production: boolean; history: Array<{ timestamp: number; change: number; value: number }> }> =
           Array.isArray(result?.entities) ? result.entities : []
+
+        console.log('[Usage Stats DEBUG] Raw API result keys:', Object.keys(result ?? {}))
+        console.log('[Usage Stats DEBUG] result.entities is array:', Array.isArray(result?.entities), 'length:', result?.entities?.length)
+        console.log('[Usage Stats] Entities in response:', historyData.map(e => `${e.entity_id} (${e.history?.length || 0} rows, prod=${e.is_production})`).join(', ') || 'NONE')
 
         // Build separate consumption and production bucket maps, then compute net
         const consumptionMap = new Map<number, number>()
@@ -2756,32 +3677,66 @@ export default function Dashboard({
           }
         }
 
-        // Net map: consumption - production (values can be negative = net return feed hour)
-        const netMap = new Map<number, number>()
-        for (const [ts, consVal] of consumptionMap) {
-          netMap.set(ts, consVal - (productionMap.get(ts) ?? 0))
-        }
-        // Also include any production-only buckets (if production > consumption for a bucket)
-        for (const [ts, prodVal] of productionMap) {
-          if (!netMap.has(ts)) {
-            netMap.set(ts, -(prodVal))
-          }
+        // Electricity usage chart shows GROSS consumption (same as HA Energy dashboard).
+        // Production (return to grid) is NOT subtracted — it's a separate concept.
+        const allTimestamps = new Set<number>([
+          ...consumptionMap.keys(),
+          ...productionMap.keys(),
+        ])
+        const newBuckets = Array.from(allTimestamps.values())
+          .sort((a, b) => a - b)
+          .map((timestamp) => ({
+            timestamp,
+            importKwh: Number((consumptionMap.get(timestamp) ?? 0).toFixed(3)),
+            exportKwh: Number((productionMap.get(timestamp) ?? 0).toFixed(3)),
+          }))
+
+        console.log('[Usage Stats DEBUG] consumptionMap size:', consumptionMap.size, 'productionMap size:', productionMap.size)
+        console.log(
+          '[Usage Stats DEBUG] newBuckets count:',
+          newBuckets.length,
+          'total import kWh:',
+          newBuckets.reduce((s, b) => s + b.importKwh, 0).toFixed(3),
+          'total export kWh:',
+          newBuckets.reduce((s, b) => s + b.exportKwh, 0).toFixed(3),
+        )
+        if (newBuckets.length > 0) {
+          console.log('[Usage Stats DEBUG] first bucket:', JSON.stringify(newBuckets[0]), 'last bucket:', JSON.stringify(newBuckets[newBuckets.length - 1]))
         }
 
-        const newBuckets = Array.from(netMap.entries())
-          .sort((a, b) => a[0] - b[0])
-          .map(([timestamp, kwh]) => ({ timestamp, kwh: Number(kwh.toFixed(3)) }))
-
-        // Merge new buckets into cached buckets: overwrite same timestamps, append new ones
-        const mergedMap = new Map<number, number>(cachedBuckets.map((b) => [b.timestamp, b.kwh]))
+        // Merge with strict overwrite: cached first, fetched buckets win on same timestamp.
+        const mergedMap = new Map<number, { importKwh: number; exportKwh: number }>(
+          cachedBuckets.map((bucket) => [
+            bucket.timestamp,
+            {
+              importKwh: bucket.importKwh,
+              exportKwh: bucket.exportKwh,
+            },
+          ]),
+        )
         for (const b of newBuckets) {
-          mergedMap.set(b.timestamp, b.kwh)
+          mergedMap.set(b.timestamp, {
+            importKwh: b.importKwh,
+            exportKwh: b.exportKwh,
+          })
         }
         // Only keep buckets within the current range
         const mergedBuckets = Array.from(mergedMap.entries())
           .filter(([ts]) => ts >= startMs && ts <= clampedEnd)
           .sort((a, b) => a[0] - b[0])
-          .map(([timestamp, kwh]) => ({ timestamp, kwh }))
+          .map(([timestamp, values]) => ({
+            timestamp,
+            importKwh: values.importKwh,
+            exportKwh: values.exportKwh,
+          }))
+
+        console.log('[Usage Stats DEBUG] mergedMap size (before filter):', mergedMap.size)
+        console.log('[Usage Stats DEBUG] mergedBuckets count (after filter):', mergedBuckets.length)
+        console.log('[Usage Stats DEBUG] filter range: startMs=', new Date(startMs).toISOString(), 'clampedEnd=', new Date(clampedEnd).toISOString())
+        if (mergedMap.size > 0 && mergedBuckets.length === 0) {
+          const allTs = Array.from(mergedMap.keys()).sort((a, b) => a - b)
+          console.log('[Usage Stats DEBUG] ⚠️ ALL BUCKETS FILTERED OUT! Bucket timestamp range:', new Date(allTs[0]).toISOString(), '→', new Date(allTs[allTs.length - 1]).toISOString())
+        }
 
         if (!isDisposed) setElectricityUsageBuckets(mergedBuckets)
 
@@ -2791,10 +3746,8 @@ export default function Dashboard({
           console.log(`[Usage Stats] Fetched ${mergedBuckets.length} buckets, range: ${firstDate} → ${lastDate}`)
         }
 
-        try {
-          localStorage.setItem(bucketCacheKey, JSON.stringify({ buckets: mergedBuckets }))
-          console.log(`[Usage Stats] Cached ${mergedBuckets.length} buckets to localStorage`)
-        } catch { /* ignore quota errors */ }
+        setDashboardResponseCache(runtimeUsageCacheKey, mergedBuckets, usageTtlMs)
+        console.log(`[Usage Stats] Cached ${mergedBuckets.length} buckets in runtime cache`)
       } catch (err) {
         console.error('[Usage Stats] Error:', err)
       } finally {
@@ -2812,14 +3765,17 @@ export default function Dashboard({
     timeRange,
     environmentInstalledOnMs,
     getAuthToken,
-    haEntities.length,
-    haMetricsSnapshot?.sources?.electricityTotalEntityId,
-    haMetricsSnapshot?.sources?.electricityConsumptionEntityIds,
+    statisticsEntityIdsKey,
+    entitiesLoaded,
+    isEnvironmentOffline,
   ])
 
   // Fetch electricity history
   useEffect(() => {
-    if (!selectedEnvironment || !isAuthenticated) {
+    if (!stableSelectedEnvironment || stableSelectedEnvironment !== selectedEnvironment || !isAuthenticated) {
+      return
+    }
+    if (!entitiesLoaded || isEnvironmentOffline) {
       return
     }
 
@@ -2857,6 +3813,11 @@ export default function Dashboard({
 
     const fetchHistoricalData = async () => {
       try {
+        console.time('[PERF] Power Sources render')
+        if (!perfPowerSourcesDataTimerStartedRef.current) {
+          console.time('[PERF] Power Sources data')
+          perfPowerSourcesDataTimerStartedRef.current = true
+        }
         console.log('[HA History] Starting fetch for environment:', selectedEnvironment)
 
         const preferredPowerEntityId = haMetricsSnapshotRef.current?.powerEntityId || null
@@ -2882,11 +3843,33 @@ export default function Dashboard({
         // hits the same cache entry as long as the selected window hasn't changed.
         const cacheStartKey = Math.floor(requestedStartMs / (15 * 60_000))
         const cacheEndKey = Math.floor(clampedEndMs / (15 * 60_000))
-        const cacheKey = `ha_history_v5_${selectedEnvironment}_${cacheStartKey}_${cacheEndKey}`
+        const cacheKey = `ha_history_v5_${environmentScope}_${cacheStartKey}_${cacheEndKey}`
+        const resolution = getHistoryResolution(timeRange)
+        const runtimeCacheKey = makeDashboardCacheKey([
+          'history',
+          environmentScope,
+          requestedStartMs,
+          clampedEndMs,
+          resolution,
+          haMetricsSnapshotRef.current?.powerEntityId || 'auto',
+        ])
         // History data for power (kW) entities — cache for 5 min.
         const cacheTtlMs = 5 * 60_000
         let staleCachedSamples: PowerSample[] | null = null
         let staleCachedProductionSamples: PowerSample[] | null = null
+
+        const runtimeHit = getDashboardResponseCache<{ powerSamples: PowerSample[]; productionSamples: PowerSample[] }>(runtimeCacheKey)
+        if (runtimeHit?.powerSamples?.length) {
+          setHistoricalRangeSamples(runtimeHit.powerSamples)
+          setHistoricalProductionRangeSamples(runtimeHit.productionSamples || [])
+          console.log('[HA History] Runtime cache hit:', runtimeHit.powerSamples.length, 'power samples')
+          if (perfPowerSourcesDataTimerStartedRef.current) {
+            console.timeEnd('[PERF] Power Sources data')
+            perfPowerSourcesDataTimerStartedRef.current = false
+          }
+          console.timeEnd('[PERF] Power Sources render')
+          return
+        }
         try {
           const cached = localStorage.getItem(cacheKey)
           if (cached) {
@@ -2899,6 +3882,11 @@ export default function Dashboard({
                 console.log('[HA History] Loaded from cache:', cachedPower.length, 'power samples')
                 setHistoricalRangeSamples(cachedPower)
                 setHistoricalProductionRangeSamples(cachedProduction)
+                if (perfPowerSourcesDataTimerStartedRef.current) {
+                  console.timeEnd('[PERF] Power Sources data')
+                  perfPowerSourcesDataTimerStartedRef.current = false
+                }
+                console.timeEnd('[PERF] Power Sources render')
                 return
               }
               // Stale cache — show immediately while we re-fetch in background
@@ -2958,22 +3946,9 @@ export default function Dashboard({
             }
           )
 
-        const productionEntity = preferredProductionEntity || detectedProductionEntity || currentHaEntities.find(
-          (e) => {
-            const id = e.entity_id.toLowerCase()
-            return !id.startsWith('binary_sensor') && id.startsWith('sensor.') && (
-              id.includes('production') ||
-              id.includes('solar') ||
-              id.includes('pv') ||
-              id.includes('yield') ||
-              id.includes('opwek') ||
-              id.includes('opgewekt') ||
-              id.includes('export') ||
-              id.includes('injection') ||
-              id.includes('teruglever')
-            )
-          },
-        )
+        // Only use production entity if explicitly detected by server or by detectEnergyEntities.
+        // Do NOT do broad keyword fallback — it picks up grid export sensors in environments without solar.
+        const productionEntity = preferredProductionEntity || detectedProductionEntity || null
 
         console.log('[HA History] Available entities:', currentHaEntities.map((e) => e.entity_id).join(', '))
         console.log('[HA History] Preferred power entity from metrics:', preferredPowerEntityId)
@@ -2997,15 +3972,11 @@ export default function Dashboard({
 
         setIsLoadingHistory(true)
         const token = await getAuthToken()
-        const url = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(startTime.toISOString())}&endTime=${encodeURIComponent(endTime.toISOString())}&entityIds=${encodeURIComponent(entityIds.join(','))}`
+        const url = `/.netlify/functions/energy-data?environmentId=${encodeURIComponent(stableSelectedEnvironmentRequestId)}&startTime=${encodeURIComponent(startTime.toISOString())}&endTime=${encodeURIComponent(endTime.toISOString())}&entityIds=${encodeURIComponent(entityIds.join(','))}&resolution=${encodeURIComponent(resolution)}`
         
         console.log('[HA History] Request URL:', url)
 
-        const response = await fetch(url, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        })
+        const response = await deduplicatedAuthFetch(url, token)
 
         if (!response.ok) {
           const errorText = await response.text()
@@ -3019,6 +3990,22 @@ export default function Dashboard({
           return
         }
         const historyData = result.entities || []
+
+        const detectedInstalledOnMs = historyData
+          .flatMap((entry: any) => Array.isArray(entry?.history) ? entry.history : [])
+          .map((row: any) => Number(row?.timestamp))
+          .filter((ts: number) => Number.isFinite(ts) && ts > 0)
+          .reduce((min: number, ts: number) => (ts < min ? ts : min), Number.POSITIVE_INFINITY)
+
+        if (Number.isFinite(detectedInstalledOnMs)) {
+          setEnvironmentInstalledOnMs((prev) => {
+            const next = Number.isFinite(prev) && (prev as number) > 0
+              ? Math.min(prev as number, detectedInstalledOnMs)
+              : detectedInstalledOnMs
+            storeLocalValue(environmentInstalledOnStorageKey, String(next))
+            return next
+          })
+        }
 
         console.log('[HA History] Retrieved data for', historyData.length, 'entities:', JSON.stringify(historyData.map((e: any) => ({ entity_id: e.entity_id, samples: e.history?.length || 0 }))))
 
@@ -3053,12 +4040,14 @@ export default function Dashboard({
         if (powerSeriesByEntity.length > 0) {
           newPowerSamples = mergePowerSamples(powerSeriesByEntity)
 
+          newPowerSamples = downsampleLTTB(newPowerSamples, getLttbTarget(timeRange))
+
           // Store fetched range samples directly so they are always visible for the selected date regardless of live-samples trim
           setHistoricalRangeSamples(newPowerSamples)
 
           setPowerSamples((prev) => {
             const trimmed = mergePowerSamples([prev, newPowerSamples], { maxPoints: MAX_LIVE_SAMPLE_POINTS })
-            storeLocalJson(livePowerStorageKey, trimmed)
+            storeLocalJson(livePowerStorageKey, trimSamplesToRecentWindow(trimmed))
             return trimmed
           })
 
@@ -3089,11 +4078,13 @@ export default function Dashboard({
             })
             .filter((sample: PowerSample | null): sample is PowerSample => sample !== null)
 
+          newProductionSamples = downsampleLTTB(newProductionSamples, getLttbTarget(timeRange))
+
           setHistoricalProductionRangeSamples(newProductionSamples)
 
           setProductionSamples((prev) => {
             const trimmed = mergePowerSamples([prev, newProductionSamples], { maxPoints: MAX_LIVE_SAMPLE_POINTS })
-            storeLocalJson(liveProductionStorageKey, trimmed)
+            storeLocalJson(liveProductionStorageKey, trimSamplesToRecentWindow(trimmed))
             return trimmed
           })
 
@@ -3104,14 +4095,15 @@ export default function Dashboard({
         }
 
         try {
-          localStorage.setItem(
-            cacheKey,
-            JSON.stringify({
-              fetchTime: Date.now(),
-              powerSamples: newPowerSamples,
-              productionSamples: newProductionSamples,
-            }),
-          )
+          storeLocalJson(cacheKey, {
+            fetchTime: Date.now(),
+            powerSamples: newPowerSamples,
+            productionSamples: newProductionSamples,
+          })
+          setDashboardResponseCache(runtimeCacheKey, {
+            powerSamples: newPowerSamples,
+            productionSamples: newProductionSamples,
+          }, cacheTtlMs)
         } catch {
           // Ignore storage quota errors
         }
@@ -3145,9 +4137,19 @@ export default function Dashboard({
         }
 
         if (!isDisposed) setIsLoadingHistory(false)
+        if (perfPowerSourcesDataTimerStartedRef.current) {
+          console.timeEnd('[PERF] Power Sources data')
+          perfPowerSourcesDataTimerStartedRef.current = false
+        }
+        console.timeEnd('[PERF] Power Sources render')
       } catch (error) {
         console.error('[HA History] Error fetching historical data:', error)
         if (!isDisposed) setIsLoadingHistory(false)
+        if (perfPowerSourcesDataTimerStartedRef.current) {
+          console.timeEnd('[PERF] Power Sources data')
+          perfPowerSourcesDataTimerStartedRef.current = false
+        }
+        console.timeEnd('[PERF] Power Sources render')
       }
     }
 
@@ -3163,13 +4165,19 @@ export default function Dashboard({
     timeRange,
     environmentInstalledOnMs,
     getAuthToken,
+    environmentInstalledOnStorageKey,
     historyArchiveStorageKey,
     livePowerStorageKey,
     liveProductionStorageKey,
+    entitiesLoaded,
+    isEnvironmentOffline,
   ])
 
   useEffect(() => {
-    if (!selectedEnvironment || !isAuthenticated) {
+    if (!stableSelectedEnvironment || stableSelectedEnvironment !== selectedEnvironment || !isAuthenticated) {
+      return
+    }
+    if (!entitiesLoaded || isEnvironmentOffline) {
       return
     }
 
@@ -3226,7 +4234,7 @@ export default function Dashboard({
                   const nextInstalledOnMs = Number.isFinite(persistedInstalledOnMs) && persistedInstalledOnMs > 0
                     ? Math.min(persistedInstalledOnMs, cachedInstalledOnMs)
                     : cachedInstalledOnMs
-                  localStorage.setItem(environmentInstalledOnStorageKey, String(nextInstalledOnMs))
+                  storeLocalValue(environmentInstalledOnStorageKey, String(nextInstalledOnMs))
                 } catch {
                   // Ignore localStorage errors.
                 }
@@ -3278,22 +4286,9 @@ export default function Dashboard({
           return
         }
 
-        const productionEntity = preferredProductionEntity || currentHaEntities.find(
-          (entity) => {
-            const id = entity.entity_id.toLowerCase()
-            return !id.startsWith('binary_sensor') && id.startsWith('sensor.') && (
-              id.includes('production') ||
-              id.includes('solar') ||
-              id.includes('pv') ||
-              id.includes('yield') ||
-              id.includes('opwek') ||
-              id.includes('opgewekt') ||
-              id.includes('export') ||
-              id.includes('injection') ||
-              id.includes('teruglever')
-            )
-          },
-        )
+        // Only use production entity if server explicitly detected one.
+        // Do NOT do broad keyword fallback — it picks up grid export sensors in environments without solar.
+        const productionEntity = preferredProductionEntity || null
 
         const metricSources = haMetricsSnapshotRef.current?.sources
         const entityIds = Array.from(new Set([
@@ -3312,13 +4307,9 @@ export default function Dashboard({
         const archiveStartTime = new Date(now - ARCHIVE_LOOKBACK_DAYS * 24 * 60 * 60_000)
         const archiveEndTime = new Date(now)
 
-        const archiveUrl = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(archiveStartTime.toISOString())}&endTime=${encodeURIComponent(archiveEndTime.toISOString())}&entityIds=${encodeURIComponent(entityIds.join(','))}&mode=statistics&period=hour`
+        const archiveUrl = `/.netlify/functions/energy-data?environmentId=${encodeURIComponent(stableSelectedEnvironmentRequestId)}&startTime=${encodeURIComponent(archiveStartTime.toISOString())}&endTime=${encodeURIComponent(archiveEndTime.toISOString())}&entityIds=${encodeURIComponent(entityIds.join(','))}&mode=statistics&period=hour&resolution=hourly&tzOffset=${new Date().getTimezoneOffset() * -1}`
 
-        const response = await fetch(archiveUrl, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        })
+        const response = await deduplicatedAuthFetch(archiveUrl, token)
 
         let historyData: any[] = []
         if (response.ok) {
@@ -3329,7 +4320,12 @@ export default function Dashboard({
 
           historyData = Array.isArray(result?.entities) ? result.entities : []
         } else {
-          console.warn('[HA History] Statistics bootstrap failed, trying history fallback for month window')
+          const errorBody = await response.text().catch(() => '')
+          console.warn(
+            '[HA History] Statistics bootstrap failed, trying history fallback for month window:',
+            response.status,
+            errorBody,
+          )
         }
 
         const hasStatisticsRows = historyData.some(
@@ -3339,13 +4335,9 @@ export default function Dashboard({
         if (!hasStatisticsRows) {
           const selectedBounds = getBoundsFromInputDates(selectedStartDate, selectedEndDate)
           const fallbackStartMs = Math.max(0, selectedBounds.startMs - 24 * 60 * 60_000)
-          const fallbackHistoryUrl = `/.netlify/functions/ha-history?environmentId=${encodeURIComponent(selectedEnvironment)}&startTime=${encodeURIComponent(new Date(fallbackStartMs).toISOString())}&endTime=${encodeURIComponent(archiveEndTime.toISOString())}&entityIds=${encodeURIComponent(entityIds.join(','))}&mode=history`
+          const fallbackHistoryUrl = `/.netlify/functions/energy-data?environmentId=${encodeURIComponent(stableSelectedEnvironmentRequestId)}&startTime=${encodeURIComponent(new Date(fallbackStartMs).toISOString())}&endTime=${encodeURIComponent(archiveEndTime.toISOString())}&entityIds=${encodeURIComponent(entityIds.join(','))}&mode=history&resolution=hourly`
 
-          const historyFallbackResponse = await fetch(fallbackHistoryUrl, {
-            headers: {
-              Authorization: `Bearer ${token}`,
-            },
-          })
+          const historyFallbackResponse = await deduplicatedAuthFetch(fallbackHistoryUrl, token)
 
           if (historyFallbackResponse.ok) {
             const fallbackResult = await historyFallbackResponse.json()
@@ -3375,7 +4367,7 @@ export default function Dashboard({
             const nextInstalledOnMs = Number.isFinite(persistedInstalledOnMs) && persistedInstalledOnMs > 0
               ? Math.min(persistedInstalledOnMs, detectedInstalledOnMs)
               : detectedInstalledOnMs
-            localStorage.setItem(environmentInstalledOnStorageKey, String(nextInstalledOnMs))
+            storeLocalValue(environmentInstalledOnStorageKey, String(nextInstalledOnMs))
           } catch {
             // Ignore localStorage errors.
           }
@@ -3470,6 +4462,8 @@ export default function Dashboard({
     haMetricsSnapshot?.sources?.monthlyElectricityEntityId,
     haMetricsSnapshot?.sources?.dailyProductionEntityId,
     haMetricsSnapshot?.sources?.monthlyProductionEntityId,
+    entitiesLoaded,
+    isEnvironmentOffline,
   ])
 
   useEffect(() => {
@@ -3488,7 +4482,7 @@ export default function Dashboard({
 
         const next = [...prev, { timestamp: now, power: latestPowerRef.current }]
         const trimmed = next.slice(-MAX_LIVE_SAMPLE_POINTS)
-        storeLocalJson(livePowerStorageKey, trimmed)
+        storeLocalJson(livePowerStorageKey, trimSamplesToRecentWindow(trimmed))
         return trimmed
       })
 
@@ -3500,7 +4494,7 @@ export default function Dashboard({
 
         const next = [...prev, { timestamp: now, power: latestProductionRef.current }]
         const trimmed = next.slice(-MAX_LIVE_SAMPLE_POINTS)
-        storeLocalJson(liveProductionStorageKey, trimmed)
+        storeLocalJson(liveProductionStorageKey, trimSamplesToRecentWindow(trimmed))
         return trimmed
       })
     }
@@ -3562,17 +4556,24 @@ export default function Dashboard({
   const handleTimeRangeChange = (nextRange: 'today' | 'week' | 'month') => {
     setTimeRange(nextRange)
 
-    const anchorDate = parseInputDate(selectedEndDate) || new Date()
-    const nextStart = new Date(anchorDate)
+    const now = new Date()
+    const today = formatDateForInput(now)
 
-    if (nextRange === 'week') {
-      nextStart.setDate(anchorDate.getDate() - 6)
+    if (nextRange === 'today') {
+      setSelectedStartDate(today)
+      setSelectedEndDate(today)
+    } else if (nextRange === 'week') {
+      const sevenDaysAgo = new Date(now)
+      sevenDaysAgo.setDate(now.getDate() - 6)
+      sevenDaysAgo.setHours(0, 0, 0, 0)
+      setSelectedStartDate(formatDateForInput(sevenDaysAgo))
+      setSelectedEndDate(today)
     } else if (nextRange === 'month') {
-      nextStart.setDate(1)
+      // From the 1st of the month, capped to today
+      const firstOfMonth = new Date(now.getFullYear(), now.getMonth(), 1)
+      setSelectedStartDate(formatDateForInput(firstOfMonth))
+      setSelectedEndDate(today)
     }
-
-    setSelectedStartDate(formatDateForInput(nextStart))
-    setSelectedEndDate(formatDateForInput(anchorDate))
   }
 
   const electricityRange = useMemo(() => {
@@ -3603,12 +4604,26 @@ export default function Dashboard({
         (r) => r.timestamp >= startMs - bucketMs && r.timestamp <= endMs,
       )
 
+      console.log('[bucketGasReadings DEBUG] input: startMs=', new Date(startMs).toISOString(), 'endMs=', new Date(endMs).toISOString(), 'bucketMs=', bucketMs)
+      console.log('[bucketGasReadings DEBUG] gasMeterReadings total:', gasMeterReadings.length, 'after filter:', readings.length)
+      if (gasMeterReadings.length > 0 && readings.length < 2) {
+        console.log('[bucketGasReadings DEBUG] \u26a0\ufe0f Filtered to <2 readings! Filter range:', new Date(startMs - bucketMs).toISOString(), '\u2192', new Date(endMs).toISOString())
+        console.log('[bucketGasReadings DEBUG] gasMeterReadings actual range:', new Date(gasMeterReadings[0].timestamp).toISOString(), '\u2192', new Date(gasMeterReadings[gasMeterReadings.length - 1].timestamp).toISOString())
+      }
+
       if (readings.length < 2) {
         return [] as Array<{ start: number; change: number }>
       }
 
-      const bucketStart = Math.floor(startMs / bucketMs) * bucketMs
-      const bucketEnd = Math.ceil(endMs / bucketMs) * bucketMs
+      // For daily buckets, align to local midnight (same as server's tzOffset-aware bucketing)
+      const tzOff = new Date().getTimezoneOffset() * -60_000
+      const floorToLocalDay = (ms: number) => {
+        const localMs = ms + tzOff
+        const d = new Date(localMs)
+        return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - tzOff
+      }
+      const bucketStart = bucketMs === 86_400_000 ? floorToLocalDay(startMs) : Math.floor(startMs / bucketMs) * bucketMs
+      const bucketEnd = bucketMs === 86_400_000 ? floorToLocalDay(endMs) + bucketMs : Math.ceil(endMs / bucketMs) * bucketMs
       const buckets: Array<{ start: number; change: number }> = []
 
       for (let t = bucketStart; t < bucketEnd; t += bucketMs) {
@@ -3649,7 +4664,27 @@ export default function Dashboard({
       const bucketStart = Math.floor(startMs / bucketMs) * bucketMs
       const bucketEnd = Math.ceil(endMs / bucketMs) * bucketMs
       const buckets: Array<{ start: number; value: number | null }> = []
-      const staleThresholdMs = Math.max(bucketMs * 3, 45 * 60_000)
+      const staleThresholdMs = Math.max(bucketMs * 2, 30 * 60_000)
+
+      const estimateMedianInterval = (samples: PowerSample[]) => {
+        if (samples.length < 3) return 0
+        const intervals: number[] = []
+        for (let i = 1; i < samples.length; i += 1) {
+          const delta = samples[i].timestamp - samples[i - 1].timestamp
+          if (delta > 0) intervals.push(delta)
+        }
+        if (intervals.length === 0) return 0
+        intervals.sort((a, b) => a - b)
+        const middle = Math.floor(intervals.length / 2)
+        return intervals.length % 2 === 0
+          ? Math.round((intervals[middle - 1] + intervals[middle]) / 2)
+          : intervals[middle]
+      }
+
+      const powerMedianIntervalMs = estimateMedianInterval(sortedPower)
+      const productionMedianIntervalMs = estimateMedianInterval(sortedProduction)
+      const effectivePowerStaleThresholdMs = Math.max(staleThresholdMs, powerMedianIntervalMs > 0 ? powerMedianIntervalMs * 2 : 0)
+      const effectiveProductionStaleThresholdMs = Math.max(staleThresholdMs, productionMedianIntervalMs > 0 ? productionMedianIntervalMs * 2 : 0)
 
       let powerIndex = 0
       let productionIndex = 0
@@ -3675,29 +4710,57 @@ export default function Dashboard({
       for (let t = bucketStart; t < bucketEnd; t += bucketMs) {
         const nextT = t + bucketMs
 
+        let bucketPowerSum = 0
+        let bucketPowerCount = 0
+        let bucketProductionSum = 0
+        let bucketProductionCount = 0
+
         while (powerIndex < sortedPower.length && sortedPower[powerIndex].timestamp < nextT) {
-          lastKnownPower = sortedPower[powerIndex].power
-          lastPowerTimestamp = sortedPower[powerIndex].timestamp
+          const sample = sortedPower[powerIndex]
+          if (sample.timestamp >= t) {
+            bucketPowerSum += sample.power
+            bucketPowerCount += 1
+          }
+          lastKnownPower = sample.power
+          lastPowerTimestamp = sample.timestamp
           powerIndex += 1
         }
 
         while (productionIndex < sortedProduction.length && sortedProduction[productionIndex].timestamp < nextT) {
-          lastKnownProduction = sortedProduction[productionIndex].power
-          lastProductionTimestamp = sortedProduction[productionIndex].timestamp
+          const sample = sortedProduction[productionIndex]
+          if (sample.timestamp >= t) {
+            bucketProductionSum += sample.power
+            bucketProductionCount += 1
+          }
+          lastKnownProduction = sample.power
+          lastProductionTimestamp = sample.timestamp
           productionIndex += 1
         }
 
         const isFutureBucket = t > nowMs
-        const hasPowerValue = lastKnownPower !== null && lastPowerTimestamp !== null && (nextT - lastPowerTimestamp) <= staleThresholdMs
-        const hasProductionValue = lastKnownProduction !== null && lastProductionTimestamp !== null && (nextT - lastProductionTimestamp) <= staleThresholdMs
+        const hasCurrentPower = bucketPowerCount > 0
+        const hasCurrentProduction = bucketProductionCount > 0
+        const hasRecentPower = lastKnownPower !== null && lastPowerTimestamp !== null && (nextT - lastPowerTimestamp) <= effectivePowerStaleThresholdMs
+        const hasRecentProduction = lastKnownProduction !== null && lastProductionTimestamp !== null && (nextT - lastProductionTimestamp) <= effectiveProductionStaleThresholdMs
+
+        const avgPower = hasCurrentPower
+          ? (bucketPowerSum / bucketPowerCount)
+          : hasRecentPower
+            ? Number(lastKnownPower)
+            : null
+        const avgProduction = hasCurrentProduction
+          ? (bucketProductionSum / bucketProductionCount)
+          : hasRecentProduction
+            ? Number(lastKnownProduction)
+            : null
 
         let bucketValue: number | null = null
         if (!isFutureBucket) {
           if (powerSeriesIsSigned) {
-            bucketValue = hasPowerValue ? lastKnownPower : null
-          } else if (hasPowerValue || hasProductionValue) {
-            const powerValue = hasPowerValue ? Number(lastKnownPower) : 0
-            const productionValue = hasProductionValue ? Number(lastKnownProduction) : 0
+            bucketValue = avgPower
+          } else if (avgPower !== null || avgProduction !== null) {
+            const powerValue = avgPower ?? 0
+            const productionValue = avgProduction ?? 0
             bucketValue = powerValue - productionValue
           }
         }
@@ -3751,16 +4814,11 @@ export default function Dashboard({
   }, [archivedProductionSamples, electricityRange.endMs, electricityRange.startMs, historicalProductionRangeSamples, productionSamples])
 
   const chartData = useMemo(() => {
-    const rangeSpanMs = Math.max(0, electricityRange.endMs - electricityRange.startMs)
     const bucketMs = timeRange === 'today'
       ? 60_000
       : timeRange === 'week'
-        ? 15 * 60_000
-        : rangeSpanMs > 120 * 24 * 60 * 60_000
-          ? 6 * 60 * 60_000
-          : rangeSpanMs > 45 * 24 * 60 * 60_000
-            ? 60 * 60_000
-            : 15 * 60_000
+        ? 5 * 60_000
+        : 60 * 60_000
 
     const powerSeriesIsSigned = chartSamples.some(
       (sample) =>
@@ -3795,21 +4853,76 @@ export default function Dashboard({
   ])
 
   // "Electricity usage" bar chart data — from HA statistics (kWh per bucket)
+  // Padded to cover the full selected range so x-axis aligns with the gas chart.
   const electricityUsageChartData = useMemo(() => {
-    if (electricityUsageBuckets.length === 0) return [] as Array<{ time: string; power: number | null }>
-    return electricityUsageBuckets
+    console.log('[Chart DEBUG] electricityUsageChartData recalc: electricityUsageBuckets.length=', electricityUsageBuckets.length)
+    console.log('[Chart DEBUG] electricityRange:', { startMs: new Date(electricityRange.startMs).toISOString(), endMs: new Date(electricityRange.endMs).toISOString() })
+    if (electricityUsageBuckets.length === 0) {
+      console.log('[Chart DEBUG] electricityUsageBuckets is EMPTY -> returning []')
+      return [] as Array<{ time: string; power: number | null; exportPower: number | null }>
+    }
+    const filtered = electricityUsageBuckets
       .filter((b) => b.timestamp >= electricityRange.startMs && b.timestamp <= electricityRange.endMs)
-      .map((b) => ({
-        time: formatChartAxisLabel(b.timestamp, timeRange),
-        power: b.kwh,
-      }))
+    console.log('[Chart DEBUG] After range filter:', filtered.length, 'buckets of', electricityUsageBuckets.length)
+    if (filtered.length === 0 && electricityUsageBuckets.length > 0) {
+      console.log('[Chart DEBUG] \u26a0\ufe0f ALL FILTERED OUT! Bucket range:', new Date(electricityUsageBuckets[0].timestamp).toISOString(), '\u2192', new Date(electricityUsageBuckets[electricityUsageBuckets.length - 1].timestamp).toISOString())
+    }
+
+    // Build maps from timestamp -> import/export kWh for quick lookup
+    const importKwhMap = new Map(filtered.map((b) => [b.timestamp, b.importKwh]))
+    const exportKwhMap = new Map(filtered.map((b) => [b.timestamp, b.exportKwh]))
+
+    // Generate consistent hourly/daily slots from range start to now (not end-of-day)
+    // For daily buckets the server uses local-midnight timestamps (e.g. 22:00 UTC for CET),
+    // so we must align slot generation to the same local-midnight boundary.
+    const bucketMs = timeRange === 'month' ? 86_400_000 : 3_600_000
+    const tzOffsetMs = new Date().getTimezoneOffset() * -60_000
+    const floorToSlot = (ms: number) => {
+      if (bucketMs === 86_400_000) {
+        // Floor to local midnight, then convert back to UTC
+        const localMs = ms + tzOffsetMs
+        const d = new Date(localMs)
+        return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - tzOffsetMs
+      }
+      return Math.floor(ms / bucketMs) * bucketMs
+    }
+    const slotStart = floorToSlot(electricityRange.startMs)
+    const slotEnd = floorToSlot(Math.min(electricityRange.endMs, Date.now()))
+    const padded: Array<{ time: string; power: number | null; exportPower: number | null }> = []
+    for (let t = slotStart; t <= slotEnd; t += bucketMs) {
+      padded.push({
+        time: formatChartAxisLabel(t, timeRange),
+        power: importKwhMap.get(t) ?? 0,
+        exportPower: exportKwhMap.get(t) ?? 0,
+      })
+    }
+
+    return padded
   }, [electricityUsageBuckets, electricityRange.startMs, electricityRange.endMs, timeRange])
 
   const gasChartData = useMemo(() => {
-    const bucketMs = timeRange === 'today' ? 3_600_000 : 86_400_000
-    const buckets = bucketGasReadings(selectedRange.startMs, selectedRange.endMs, bucketMs)
+    const bucketMs = timeRange === 'month' ? 86_400_000 : 3_600_000
+    // For month view, use the same expanded range as electricity chart
+    const gasStartMs = timeRange === 'month' ? electricityRange.startMs : selectedRange.startMs
+    // Cap end to now so future empty buckets don't stretch the x-axis beyond electricity chart
+    const rawGasEndMs = timeRange === 'month' ? electricityRange.endMs : selectedRange.endMs
+    const gasEndMs = Math.min(rawGasEndMs, Date.now())
+    console.log('[Chart DEBUG] gasChartData recalc: gasMeterReadings.length=', gasMeterReadings.length)
+    console.log('[Chart DEBUG] selectedRange:', { startMs: new Date(gasStartMs).toISOString(), endMs: new Date(gasEndMs).toISOString() })
+    console.log('[Chart DEBUG] bucketMs:', bucketMs, '(' + (bucketMs === 3_600_000 ? 'hourly' : 'daily') + ')')
+    if (gasMeterReadings.length > 0) {
+      console.log('[Chart DEBUG] gasMeterReadings range:', new Date(gasMeterReadings[0].timestamp).toISOString(), '\u2192', new Date(gasMeterReadings[gasMeterReadings.length - 1].timestamp).toISOString())
+      console.log('[Chart DEBUG] gasMeterReadings first value:', gasMeterReadings[0].value, 'last value:', gasMeterReadings[gasMeterReadings.length - 1].value)
+    }
+    const buckets = bucketGasReadings(gasStartMs, gasEndMs, bucketMs)
+    console.log('[Chart DEBUG] bucketGasReadings returned:', buckets.length, 'buckets')
+    if (buckets.length > 0) {
+      const nonZero = buckets.filter(b => b.change > 0)
+      console.log('[Chart DEBUG] Non-zero gas buckets:', nonZero.length, 'total change:', nonZero.reduce((s, b) => s + b.change, 0).toFixed(3))
+    }
 
     if (buckets.length === 0) {
+      console.log('[Chart DEBUG] \u26a0\ufe0f Gas buckets EMPTY -> returning placeholder')
       // No local readings yet — show empty chart
       return [{ time: '', power: 0 }]
     }
@@ -3818,7 +4931,41 @@ export default function Dashboard({
       const time = formatChartAxisLabel(b.start, timeRange)
       return { time, power: Math.max(0, b.change) }
     })
-  }, [bucketGasReadings, selectedRange.startMs, selectedRange.endMs, timeRange])
+  }, [bucketGasReadings, selectedRange.startMs, selectedRange.endMs, electricityRange.startMs, electricityRange.endMs, timeRange])
+
+  useEffect(() => {
+    if (!selectedEnvironment) {
+      return
+    }
+
+    const hasAnyChartData = chartData.length > 0 || electricityUsageChartData.length > 0 || gasChartData.length > 0
+    if (
+      entitiesLoaded &&
+      !haLoading &&
+      !isLoadingHistory &&
+      !isLoadingUsage &&
+      hasAnyChartData
+    ) {
+      if (perfViewSwitchTimerStartedRef.current) {
+        console.timeEnd('[PERF] View switch')
+        perfViewSwitchTimerStartedRef.current = false
+      }
+
+      if (perfDashboardTimerStartedRef.current) {
+        console.timeEnd('[PERF] Dashboard total load')
+        perfDashboardTimerStartedRef.current = false
+      }
+    }
+  }, [
+    chartData.length,
+    electricityUsageChartData.length,
+    entitiesLoaded,
+    gasChartData.length,
+    haLoading,
+    isLoadingHistory,
+    isLoadingUsage,
+    selectedEnvironment,
+  ])
 
   const dynamicPriceChartData = useMemo<DynamicPriceChartPoint[]>(() => {
     const fixedConsumerLine = showFixedPriceLinesOnChart && pricingConfig?.type === 'fixed'
@@ -3868,60 +5015,94 @@ export default function Dashboard({
     return parseFloat(
       electricityUsageBuckets
         .filter((b) => b.timestamp >= electricityRange.startMs && b.timestamp <= electricityRange.endMs)
-        .reduce((sum, b) => sum + b.kwh, 0)
+        .reduce((sum, b) => sum + b.importKwh, 0)
         .toFixed(2),
     )
   }, [electricityUsageBuckets, electricityRange.startMs, electricityRange.endMs])
 
-  // Card total always equals sum of chart buckets — single source of truth
-  // When viewing today: use today chart total; when viewing month: use month chart total.
-  const electricityTodayCardValue = useMemo(() => {
-    if (timeRange === 'today' && electricityUsageTotal > 0) {
-      return electricityUsageTotal
-    }
-    return realTimeData.dailyUsage
-  }, [timeRange, electricityUsageTotal, realTimeData.dailyUsage])
+  const electricityTodayFromBuckets = useMemo(() => {
+    const todayStartMs = electricityRange.startMs
+    const todayEndMs = Math.min(electricityRange.endMs, Date.now())
 
-  const electricityMonthCardValue = useMemo(() => {
-    if (timeRange === 'month' && electricityUsageTotal > 0) {
-      return electricityUsageTotal
-    }
-    return realTimeData.monthlyUsage
-  }, [timeRange, electricityUsageTotal, realTimeData.monthlyUsage])
+    return parseFloat(
+      electricityUsageBuckets
+        .filter((bucket) => bucket.timestamp >= todayStartMs && bucket.timestamp <= todayEndMs)
+        .reduce((sum, bucket) => sum + Math.max(0, Number(bucket.importKwh) || 0), 0)
+        .toFixed(2),
+    )
+  }, [electricityRange.endMs, electricityRange.startMs, electricityUsageBuckets])
 
-  // Gas card values: use local meter readings to compute daily/monthly totals
-  const gasTodayCardValue = useMemo(() => {
-    if (haMetricsSnapshot?.dailyGasM3 !== null && haMetricsSnapshot?.dailyGasM3 !== undefined) {
-      return parseFloat(Math.max(0, haMetricsSnapshot.dailyGasM3).toFixed(2))
-    }
+  // Card label adapts to the selected period
+  const periodLabel = timeRange === 'today' ? 'Today' : timeRange === 'week' ? 'This Week' : 'This Month'
 
-    const now = new Date()
-    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0).getTime()
-    const readings = gasMeterReadings.filter((r) => r.timestamp >= startOfToday)
-    if (readings.length >= 2) {
-      const total = Math.max(0, readings[readings.length - 1].value - readings[0].value)
-      return parseFloat(total.toFixed(2))
-    }
-    return realTimeData.gasDailyUsage
-  }, [gasMeterReadings, haMetricsSnapshot?.dailyGasM3, realTimeData.gasDailyUsage])
+  // Electricity card: prefer chart total (most accurate), fall back to server metrics while loading
+  const electricityCardValue = useMemo(() => {
+    const chartValue = electricityUsageTotal > 0 ? electricityUsageTotal : 0
+    const serverToday = Number(haMetricsSnapshot?.dailyElectricityKwh)
+    const serverMonth = Number(haMetricsSnapshot?.monthlyElectricityKwh)
 
-  const gasMonthCardValue = useMemo(() => {
-    if (haMetricsSnapshot?.monthlyGasM3 !== null && haMetricsSnapshot?.monthlyGasM3 !== undefined) {
-      return parseFloat(Math.max(0, haMetricsSnapshot.monthlyGasM3).toFixed(2))
+    if (timeRange === 'today') {
+      const fallbackToday = Number.isFinite(serverToday)
+        ? serverToday
+        : Number(realTimeData.dailyUsage)
+      const candidates = [
+        chartValue,
+        electricityTodayFromBuckets,
+        Number.isFinite(fallbackToday) ? fallbackToday : 0,
+      ]
+      return Math.max(...candidates)
     }
 
-    const now = new Date()
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0).getTime()
-    const readings = gasMeterReadings.filter((r) => r.timestamp >= startOfMonth)
-    if (readings.length >= 2) {
-      const total = Math.max(0, readings[readings.length - 1].value - readings[0].value)
-      return parseFloat(total.toFixed(2))
+    if (timeRange === 'month') {
+      const fallbackMonth = Number.isFinite(serverMonth)
+        ? serverMonth
+        : Number(realTimeData.monthlyUsage)
+      if (!Number.isFinite(fallbackMonth)) return chartValue
+      return Math.max(chartValue, fallbackMonth)
     }
-    return realTimeData.gasMonthlyUsage
-  }, [gasMeterReadings, haMetricsSnapshot?.monthlyGasM3, realTimeData.gasMonthlyUsage])
 
-  const gasTodayCardCost = parseFloat((gasTodayCardValue * gasRatePerM3).toFixed(2))
-  const gasMonthCardCost = parseFloat((gasMonthCardValue * gasRatePerM3).toFixed(2))
+    return chartValue
+  }, [
+    electricityUsageTotal,
+    haMetricsSnapshot?.dailyElectricityKwh,
+    haMetricsSnapshot?.monthlyElectricityKwh,
+    electricityTodayFromBuckets,
+    realTimeData.dailyUsage,
+    realTimeData.monthlyUsage,
+    timeRange,
+  ])
+  // Gas card: day/month use server metrics, week uses chart total
+  const gasCardValue = useMemo(() => {
+    if (timeRange === 'today') {
+      const serverDailyGas = Number(haMetricsSnapshot?.dailyGasM3)
+      const realtimeDailyGas = Number(realTimeData.gasDailyUsage)
+      const bucketDailyGas = Number(gasSelectedPeriodTotal)
+
+      return parseFloat(
+        Math.max(
+          Number.isFinite(serverDailyGas) ? Math.max(0, serverDailyGas) : 0,
+          Number.isFinite(realtimeDailyGas) ? Math.max(0, realtimeDailyGas) : 0,
+          Number.isFinite(bucketDailyGas) ? Math.max(0, bucketDailyGas) : 0,
+        ).toFixed(2),
+      )
+    }
+    if (timeRange === 'month') {
+      if (haMetricsSnapshot?.monthlyGasM3 !== null && haMetricsSnapshot?.monthlyGasM3 !== undefined) {
+        return parseFloat(Math.max(0, haMetricsSnapshot.monthlyGasM3).toFixed(2))
+      }
+      return realTimeData.gasMonthlyUsage
+    }
+    // week or custom: use gas chart total
+    return gasSelectedPeriodTotal
+  }, [timeRange, haMetricsSnapshot?.dailyGasM3, haMetricsSnapshot?.monthlyGasM3, realTimeData.gasDailyUsage, realTimeData.gasMonthlyUsage, gasSelectedPeriodTotal])
+
+  const hasGasCapability = useMemo(() => {
+    const sourceGasEntity = haMetricsSnapshot?.sources?.gasEntityId || haMetricsSnapshot?.sources?.gasTotalEntityId
+    if (typeof sourceGasEntity === 'string' && sourceGasEntity.trim().length > 0) {
+      return true
+    }
+    return gasMeterReadings.length > 0
+  }, [gasMeterReadings.length, haMetricsSnapshot?.sources?.gasEntityId, haMetricsSnapshot?.sources?.gasTotalEntityId])
 
   const apiConsistencyIssues = useMemo(() => {
     if (!haMetricsSnapshot) {
@@ -3974,10 +5155,15 @@ export default function Dashboard({
       }
     }
 
-    addDriftIssue('Electricity today', realTimeData.dailyUsage, haMetricsSnapshot.dailyElectricityKwh, 'kWh', 0.01)
-    addDriftIssue('Electricity month', realTimeData.monthlyUsage, haMetricsSnapshot.monthlyElectricityKwh, 'kWh', 0.01)
-    addDriftIssue('Gas today', gasTodayCardValue, haMetricsSnapshot.dailyGasM3, 'm3', 0.01)
-    addDriftIssue('Gas month', gasMonthCardValue, haMetricsSnapshot.monthlyGasM3, 'm3', 0.01)
+    // Only compare card values vs API daily metrics when viewing "today"
+    // In week/month view the card shows a period total that won't match the daily API metric.
+    if (timeRange === 'today') {
+      addDriftIssue('Electricity today', realTimeData.dailyUsage, haMetricsSnapshot.dailyElectricityKwh, 'kWh', 0.01)
+      addDriftIssue('Gas today', gasCardValue, haMetricsSnapshot.dailyGasM3, 'm3', 0.01)
+    }
+    if (timeRange === 'month') {
+      addDriftIssue('Electricity month', realTimeData.monthlyUsage, haMetricsSnapshot.monthlyElectricityKwh, 'kWh', 0.01)
+    }
 
     const checkSourceAlignment = (
       label: string,
@@ -4040,24 +5226,18 @@ export default function Dashboard({
     const now = new Date()
     const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
     if (timeRange === 'today' && selectedStartDate === todayKey && selectedEndDate === todayKey) {
-      addDriftIssue('Gas chart day total', gasSelectedPeriodTotal, haMetricsSnapshot.dailyGasM3, 'm3', 0.05)
-      if (electricityUsageBuckets.length > 0 && electricityUsageTotal > 0) {
-        addDriftIssue('Electricity usage chart day total', electricityUsageTotal, haMetricsSnapshot.dailyElectricityKwh, 'kWh', 0.5)
-      }
-    }
-    if (timeRange === 'month') {
-      if (electricityUsageBuckets.length > 0 && electricityUsageTotal > 0) {
-        addDriftIssue('Electricity usage chart month total', electricityUsageTotal, haMetricsSnapshot.monthlyElectricityKwh, 'kWh', 1.0)
-      }
+      // Only check gas drift — electricity chart total is authoritative (derived from HA history inter-bucket deltas)
+      const gasTol = Math.max(0.3, (haMetricsSnapshot.dailyGasM3 ?? 0) * 0.05)
+      addDriftIssue('Gas chart day total', gasSelectedPeriodTotal, haMetricsSnapshot.dailyGasM3, 'm3', gasTol)
     }
 
     return issues
   }, [
+    electricityRange,
     electricityUsageBuckets,
     electricityUsageTotal,
-    gasMonthCardValue,
+    gasCardValue,
     gasSelectedPeriodTotal,
-    gasTodayCardValue,
     haEntities,
     haMetricsSnapshot,
     lastKnownHaEntities,
@@ -4070,10 +5250,12 @@ export default function Dashboard({
 
   useEffect(() => {
     if (apiConsistencyIssues.length > 0) {
-      console.warn('[API consistency] Detected metric drift:', {
-        environmentId: selectedEnvironment,
-        issues: apiConsistencyIssues,
-      })
+      if (import.meta.env.DEV) {
+        console.warn('[API consistency] Detected metric drift:', {
+          environmentId: selectedEnvironment,
+          issues: apiConsistencyIssues,
+        })
+      }
     }
   }, [apiConsistencyIssues, selectedEnvironment])
 
@@ -4285,97 +5467,99 @@ export default function Dashboard({
         </div>
 
         {/* Energy Stats Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
           <EnergyCard
-            title="Electricity Today"
-            value={electricityTodayCardValue}
+            title={`Electricity ${periodLabel}`}
+            value={electricityCardValue}
             unit="kWh"
-            cost={realTimeData.electricityCostToday}
             icon="zap"
           />
-          <EnergyCard
-            title="Electricity This Month"
-            value={electricityMonthCardValue}
-            unit="kWh"
-            cost={realTimeData.electricityCostMonth}
-            icon="calendar"
-          />
-          <EnergyCard
-            title="Gas Today"
-            value={gasTodayCardValue}
-            unit="m³"
-            cost={gasTodayCardCost}
-            icon="flame"
-          />
-          <EnergyCard
-            title="Gas This Month"
-            value={gasMonthCardValue}
-            unit="m³"
-            cost={gasMonthCardCost}
-            icon="flame"
-          />
+          {hasGasCapability && (
+            <EnergyCard
+              title={`Gas ${periodLabel}`}
+              value={gasCardValue}
+              unit="m³"
+              icon="flame"
+            />
+          )}
         </div>
 
         {/* Time Range Selector */}
         <div className="glass-panel rounded-xl shadow-lg p-4 mb-8">
-          <div className="flex flex-col md:flex-row md:items-center gap-4">
-            <div className="flex gap-4 flex-1">
-              <button
-                onClick={() => handleTimeRangeChange('today')}
-                className={`flex-1 py-3 px-4 rounded-lg font-medium transition-all ${
-                  timeRange === 'today'
-                    ? 'glass-button'
-                    : 'bg-dark-2 bg-opacity-70 text-light-1 hover:bg-opacity-90'
-                }`}
-              >
-                Day
-              </button>
-              <button
-                onClick={() => handleTimeRangeChange('week')}
-                className={`flex-1 py-3 px-4 rounded-lg font-medium transition-all ${
-                  timeRange === 'week'
-                    ? 'glass-button'
-                    : 'bg-dark-2 bg-opacity-70 text-light-1 hover:bg-opacity-90'
-                }`}
-              >
-                Week
-              </button>
-              <button
-                onClick={() => handleTimeRangeChange('month')}
-                className={`flex-1 py-3 px-4 rounded-lg font-medium transition-all ${
-                  timeRange === 'month'
-                    ? 'glass-button'
-                    : 'bg-dark-2 bg-opacity-70 text-light-1 hover:bg-opacity-90'
-                }`}
-              >
-                Month
-              </button>
-            </div>
-            <div className="md:w-[26rem]">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs text-light-1 mb-1">Start date</label>
-                  <input
-                    type="date"
-                    value={selectedStartDate}
-                    max={selectedEndDate}
-                    onChange={(event) => handleStartDateChange(event.target.value)}
-                    className="w-full bg-dark-2 bg-opacity-70 text-light-2 border border-light-2 border-opacity-20 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-2"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-light-1 mb-1">End date</label>
-                  <input
-                    type="date"
-                    value={selectedEndDate}
-                    min={selectedStartDate}
-                    onChange={(event) => handleEndDateChange(event.target.value)}
-                    className="w-full bg-dark-2 bg-opacity-70 text-light-2 border border-light-2 border-opacity-20 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-2"
-                  />
-                </div>
+          <div className="flex gap-4">
+            <button
+              onClick={() => { handleTimeRangeChange('today'); setShowDatePicker(false) }}
+              className={`flex-1 py-3 px-4 rounded-lg font-medium transition-all ${
+                timeRange === 'today'
+                  ? 'glass-button'
+                  : 'bg-dark-2 bg-opacity-70 text-light-1 hover:bg-opacity-90'
+              }`}
+            >
+              Day
+            </button>
+            <button
+              onClick={() => { handleTimeRangeChange('week'); setShowDatePicker(false) }}
+              className={`flex-1 py-3 px-4 rounded-lg font-medium transition-all ${
+                timeRange === 'week'
+                  ? 'glass-button'
+                  : 'bg-dark-2 bg-opacity-70 text-light-1 hover:bg-opacity-90'
+              }`}
+            >
+              Week
+            </button>
+            <button
+              onClick={() => { handleTimeRangeChange('month'); setShowDatePicker(false) }}
+              className={`flex-1 py-3 px-4 rounded-lg font-medium transition-all ${
+                timeRange === 'month'
+                  ? 'glass-button'
+                  : 'bg-dark-2 bg-opacity-70 text-light-1 hover:bg-opacity-90'
+              }`}
+            >
+              Month
+            </button>
+            <button
+              onClick={() => setShowDatePicker(!showDatePicker)}
+              className={`py-3 px-4 rounded-lg font-medium transition-all flex items-center gap-1 ${
+                showDatePicker
+                  ? 'glass-button'
+                  : 'bg-dark-2 bg-opacity-70 text-light-1 hover:bg-opacity-90'
+              }`}
+              title="Custom date range"
+            >
+              <Clock className="w-4 h-4" />
+              <ChevronDown className={`w-4 h-4 transition-transform ${showDatePicker ? 'rotate-180' : ''}`} />
+            </button>
+          </div>
+          {showDatePicker && (
+            <div className="grid grid-cols-2 gap-3 mt-4 pt-4 border-t border-light-2 border-opacity-10">
+              <div>
+                <label className="block text-xs text-light-1 mb-1">Start date</label>
+                <input
+                  type="date"
+                  value={selectedStartDate}
+                  max={selectedEndDate}
+                  onChange={(e) => {
+                    setSelectedStartDate(e.target.value)
+                    if (e.target.value > selectedEndDate) setSelectedEndDate(e.target.value)
+                  }}
+                  className="w-full bg-dark-2 bg-opacity-70 text-light-2 border border-light-2 border-opacity-20 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-2"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-light-1 mb-1">End date</label>
+                <input
+                  type="date"
+                  value={selectedEndDate}
+                  min={selectedStartDate}
+                  onChange={(e) => {
+                    setSelectedEndDate(e.target.value)
+                    if (e.target.value < selectedStartDate) setSelectedStartDate(e.target.value)
+                  }}
+                  className="w-full bg-dark-2 bg-opacity-70 text-light-2 border border-light-2 border-opacity-20 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-2"
+                />
               </div>
             </div>
-          </div>
+          )}
         </div>
 
         {apiConsistencyIssues.length > 0 && (
@@ -4394,12 +5578,30 @@ export default function Dashboard({
 
         {/* Chart Section - Electricity and Gas charts */}
         <div className="space-y-8">
+          {!entitiesLoaded && !isEnvironmentOffline && (
+            <div className="glass-panel rounded-3xl shadow-2xl p-8 text-center">
+              <div className="inline-block w-10 h-10 border-4 border-brand-2 border-t-transparent rounded-full animate-spin mb-3"></div>
+              <p className="text-light-1">Loading sensors and chart data...</p>
+            </div>
+          )}
+
+          {isEnvironmentOffline && (
+            <div className="glass-panel rounded-3xl shadow-2xl p-6 border border-amber-300 border-opacity-40">
+              <p className="text-light-2 font-semibold">This environment is currently offline.</p>
+              <p className="text-light-1 text-sm mt-1">
+                Last seen: {offlineLastSeenAt ? new Date(offlineLastSeenAt).toLocaleString('nl-NL') : 'unknown'}
+              </p>
+            </div>
+          )}
+
+          {entitiesLoaded && !isEnvironmentOffline && (
+          <>
           {/* Power Sources Chart (instantaneous kW) */}
           <div className="glass-panel rounded-3xl shadow-2xl p-4 sm:p-6 md:p-8">
             <h2 className="text-2xl font-heavy text-dark-1 mb-6 flex items-center gap-2">
               <Clock className="w-6 h-6 text-brand-2" />
               Power sources
-              {isLoadingHistory && (
+              {isLoadingHistory && chartData.length === 0 && (
                 <span className="ml-3 inline-flex items-center gap-1.5 text-sm font-normal text-brand-2 opacity-75">
                   <svg className="animate-spin w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
@@ -4410,7 +5612,7 @@ export default function Dashboard({
               )}
             </h2>
             <EnergyChart
-              data={chartData}
+              data={!entitiesLoaded || isEnvironmentOffline ? [] : chartData}
               timeRange={timeRange}
               unit="kW"
               seriesLabel="Power sources"
@@ -4436,19 +5638,16 @@ export default function Dashboard({
                   </span>
                 )}
               </h2>
-              {!isLoadingUsage && electricityUsageTotal > 0 && (
-                <span className="inline-flex items-center rounded-full bg-brand-2/15 px-3 py-1 text-sm font-semibold text-brand-2">
-                  +{electricityUsageTotal.toFixed(2)} kWh
-                </span>
-              )}
+
             </div>
             <EnergyChart
-              data={electricityUsageChartData}
+              data={!entitiesLoaded || isEnvironmentOffline ? [] : electricityUsageChartData}
               timeRange={timeRange}
               unit="kWh"
               seriesLabel="Electricity usage"
               rangeLabel={electricityRange.label}
               chartType="bar"
+              barColor="rgb(74, 222, 128)"
             />
           </div>
 
@@ -4459,21 +5658,20 @@ export default function Dashboard({
                 <Flame className="w-6 h-6 text-brand-2" />
                 Gas consumption
               </h2>
-              {gasSelectedPeriodTotal > 0 && (
-                <span className="inline-flex items-center rounded-full bg-orange-500/15 px-3 py-1 text-sm font-semibold text-orange-400">
-                  {gasSelectedPeriodTotal.toFixed(2)} m³
-                </span>
-              )}
+
             </div>
             <EnergyChart
-              data={gasChartData}
+              data={!entitiesLoaded || isEnvironmentOffline ? [] : gasChartData}
               timeRange={timeRange}
               unit="m³"
               seriesLabel="Gas chart"
               rangeLabel={selectedRange.label}
               chartType="bar"
+              barColor="rgb(234, 88, 12)"
             />
           </div>
+          </>
+          )}
 
           {/* Price Chart */}
           {showDynamicPriceChart && (
@@ -4673,7 +5871,7 @@ export default function Dashboard({
 
         {showHaConfig && (
           <HomeAssistantConfig
-            environmentId={selectedEnvironment}
+            environmentId={selectedEnvironmentRequestId}
             environmentName={environments.find((env) => env.id === selectedEnvironment)?.name || selectedEnvironment}
             onClose={() => setShowHaConfig(false)}
             onSaved={() => {
@@ -4685,7 +5883,7 @@ export default function Dashboard({
 
         {showPriceModal && (
           <EnergyPriceModal
-            environmentId={selectedEnvironment}
+            environmentId={selectedEnvironmentRequestId}
             onClose={() => setShowPriceModal(false)}
             onSave={(config) => setPricingConfig(config)}
             getAuthToken={getAuthToken}

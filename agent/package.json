@@ -1,11 +1,12 @@
 {
-  "name": "homewizard-agent",
+  "name": "insideout-agent",
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node homewizard-agent.js"
+    "start": "node insideout-agent.js"
   },
   "dependencies": {
+    "better-sqlite3": "^11.9.0",
     "dotenv": "^16.4.5"
   }
 }

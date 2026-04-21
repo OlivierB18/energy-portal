@@ -1,7 +1,9 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { connectLambda, getStore } from '@netlify/blobs'
+import { resolveEnvironmentReference } from './_environment-storage.js'
 
 const SNAPSHOT_STORE_NAME = 'ha-snapshots'
+const managementTokenCache = { token: null, expiresAt: 0 }
 
 const getEnv = (key) => {
   const value = process.env[key]
@@ -9,6 +11,100 @@ const getEnv = (key) => {
     throw new Error(`Missing ${key}`)
   }
   return value
+}
+
+const getOptionalEnv = (key) => {
+  const value = process.env[key]
+  return value && value.trim().length > 0 ? value : null
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const getManagementToken = async (domain) => {
+  const now = Date.now()
+  if (managementTokenCache.token && now < managementTokenCache.expiresAt - 60000) {
+    return managementTokenCache.token
+  }
+
+  const fetchToken = async () => {
+    const response = await fetch(`https://${domain}/oauth/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id: getEnv('AUTH0_M2M_CLIENT_ID'),
+        client_secret: getEnv('AUTH0_M2M_CLIENT_SECRET'),
+        audience: `https://${domain}/api/v2/`,
+        grant_type: 'client_credentials',
+      }),
+    })
+
+    if (!response.ok) {
+      throw new Error('Unable to get management token')
+    }
+
+    return response.json()
+  }
+
+  try {
+    const data = await fetchToken()
+    const expiresIn = Number(data.expires_in) || 600
+    managementTokenCache.token = data.access_token
+    managementTokenCache.expiresAt = Date.now() + expiresIn * 1000
+    return managementTokenCache.token
+  } catch {
+    await sleep(200)
+    const data = await fetchToken()
+    const expiresIn = Number(data.expires_in) || 600
+    managementTokenCache.token = data.access_token
+    managementTokenCache.expiresAt = Date.now() + expiresIn * 1000
+    return managementTokenCache.token
+  }
+}
+
+const getClientMetadata = async (domain, token) => {
+  const clientId = getEnv('AUTH0_APP_CLIENT_ID')
+  const response = await fetch(`https://${domain}/api/v2/clients/${encodeURIComponent(clientId)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+
+  if (!response.ok) {
+    throw new Error('Unable to fetch app metadata')
+  }
+
+  const client = await response.json()
+  return client.client_metadata || {}
+}
+
+const resolveReferenceSafe = async (event, environmentId) => {
+  const requestedId = String(environmentId || '').trim()
+  if (!requestedId) {
+    throw new Error('Missing environmentId')
+  }
+
+  try {
+    const domain = getEnv('AUTH0_DOMAIN')
+    const managementToken = await getManagementToken(domain)
+    const metadata = await getClientMetadata(domain, managementToken)
+    const resolvedReference = await resolveEnvironmentReference({
+      event,
+      metadata,
+      environmentId: requestedId,
+      getOptionalEnv,
+    })
+
+    return {
+      canonicalEnvironmentId: resolvedReference.environmentId,
+      aliases: Array.isArray(resolvedReference.aliases) && resolvedReference.aliases.length > 0
+        ? resolvedReference.aliases
+        : [resolvedReference.environmentId],
+    }
+  } catch (error) {
+    console.warn('[save-snapshot] Falling back to requested environmentId, metadata resolution failed:', error instanceof Error ? error.message : String(error))
+    return {
+      canonicalEnvironmentId: requestedId,
+      aliases: [requestedId],
+    }
+  }
 }
 
 const getSnapshotStore = (event) => {
@@ -88,13 +184,21 @@ export const handler = async (event) => {
         return { statusCode: 400, body: JSON.stringify({ error: 'Missing snapshot' }) }
       }
 
+      const { canonicalEnvironmentId, aliases } = await resolveReferenceSafe(event, environmentId)
+
       const store = getSnapshotStore(event)
-      await store.setJSON(`snapshot_${environmentId}`, {
+      await store.setJSON(`snapshot_${canonicalEnvironmentId}`, {
         ...snapshot,
         savedAt: snapshot.savedAt || Date.now(),
       })
 
-      console.log('[save-snapshot] Saved snapshot for environment:', environmentId)
+      for (const alias of aliases) {
+        if (alias && alias !== canonicalEnvironmentId) {
+          await store.delete(`snapshot_${alias}`).catch(() => undefined)
+        }
+      }
+
+      console.log('[save-snapshot] Saved snapshot for environment:', canonicalEnvironmentId)
       return {
         statusCode: 200,
         body: JSON.stringify({ success: true }),
@@ -108,17 +212,31 @@ export const handler = async (event) => {
       }
 
       const store = getSnapshotStore(event)
+      const { canonicalEnvironmentId, aliases } = await resolveReferenceSafe(event, environmentId)
       let snapshot = null
-      try {
-        snapshot = await store.get(`snapshot_${environmentId}`, { type: 'json' })
-      } catch {
-        // Snapshot not found or unreadable — return null gracefully
-        snapshot = null
+
+      for (const alias of aliases) {
+        try {
+          snapshot = await store.get(`snapshot_${alias}`, { type: 'json' })
+          if (snapshot) {
+            break
+          }
+        } catch {
+          // continue alias lookup
+        }
+      }
+
+      if (!snapshot) {
+        try {
+          snapshot = await store.get(`snapshot_${canonicalEnvironmentId}`, { type: 'json' })
+        } catch {
+          snapshot = null
+        }
       }
 
       return {
         statusCode: 200,
-        body: JSON.stringify({ snapshot: snapshot || null }),
+        body: JSON.stringify({ snapshot: snapshot || null, environmentId: canonicalEnvironmentId }),
       }
     }
 

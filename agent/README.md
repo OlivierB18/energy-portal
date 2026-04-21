@@ -1,13 +1,15 @@
-# HomeWizard Data Collection Agent
+# InsideOut Agent
 
-This agent continuously collects energy data from your HomeWizard P1 meter and stores it in Supabase.
+This is the Plan Foxtrot gateway agent for continuous energy data ingestion into Supabase.
 
 ## Why You Need This
 
-The dashboard now pulls historical data from Supabase to:
+The dashboard pulls historical data from Supabase to:
 - ✅ Show accurate kWh calculations (no more gaps!)
 - ✅ Display data even when your browser is closed
 - ✅ Keep 24/7 continuous monitoring
+
+The InsideOut Agent handles the gateway polling and forwards readings to your ingest endpoint.
 
 ## Setup
 
@@ -22,17 +24,17 @@ cp .env.example .env
 Edit the `.env` file with your values:
 
 ```env
-# Your HomeWizard P1 Meter IP address
-HOMEWIZARD_IP=192.168.1.xxx
+# Optional direct HA override (if set, Auth0 metadata lookup is skipped)
+HA_URL=http://192.168.1.xxx:8123
+HA_TOKEN=
 
-# HomeWizard API token (if required, leave empty if not)
-HOMEWIZARD_TOKEN=
+# Environment and authentication
+ENVIRONMENT_ID=your-environment-id
+DEVICE_TOKEN=
 
-# Your environment ID from the main app
-HOMEWIZARD_ENVIRONMENT_ID=your-environment-id
-
-# How often to collect data (in milliseconds, default 10000 = 10 seconds)
-HOMEWIZARD_POLL_MS=10000
+# Polling and aggregation intervals
+POLL_INTERVAL_MS=10000
+AGGREGATE_INTERVAL_MS=900000
 
 # Netlify function URL (use your deployed site URL)
 INGEST_URL=https://brouwerems.netlify.app/.netlify/functions/ingest-device-data
@@ -65,7 +67,7 @@ Use PM2 or similar process manager:
 
 ```bash
 npm install -g pm2
-pm2 start homewizard-agent.js --name energy-agent
+pm2 start insideout-agent.js --name insideout-agent
 pm2 save
 pm2 startup
 ```
@@ -77,13 +79,13 @@ Copy this folder to a Raspberry Pi or server that runs 24/7 and follow the same 
 
 You should see console output every 10 seconds:
 ```
-[agent] sent data for your-environment-id (serial-number)
+[insideout-agent] sent data for your-environment-id (home-assistant)
 ```
 
 Check your dashboard - the data gaps should be gone and kWh calculations should be accurate!
 
 ## Troubleshooting
 
-- **"Missing HOMEWIZARD_IP"**: Make sure you created the `.env` file and filled in all values
+- **"Missing ENVIRONMENT_ID"**: Make sure you created the `.env` file and filled in required values
 - **"Request failed 401"**: Check your INGEST_API_KEY is correct
-- **"ECONNREFUSED"**: Check your HomeWizard IP address is correct and reachable
+- **"ECONNREFUSED"**: Check your HA_URL or Auth0 environment configuration is correct and reachable

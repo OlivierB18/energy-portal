@@ -1,5 +1,7 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { resolveEnvironmentConfig } from './_environment-storage.js'
+import { checkEnvironmentAccess } from './_access-control.js'
+import { createServiceSupabaseClient } from './_supabase.js'
 
 const getEnv = (key) => {
   const value = process.env[key]
@@ -97,20 +99,9 @@ const verifyAuthAndAdmin = async (event) => {
   const email = typeof emailValue === 'string' ? emailValue.toLowerCase() : ''
   const isAdmin = isAdminEmail(email)
 
-  return { payload, isAdmin, userId: payload.sub }
-}
-
-const getUserAppMetadata = async (domain, userId) => {
-  const managementToken = await getManagementToken(domain)
-  const response = await fetch(
-    `https://${domain}/api/v2/users/${encodeURIComponent(userId)}?fields=app_metadata&include_fields=true`,
-    { headers: { Authorization: `Bearer ${managementToken}` } },
-  )
-  if (!response.ok) {
-    throw new Error('Unable to fetch user metadata')
-  }
-  const user = await response.json()
-  return user.app_metadata || {}
+  const emailValue = payload.email || payload['https://brouwer-ems/email']
+  const resolvedEmail = typeof emailValue === 'string' ? emailValue.toLowerCase() : ''
+  return { payload, isAdmin, resolvedEmail, userId: payload.sub }
 }
 
 export const handler = async (event) => {
@@ -127,7 +118,7 @@ export const handler = async (event) => {
       }
     }
 
-    const { isAdmin, userId } = authResult
+    const { isAdmin, resolvedEmail } = authResult
 
     const environmentId = event.queryStringParameters?.environmentId
     if (!environmentId) {
@@ -138,17 +129,16 @@ export const handler = async (event) => {
       }
     }
 
-    // Non-admin users may only access environments they are assigned to
+    // Access control: super admin / ADMIN_EMAILS always allowed; others checked via Supabase
     if (!isAdmin) {
       try {
-        const domain = getEnv('AUTH0_DOMAIN')
-        const appMetadata = await getUserAppMetadata(domain, userId)
-        const allowedEnvIds = Array.isArray(appMetadata.environmentIds) ? appMetadata.environmentIds : []
-        if (!allowedEnvIds.includes(environmentId)) {
+        const supabase = createServiceSupabaseClient()
+        const access = await checkEnvironmentAccess({ userEmail: resolvedEmail, environmentId, supabase })
+        if (!access.allowed) {
           return { statusCode: 403, body: JSON.stringify({ error: 'Access denied to this environment' }) }
         }
-      } catch (metaErr) {
-        console.error('[StatisticIds] Failed to verify environment access:', metaErr?.message || metaErr)
+      } catch (accessErr) {
+        console.error('[StatisticIds] Failed to verify environment access:', accessErr?.message || accessErr)
         return { statusCode: 403, body: JSON.stringify({ error: 'Unable to verify environment access' }) }
       }
     }

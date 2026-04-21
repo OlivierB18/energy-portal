@@ -5,6 +5,8 @@
 
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { resolveEnvironmentConfig } from './_environment-storage.js'
+import { checkEnvironmentAccess, isStaticAdmin } from './_access-control.js'
+import { createServiceSupabaseClient } from './_supabase.js'
 
 const getEnv = (key) => {
   const value = process.env[key]
@@ -113,6 +115,33 @@ const isAdminEmail = (email) => {
   return getAdminAllowlist().includes(email)
 }
 
+const getUserInfoEmail = async (domain, token) => {
+  try {
+    const response = await fetch(`https://${domain}/userinfo`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    if (!response.ok) return ''
+    const data = await response.json()
+    return typeof data.email === 'string' ? data.email.toLowerCase() : ''
+  } catch {
+    return ''
+  }
+}
+
+const getUserEmailFromManagement = async (domain, managementToken, userId) => {
+  try {
+    const response = await fetch(
+      `https://${domain}/api/v2/users/${encodeURIComponent(userId)}?fields=email&include_fields=true`,
+      { headers: { Authorization: `Bearer ${managementToken}` } },
+    )
+    if (!response.ok) return ''
+    const data = await response.json()
+    return typeof data.email === 'string' ? data.email.toLowerCase() : ''
+  } catch {
+    return ''
+  }
+}
+
 const verifyAuthAndAdmin = async (event) => {
   const authHeader = event.headers.authorization || event.headers.Authorization
   if (!authHeader?.startsWith('Bearer ')) {
@@ -124,24 +153,27 @@ const verifyAuthAndAdmin = async (event) => {
   const jwks = createRemoteJWKSet(new URL(`https://${domain}/.well-known/jwks.json`))
   const { payload } = await jwtVerify(token, jwks, { issuer: `https://${domain}/` })
 
+  let resolvedEmail = ''
   const emailValue = payload.email || payload['https://brouwer-ems/email']
-  const email = typeof emailValue === 'string' ? emailValue.toLowerCase() : ''
-  const isAdmin = isAdminEmail(email)
+  resolvedEmail = typeof emailValue === 'string' ? emailValue.toLowerCase() : ''
 
-  return { payload, isAdmin, userId: payload.sub }
-}
-
-const getUserAppMetadata = async (domain, userId) => {
-  const managementToken = await getManagementToken(domain)
-  const response = await fetch(
-    `https://${domain}/api/v2/users/${encodeURIComponent(userId)}?fields=app_metadata&include_fields=true`,
-    { headers: { Authorization: `Bearer ${managementToken}` } },
-  )
-  if (!response.ok) {
-    throw new Error('Unable to fetch user metadata')
+  if (!resolvedEmail) {
+    resolvedEmail = await getUserInfoEmail(domain, token)
   }
-  const user = await response.json()
-  return user.app_metadata || {}
+
+  if (!resolvedEmail) {
+    try {
+      const mgmtToken = await getManagementToken(domain)
+      resolvedEmail = await getUserEmailFromManagement(domain, mgmtToken, payload.sub)
+    } catch {
+      // ignore
+    }
+  }
+
+  const isAdmin = isAdminEmail(resolvedEmail)
+  console.log('[Gas Hourly] Auth resolved: email=', resolvedEmail || '(empty)', 'isAdmin=', isAdmin)
+
+  return { payload, isAdmin, resolvedEmail, userId: payload.sub }
 }
 
 const parseEnvironmentMap = (input) => {
@@ -314,23 +346,29 @@ export const handler = async (event) => {
       return { statusCode, body: JSON.stringify({ error: authErr.message || 'Unauthorized' }) }
     }
 
-    const { isAdmin, userId } = authResult
+    const { isAdmin, resolvedEmail } = authResult
 
-    const environmentId = event.queryStringParameters?.environmentId || 'vacation'
+    const environmentId = String(event.queryStringParameters?.environmentId || '').trim()
     const entityId = event.queryStringParameters?.entityId || 'sensor.gas_meter_gas_consumption'
     const hoursBack = parseInt(event.queryStringParameters?.hoursBack || '200', 10) // ~8 days back to March 3
 
-    // Non-admin users may only access environments they are assigned to
+    if (!environmentId) {
+      return {
+        statusCode: 400,
+        body: JSON.stringify({ error: 'Missing query parameter: environmentId' }),
+      }
+    }
+
+    // Access control: super admin / ADMIN_EMAILS always allowed; others checked via Supabase
     if (!isAdmin) {
       try {
-        const domain = getEnv('AUTH0_DOMAIN')
-        const appMetadata = await getUserAppMetadata(domain, userId)
-        const allowedEnvIds = Array.isArray(appMetadata.environmentIds) ? appMetadata.environmentIds : []
-        if (!allowedEnvIds.includes(environmentId)) {
+        const supabase = createServiceSupabaseClient()
+        const access = await checkEnvironmentAccess({ userEmail: resolvedEmail, environmentId, supabase })
+        if (!access.allowed) {
           return { statusCode: 403, body: JSON.stringify({ error: 'Access denied to this environment' }) }
         }
-      } catch (metaErr) {
-        console.error('[Gas Hourly] Failed to verify environment access:', metaErr?.message || metaErr)
+      } catch (accessErr) {
+        console.error('[Gas Hourly] Failed to verify environment access:', accessErr?.message || accessErr)
         return { statusCode: 403, body: JSON.stringify({ error: 'Unable to verify environment access' }) }
       }
     }
@@ -387,13 +425,29 @@ export const handler = async (event) => {
     }
 
     // Parse all meter values
-    const readings = entityHistory
+    let readings = entityHistory
       .map(state => ({
         timestamp: new Date(state.last_changed || state.last_updated).getTime(),
         value: parseNumericState(state.state),
       }))
       .filter(r => Number.isFinite(r.value))
       .sort((a, b) => a.timestamp - b.timestamp)
+
+    // Remove initialization artifacts: if the first readings have value 0 (or near 0)
+    // while later readings are 1000x+ larger, these are sensor initialization states.
+    // Example: gas sensor added → state=0, then reads real meter value 77208 m³ on next update.
+    if (readings.length >= 3) {
+      const medianIdx = Math.floor(readings.length / 2)
+      const medianValue = readings[medianIdx].value
+      if (medianValue > 10) {
+        const threshold = medianValue * 0.001
+        const firstRealIdx = readings.findIndex((r) => r.value > threshold)
+        if (firstRealIdx > 0) {
+          console.log(`[Gas Hourly] Skipping ${firstRealIdx} initialization readings (values 0-${readings[firstRealIdx - 1].value}, median=${medianValue})`)
+          readings = readings.slice(firstRealIdx)
+        }
+      }
+    }
 
     console.log(`[Gas Hourly] Parsed ${readings.length} valid readings`)
 
@@ -419,11 +473,19 @@ export const handler = async (event) => {
       const hourEnd = (h + 1) * 3600000
 
       // Find readings at/before start and end of this hour
+      // Use <= hourEnd (inclusive) so readings exactly on the hour boundary are included.
+      // DSMR gas meters report on the hour; strict < would miss them and yield 0 deltas.
       const atStart = readings.filter(r => r.timestamp <= hourStart).pop()
-      const atEnd = readings.filter(r => r.timestamp < hourEnd).pop()
+      const atEnd = readings.filter(r => r.timestamp <= hourEnd).pop()
 
       if (atStart && atEnd && atEnd.timestamp > atStart.timestamp) {
-        const delta = Math.max(0, atEnd.value - atStart.value)
+        let delta = Math.max(0, atEnd.value - atStart.value)
+        // Hard cap: no residential gas meter can consume 50 m³ in one hour.
+        // Any larger delta is a sensor initialization artifact (first reading 0 → cumulative meter value).
+        if (delta > 50) {
+          console.log(`[Gas Hourly] Capping spike at ${new Date(hourStart).toISOString()}: ${delta} → 0`)
+          delta = 0
+        }
         hourlyDeltas.push({
           hour: new Date(hourStart).toISOString(),
           delta: parseFloat(delta.toFixed(3)),
