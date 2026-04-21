@@ -1,22 +1,31 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Home, Zap, Activity, Wifi, WifiOff, Settings, LayoutDashboard, Users as UsersIcon, LogOut } from 'lucide-react'
 import EnvironmentConfig from '../components/EnvironmentConfig'
 import { Environment } from '../types'
 import { useAuth0 } from '@auth0/auth0-react'
+import { setOverviewLiveSnapshot } from '../lib/dashboardRuntimeCache'
 
 const OVERVIEW_TEXT_STORAGE_KEY = 'overview_text_config_v1'
 const HA_ENVIRONMENTS_CACHE_KEY = 'ha_environments_cache_v1'
 const OVERVIEW_STATUS_CACHE_KEY = 'overview_status_cache_v2'
-const OVERVIEW_REFRESH_INTERVAL_MS = 10_000
-const OVERVIEW_OFFLINE_THRESHOLD = 6
+const OVERVIEW_REFRESH_INTERVAL_MS = 30_000
+const OVERVIEW_OFFLINE_HEALTHCHECK_INTERVAL_MS = 5 * 60_000
+const OVERVIEW_OFFLINE_THRESHOLD = 10
 const OVERVIEW_STALE_AFTER_MS = OVERVIEW_REFRESH_INTERVAL_MS * OVERVIEW_OFFLINE_THRESHOLD
 
 interface OverviewStatusSnapshot {
   status: Environment['status']
   currentPower?: number
   dailyUsage?: number
+  dailyGasUsage?: number
   lastUpdate?: string
   lastSeenAt?: number
+}
+
+interface EnergyOverviewSnapshot {
+  environmentId: string
+  kwh_imported?: number
+  gas_m3?: number
 }
 
 const readOverviewStatusCache = (): Record<string, OverviewStatusSnapshot> => {
@@ -83,6 +92,7 @@ interface OverviewTextConfig {
   noEnvironments: string
   currentPower: string
   dailyUsage: string
+  dailyGas: string
   lastUpdate: string
   environmentOffline: string
   lastSeen: string
@@ -91,6 +101,7 @@ interface OverviewTextConfig {
   environmentsOnline: string
   totalCurrentPower: string
   totalDailyUsage: string
+  totalDailyGas: string
 }
 
 const DEFAULT_OVERVIEW_TEXT: OverviewTextConfig = {
@@ -104,6 +115,7 @@ const DEFAULT_OVERVIEW_TEXT: OverviewTextConfig = {
   noEnvironments: 'No environments configured yet.',
   currentPower: 'Current Power',
   dailyUsage: 'Daily Usage',
+  dailyGas: 'Daily Gas',
   lastUpdate: 'Last update',
   environmentOffline: 'Environment offline',
   lastSeen: 'Last seen',
@@ -112,6 +124,7 @@ const DEFAULT_OVERVIEW_TEXT: OverviewTextConfig = {
   environmentsOnline: 'Environments Online',
   totalCurrentPower: 'Total Current Power (kW)',
   totalDailyUsage: 'Total Daily Usage (kWh)',
+  totalDailyGas: 'Total Daily Gas (m³)',
 }
 
 interface MultiEnvironmentOverviewProps {
@@ -152,6 +165,11 @@ export default function MultiEnvironmentOverview({
   const [isSavingEditMode, setIsSavingEditMode] = useState(false)
   const [overviewText, setOverviewText] = useState<OverviewTextConfig>(DEFAULT_OVERVIEW_TEXT)
   const [environmentNamesAtEditStart, setEnvironmentNamesAtEditStart] = useState<Record<string, string>>({})
+  const environmentsRef = useRef<Environment[]>([])
+
+  useEffect(() => {
+    environmentsRef.current = environments
+  }, [environments])
 
   const getAuthToken = async () => {
     const audience = import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined
@@ -236,6 +254,7 @@ export default function MultiEnvironmentOverview({
             status: resolvedStatus,
             currentPower: existing?.currentPower ?? cachedStatus?.currentPower,
             dailyUsage: existing?.dailyUsage ?? cachedStatus?.dailyUsage,
+            dailyGasUsage: existing?.dailyGasUsage ?? cachedStatus?.dailyGasUsage,
             lastUpdate: existing?.lastUpdate ?? cachedStatus?.lastUpdate ?? '-',
           }
         })
@@ -300,17 +319,8 @@ export default function MultiEnvironmentOverview({
       }
 
       try {
-        const claims = await getIdTokenClaims()
-        const envClaim = 'https://brouwer-ems/environments'
-        const envs = (claims?.[envClaim] as string[] | undefined) ?? null
-
-        if (envs && envs.length > 0) {
-          setAllowedEnvironmentIds(envs)
-          return
-        }
-
         const token = await getAuthToken()
-        const response = await fetch('/.netlify/functions/get-user-environments', {
+        const response = await fetch('/.netlify/functions/get-my-environments', {
           headers: { Authorization: `Bearer ${token}` },
         })
 
@@ -327,7 +337,7 @@ export default function MultiEnvironmentOverview({
     }
 
     void loadAssignments()
-  }, [getAccessTokenSilently, getIdTokenClaims, isAuthenticated, isAdmin])
+  }, [getAccessTokenSilently, isAuthenticated, isAdmin])
 
   useEffect(() => {
     type LiveEntity = {
@@ -340,6 +350,15 @@ export default function MultiEnvironmentOverview({
     type LiveMetrics = {
       currentPowerKw?: number | string | null
       dailyElectricityKwh?: number | string | null
+      dailyGasM3?: number | string | null
+      sources?: {
+        electricityConsumptionEntityIds?: string[] | null
+        electricityTotalEntityIds?: string[] | null
+        electricityTotalEntityId?: string | null
+        gasEntityId?: string | null
+        gasTotalEntityId?: string | null
+        dailyGasEntityId?: string | null
+      } | null
     }
 
     const parseValue = (value?: string | number | null): number => {
@@ -392,6 +411,7 @@ export default function MultiEnvironmentOverview({
     const deriveLiveData = (entities: LiveEntity[], metrics: LiveMetrics | null) => {
       const serverPower = parseMetricValue(metrics?.currentPowerKw)
       const serverDailyUsage = parseMetricValue(metrics?.dailyElectricityKwh)
+      const serverDailyGas = parseMetricValue(metrics?.dailyGasM3)
 
       const powerEntity = findSensorByKeywords(
         entities,
@@ -413,11 +433,30 @@ export default function MultiEnvironmentOverview({
         ],
         ['gas', 'price', 'cost', 'tariff', 'euro'],
       )
+      const gasDailyEntity = findSensorByKeywords(
+        entities,
+        ['gas_today', 'daily_gas', 'today_gas', 'gas_day', 'gas_verbruik_dag', 'gas_consumption_today'],
+        ['price', 'cost', 'tariff', 'euro'],
+      )
+      const gasTotalEntity = findSensorByKeywords(
+        entities,
+        ['gas_meter', 'gas_consumption', 'gas_total', 'gasverbruik'],
+        ['price', 'cost', 'tariff', 'euro', 'today', 'daily', 'month', 'monthly'],
+      )
 
       const currentPower =
         serverPower ??
         normalizePowerToKw(parseValue(powerEntity?.state), powerEntity?.unit_of_measurement)
       const dailyUsage = serverDailyUsage ?? parseValue(dailyEntity?.state)
+      const dailyGasUsage = serverDailyGas ?? parseValue(gasDailyEntity?.state)
+
+      const hasGasCapability = Boolean(
+        (typeof metrics?.sources?.gasEntityId === 'string' && metrics.sources.gasEntityId.trim().length > 0) ||
+        (typeof metrics?.sources?.gasTotalEntityId === 'string' && metrics.sources.gasTotalEntityId.trim().length > 0) ||
+        (typeof metrics?.sources?.dailyGasEntityId === 'string' && metrics.sources.dailyGasEntityId.trim().length > 0) ||
+        gasDailyEntity ||
+        gasTotalEntity,
+      )
 
       const normalizedCurrentPower = Number.isFinite(currentPower) ? currentPower : 0
       const normalizedDailyUsage = Math.max(0, dailyUsage)
@@ -425,12 +464,75 @@ export default function MultiEnvironmentOverview({
       return {
         currentPower: Number(normalizedCurrentPower.toFixed(2)),
         dailyUsage: Number(normalizedDailyUsage.toFixed(2)),
+        dailyGasUsage: hasGasCapability ? Number(Math.max(0, dailyGasUsage).toFixed(2)) : null,
+        hasGasCapability,
+      }
+    }
+
+    const getStatisticsEntityIds = (metrics: LiveMetrics | null): string[] => {
+      const ids = [
+        ...(metrics?.sources?.electricityConsumptionEntityIds ?? []),
+        ...(metrics?.sources?.electricityTotalEntityIds ?? []),
+        metrics?.sources?.electricityTotalEntityId,
+      ]
+        .filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+
+      return Array.from(new Set(ids))
+    }
+
+    const fetchDailyUsageFromStatistics = async (environmentId: string, token: string, metrics: LiveMetrics | null) => {
+      const statisticIds = getStatisticsEntityIds(metrics)
+      if (statisticIds.length === 0) {
+        return null
+      }
+
+      const now = new Date()
+      const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0)
+      const tzOffsetMinutes = new Date().getTimezoneOffset() * -1
+
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 10000)
+
+      try {
+        const url = `/.netlify/functions/energy-data?environmentId=${encodeURIComponent(environmentId)}&startTime=${encodeURIComponent(startOfDay.toISOString())}&endTime=${encodeURIComponent(now.toISOString())}&entityIds=${encodeURIComponent(statisticIds.join(','))}&mode=statistics&period=hour&resolution=raw&tzOffset=${tzOffsetMinutes}`
+        const response = await fetch(url, {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: controller.signal,
+        })
+
+        if (!response.ok) {
+          return null
+        }
+
+        const payload = await response.json()
+        const entities: Array<{ is_production?: boolean; history?: Array<{ change?: number }> }> = Array.isArray(payload?.entities)
+          ? payload.entities
+          : []
+
+        const totalImport = entities
+          .filter((entity) => !entity?.is_production)
+          .flatMap((entity) => Array.isArray(entity?.history) ? entity.history : [])
+          .reduce((sum, row) => {
+            const change = Number(row?.change)
+            return sum + (Number.isFinite(change) && change > 0 ? change : 0)
+          }, 0)
+
+        if (!Number.isFinite(totalImport) || totalImport <= 0) {
+          return null
+        }
+
+        return Number(totalImport.toFixed(2))
+      } catch {
+        return null
+      } finally {
+        clearTimeout(timeout)
       }
     }
 
     const environmentIds = environmentIdsSignature ? environmentIdsSignature.split('|') : []
     let latestRefreshRequestId = 0
     let isDisposed = false
+    const lastOfflineHealthCheckAt: Record<string, number> = {}
 
     // Track consecutive failures per environment so a single transient error
     // does not flash the card offline while it still has valid last-known data.
@@ -443,14 +545,25 @@ export default function MultiEnvironmentOverview({
       status: 'online' | 'offline'
       currentPower?: number
       dailyUsage?: number
+      dailyGasUsage?: number
       lastUpdate?: string
     }) => {
+      setOverviewLiveSnapshot({
+        environmentId: result.environmentId,
+        status: result.status,
+        currentPower: result.currentPower,
+        dailyUsage: result.dailyUsage,
+        lastUpdate: result.lastUpdate,
+        lastSeenAt: Date.now(),
+      })
+
       if (result.status === 'online') {
         failureCounts[result.environmentId] = 0
         updateOverviewStatusCache(result.environmentId, {
           status: 'online',
           currentPower: result.currentPower,
           dailyUsage: result.dailyUsage,
+          dailyGasUsage: result.dailyGasUsage,
           lastUpdate: result.lastUpdate,
           lastSeenAt: Date.now(),
         })
@@ -466,7 +579,7 @@ export default function MultiEnvironmentOverview({
 
           // If the refresh failed but the card was already online, keep showing
           // the last-known data until we've seen enough consecutive failures.
-          if (result.status === 'offline' && env.status === 'online') {
+          if (result.status === 'offline' && (env.status === 'online' || env.status === 'connecting')) {
             const consecutive = failureCounts[result.environmentId] ?? 0
             if (consecutive < OVERVIEW_OFFLINE_THRESHOLD) {
               return env
@@ -484,15 +597,34 @@ export default function MultiEnvironmentOverview({
             status: result.status,
             currentPower: result.currentPower ?? env.currentPower,
             dailyUsage: result.dailyUsage ?? env.dailyUsage,
+            dailyGasUsage: result.dailyGasUsage ?? env.dailyGasUsage,
             lastUpdate: result.lastUpdate ?? env.lastUpdate,
           }
         }),
       )
     }
 
-    const fetchEnvironmentStatus = async (environmentId: string, token: string) => {
+    const fetchOverviewSummaries = async (token: string) => {
+      try {
+        const response = await fetch('/.netlify/functions/energy-data?view=overview', {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+
+        if (!response.ok) {
+          return new Map<string, EnergyOverviewSnapshot>()
+        }
+
+        const payload = await response.json()
+        const rows: EnergyOverviewSnapshot[] = Array.isArray(payload?.overview) ? payload.overview : []
+        return new Map(rows.map((row) => [row.environmentId, row]))
+      } catch {
+        return new Map<string, EnergyOverviewSnapshot>()
+      }
+    }
+
+    const fetchEnvironmentStatus = async (environmentId: string, token: string, overviewSnapshot?: EnergyOverviewSnapshot) => {
       const controller = new AbortController()
-      const timeout = setTimeout(() => controller.abort(), 6000)
+      const timeout = setTimeout(() => controller.abort(), 10000)
 
       try {
         const response = await fetch(`/.netlify/functions/ha-entities?environmentId=${environmentId}`, {
@@ -501,6 +633,9 @@ export default function MultiEnvironmentOverview({
         })
 
         if (!response.ok) {
+          if (response.status === 502) {
+            console.warn(`[HA] Environment ${environmentId} is unreachable`)
+          }
           return {
             environmentId,
             status: 'offline' as const,
@@ -514,13 +649,63 @@ export default function MultiEnvironmentOverview({
             ? (data.metrics as LiveMetrics)
             : null
         const liveData = deriveLiveData(entities, metrics)
+        const overviewDailyUsage = Number(overviewSnapshot?.kwh_imported)
+        const overviewDailyGas = Number(overviewSnapshot?.gas_m3)
+        const fallbackDailyUsage =
+          Number.isFinite(overviewDailyUsage) && overviewDailyUsage >= 0
+            ? overviewDailyUsage
+            : liveData.dailyUsage > 0
+            ? liveData.dailyUsage
+            : await fetchDailyUsageFromStatistics(environmentId, token, metrics)
 
         return {
           environmentId,
           status: 'online' as const,
           currentPower: liveData.currentPower,
-          dailyUsage: liveData.dailyUsage,
+          dailyUsage: Number.isFinite(fallbackDailyUsage) && fallbackDailyUsage !== null
+            ? fallbackDailyUsage
+            : liveData.dailyUsage,
+          dailyGasUsage: liveData.hasGasCapability || (Number.isFinite(overviewDailyGas) && overviewDailyGas >= 0)
+            ? (Number.isFinite(overviewDailyGas)
+              ? overviewDailyGas
+              : (Number.isFinite(liveData.dailyGasUsage) && liveData.dailyGasUsage !== null ? liveData.dailyGasUsage : 0))
+            : undefined,
           lastUpdate: new Date().toLocaleTimeString(),
+        }
+      } catch {
+        return {
+          environmentId,
+          status: 'offline' as const,
+        }
+      } finally {
+        clearTimeout(timeout)
+      }
+    }
+
+    const fetchEnvironmentHealth = async (environmentId: string, token: string) => {
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 10000)
+
+      try {
+        const response = await fetch(`/.netlify/functions/ha-health?environmentId=${encodeURIComponent(environmentId)}`, {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: controller.signal,
+        })
+
+        if (!response.ok) {
+          if (response.status === 502) {
+            console.warn(`[HA] Environment ${environmentId} is unreachable`)
+          }
+
+          return {
+            environmentId,
+            status: 'offline' as const,
+          }
+        }
+
+        return {
+          environmentId,
+          status: 'online' as const,
         }
       } catch {
         return {
@@ -545,8 +730,39 @@ export default function MultiEnvironmentOverview({
           return
         }
 
+        const overviewByEnvironmentId = await fetchOverviewSummaries(token)
+        if (isDisposed || refreshRequestId !== latestRefreshRequestId) {
+          return
+        }
+
         const refreshTasks = environmentIds.map(async (environmentId) => {
-          const result = await fetchEnvironmentStatus(environmentId, token)
+          const currentEnvironment = environmentsRef.current.find((env) => env.id === environmentId)
+          const isKnownOffline = currentEnvironment?.status === 'offline'
+          const now = Date.now()
+
+          if (isKnownOffline) {
+            const lastCheckAt = lastOfflineHealthCheckAt[environmentId] ?? 0
+            if ((now - lastCheckAt) < OVERVIEW_OFFLINE_HEALTHCHECK_INTERVAL_MS) {
+              return
+            }
+
+            lastOfflineHealthCheckAt[environmentId] = now
+            const healthResult = await fetchEnvironmentHealth(environmentId, token)
+            if (isDisposed || refreshRequestId !== latestRefreshRequestId) {
+              return
+            }
+
+            if (healthResult.status === 'offline') {
+              applyRefreshResult(healthResult)
+              return
+            }
+          }
+
+          const result = await fetchEnvironmentStatus(
+            environmentId,
+            token,
+            overviewByEnvironmentId.get(environmentId),
+          )
 
           if (isDisposed || refreshRequestId !== latestRefreshRequestId) {
             return
@@ -570,7 +786,7 @@ export default function MultiEnvironmentOverview({
         setEnvironments((prev) =>
           prev.map((env) => {
             const consecutive = failureCounts[env.id] ?? 0
-            if (env.status === 'online' && consecutive < OVERVIEW_OFFLINE_THRESHOLD) {
+            if ((env.status === 'online' || env.status === 'connecting') && consecutive < OVERVIEW_OFFLINE_THRESHOLD) {
               return env
             }
             updateOverviewStatusCache(env.id, {
@@ -960,6 +1176,14 @@ export default function MultiEnvironmentOverview({
               className={`glass-card rounded-2xl p-6 shadow-xl transition-all ${isEditMode ? 'cursor-default' : 'hover:shadow-2xl cursor-pointer'}`}
               onClick={() => {
                 if (!isEditMode) {
+                  setOverviewLiveSnapshot({
+                    environmentId: env.id,
+                    status: env.status,
+                    currentPower: env.currentPower,
+                    dailyUsage: env.dailyUsage,
+                    lastUpdate: env.lastUpdate,
+                    lastSeenAt: Date.now(),
+                  })
                   onOpenEnvironment(env.id)
                 }
               }}
@@ -972,6 +1196,14 @@ export default function MultiEnvironmentOverview({
 
                 if (event.key === 'Enter' || event.key === ' ') {
                   event.preventDefault()
+                  setOverviewLiveSnapshot({
+                    environmentId: env.id,
+                    status: env.status,
+                    currentPower: env.currentPower,
+                    dailyUsage: env.dailyUsage,
+                    lastUpdate: env.lastUpdate,
+                    lastSeenAt: Date.now(),
+                  })
                   onOpenEnvironment(env.id)
                 }
               }}
@@ -1014,7 +1246,7 @@ export default function MultiEnvironmentOverview({
                     </span>
                     <div className="flex items-center gap-2">
                       <Zap className="w-4 h-4 text-brand-2" />
-                      <span className="font-heavy text-dark-1">{env.currentPower} kW</span>
+                      <span className="font-heavy text-dark-1">{Number(env.currentPower ?? 0).toFixed(2)} kW</span>
                     </div>
                   </div>
                   <div className="flex items-center justify-between">
@@ -1033,6 +1265,24 @@ export default function MultiEnvironmentOverview({
                     </span>
                     <span className="font-medium text-dark-1">{env.dailyUsage} kWh</span>
                   </div>
+                  {typeof env.dailyGasUsage === 'number' && (
+                    <div className="flex items-center justify-between">
+                      <span className="text-dark-2 text-sm">
+                        {isEditMode ? (
+                          <input
+                            type="text"
+                            value={overviewText.dailyGas}
+                            onChange={(event) => updateOverviewText('dailyGas', event.target.value)}
+                            className="w-36 bg-black bg-opacity-35 text-light-2 border border-light-2 border-opacity-30 rounded px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-brand-2"
+                            onClick={(event) => event.stopPropagation()}
+                          />
+                        ) : (
+                          overviewText.dailyGas
+                        )}
+                      </span>
+                      <span className="font-medium text-dark-1">{env.dailyGasUsage.toFixed(2)} m³</span>
+                    </div>
+                  )}
                   <div className="pt-2 border-t border-dark-2 border-opacity-10">
                     <p className="text-xs text-dark-2">
                       {isEditMode ? (
@@ -1089,6 +1339,14 @@ export default function MultiEnvironmentOverview({
                 onClick={(event) => {
                   event.stopPropagation()
                   if (!isEditMode) {
+                    setOverviewLiveSnapshot({
+                      environmentId: env.id,
+                      status: env.status,
+                      currentPower: env.currentPower,
+                      dailyUsage: env.dailyUsage,
+                      lastUpdate: env.lastUpdate,
+                      lastSeenAt: Date.now(),
+                    })
                     onOpenEnvironment(env.id)
                   }
                 }}
@@ -1122,7 +1380,7 @@ export default function MultiEnvironmentOverview({
           ) : (
             <h2 className="text-2xl font-heavy text-dark-1 mb-6">{overviewText.summaryTitle}</h2>
           )}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
             <div className="text-center">
               <div className="text-3xl font-heavy text-brand-2 mb-2">
                 {visibleEnvironments.filter(e => e.status === 'online').length}/{visibleEnvironments.length}
@@ -1174,6 +1432,24 @@ export default function MultiEnvironmentOverview({
                   />
                 ) : (
                   overviewText.totalDailyUsage
+                )}
+              </p>
+            </div>
+            <div className="text-center">
+              <div className="text-3xl font-heavy text-orange-500 mb-2">
+                {visibleEnvironments.reduce((sum, env) => sum + (env.dailyGasUsage || 0), 0).toFixed(2)}
+              </div>
+              <p className="text-dark-2">
+                {isEditMode ? (
+                  <input
+                    type="text"
+                    value={overviewText.totalDailyGas}
+                    onChange={(event) => updateOverviewText('totalDailyGas', event.target.value)}
+                    className="w-full max-w-[14rem] mx-auto bg-black bg-opacity-35 text-light-2 border border-light-2 border-opacity-30 rounded px-2 py-1 text-center focus:outline-none focus:ring-2 focus:ring-brand-2"
+                    onClick={(event) => event.stopPropagation()}
+                  />
+                ) : (
+                  overviewText.totalDailyGas
                 )}
               </p>
             </div>

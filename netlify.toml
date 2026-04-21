@@ -5,3 +5,9 @@
 
 [build.environment]
   NODE_VERSION = "18"
+
+[functions."ingest-energy"]
+  schedule = "* * * * *"
+
+[functions."aggregate-energy"]
+  schedule = "5 * * * *"

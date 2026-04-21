@@ -1,5 +1,6 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { getMergedPricingMap, resolvePricingConfig } from './_pricing-storage.js'
+import { resolveEnvironmentReference } from './_environment-storage.js'
 
 const getEnv = (key) => {
   const value = process.env[key]
@@ -7,6 +8,11 @@ const getEnv = (key) => {
     throw new Error(`Missing ${key}`)
   }
   return value
+}
+
+const getOptionalEnv = (key) => {
+  const value = process.env[key]
+  return value && value.trim().length > 0 ? value : null
 }
 
 const managementTokenCache = { token: null, expiresAt: 0 }
@@ -137,16 +143,33 @@ export const handler = async (event) => {
       }
     }
 
-    const resolvedConfig = resolvePricingConfig({
-      pricingMap: merged.pricingMap,
-      environmentId,
-    })
+    let canonicalEnvironmentId = environmentId
+    let aliasIds = [environmentId]
+    try {
+      const domain = getEnv('AUTH0_DOMAIN')
+      const managementToken = await getManagementToken(domain)
+      const metadata = await getClientMetadata(domain, managementToken)
+      const resolvedReference = await resolveEnvironmentReference({
+        event,
+        metadata,
+        environmentId,
+        getOptionalEnv,
+      })
+      canonicalEnvironmentId = resolvedReference.environmentId
+      aliasIds = resolvedReference.aliases
+    } catch {
+      // Keep fallback to requested ID.
+    }
+
+    const resolvedConfig = aliasIds
+      .map((id) => resolvePricingConfig({ pricingMap: merged.pricingMap, environmentId: id }))
+      .find((config) => config !== null)
     const config = normalizePricingConfig(resolvedConfig)
 
     return {
       statusCode: 200,
       body: JSON.stringify({
-        environmentId,
+        environmentId: canonicalEnvironmentId,
         config,
         source: merged.source,
       }),

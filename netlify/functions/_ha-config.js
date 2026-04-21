@@ -178,12 +178,22 @@ const mapEnvironmentConfig = (env = {}) => {
   }
 }
 
+const normalizeLegacyIds = (value) => {
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeText(item)).filter(Boolean)
+  }
+
+  const single = normalizeText(value)
+  return single ? [single] : []
+}
+
 export const mapMetadataEnvironments = (metadata = {}) => {
   const envMap = getStoredEnvironmentMap(metadata)
   return Object.entries(envMap)
     .map(([id, env]) => ({
       id: normalizeText(id),
       name: normalizeText(env?.name) || normalizeText(id),
+      legacyIds: normalizeLegacyIds(env?.legacyIds),
       type: normalizeText(env?.type) || 'home_assistant',
       config: mapEnvironmentConfig(env),
     }))
@@ -196,6 +206,7 @@ export const mapLegacyHaEnvironments = (metadata = {}) => {
     .map(([id, env]) => ({
       id: normalizeText(id),
       name: normalizeText(env?.name) || normalizeText(id),
+      legacyIds: normalizeLegacyIds(env?.legacyIds),
       type: 'home_assistant',
       config: {
         baseUrl: normalizeText(env?.base_url || env?.url),
@@ -220,6 +231,7 @@ export const mergeEnvironments = (...environmentLists) => {
       if (!current) {
         mergedById.set(env.id, {
           ...env,
+          legacyIds: normalizeLegacyIds(env.legacyIds),
           config: {
             baseUrl: normalizeText(env.config?.baseUrl),
             apiKey: normalizeText(env.config?.apiKey),
@@ -245,6 +257,10 @@ export const mergeEnvironments = (...environmentLists) => {
       mergedById.set(env.id, {
         ...current,
         name: current.name || env.name,
+        legacyIds: Array.from(new Set([
+          ...normalizeLegacyIds(current.legacyIds),
+          ...normalizeLegacyIds(env.legacyIds),
+        ])),
         type: current.type || env.type,
         config: nextConfig,
       })
@@ -264,6 +280,8 @@ const findEnvironmentMatch = (environments, environmentId) => {
 
   return environments.find((env) => env.id === rawId)
     || environments.find((env) => env.id.toLowerCase() === lower)
+    || environments.find((env) => env.name && env.name.toLowerCase() === lower)
+    || environments.find((env) => (env.legacyIds || []).some((alias) => alias.toLowerCase() === lower))
 }
 
 export const resolveHaConfig = ({ metadata = {}, environmentId, getOptionalEnv }) => {

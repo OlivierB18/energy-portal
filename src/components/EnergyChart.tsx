@@ -103,14 +103,19 @@ interface EnergyChartProps {
   data: Array<{
     time: string
     power: number | null
+    exportPower?: number | null
   }>
   timeRange: 'today' | 'week' | 'month'
   unit?: string
   seriesLabel?: string
   rangeLabel?: string
   chartType?: 'line' | 'bar'
+  barMode?: 'single' | 'stacked'
   lineType?: 'monotone' | 'linear' | 'step'
   signed?: boolean
+  barColor?: string
+  secondaryBarColor?: string
+  peakValue?: number | null
 }
 
 export default function EnergyChart({
@@ -120,8 +125,12 @@ export default function EnergyChart({
   seriesLabel = 'Power',
   rangeLabel,
   chartType = 'line',
+  barMode = 'single',
   lineType = 'monotone',
   signed = false,
+  barColor = 'rgb(234, 88, 12)',
+  secondaryBarColor = 'rgb(250, 204, 21)',
+  peakValue = null,
 }: EnergyChartProps) {
   const [isMobile, setIsMobile] = useState(() =>
     typeof window !== 'undefined' ? window.innerWidth < 640 : false,
@@ -155,6 +164,11 @@ export default function EnergyChart({
   const displayData = useMemo(
     () => chartType === 'line' ? data : sampleChartData(data, targetPointCount),
     [chartType, data, targetPointCount],
+  )
+
+  const hasSecondaryBarSeries = useMemo(
+    () => chartType === 'bar' && displayData.some((point) => typeof point.exportPower === 'number' && Math.abs(point.exportPower) > 0),
+    [chartType, displayData],
   )
 
   const smoothingWindow = useMemo(() => {
@@ -236,6 +250,8 @@ export default function EnergyChart({
       }
       if (name === 'powerPos') return [`${numericValue.toFixed(decimals)} ${unit}`, 'Verbruik']
       if (name === 'powerNeg') return [`${numericValue.toFixed(decimals)} ${unit}`, 'Teruglevering']
+      if (name === 'power') return [`${numericValue.toFixed(decimals)} ${unit}`, 'Verbruik']
+      if (name === 'exportPower') return [`${numericValue.toFixed(decimals)} ${unit}`, 'Teruglevering']
       return [`${numericValue.toFixed(decimals)} ${unit}`, seriesLabel]
     },
     labelStyle: { color: 'rgb(234, 233, 229)' },
@@ -251,9 +267,13 @@ export default function EnergyChart({
             barCategoryGap={isMobile ? '28%' : '20%'}
           >
             <defs>
-              <linearGradient id="colorGas" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="rgb(234, 88, 12)" stopOpacity={0.8} />
-                <stop offset="95%" stopColor="rgb(234, 88, 12)" stopOpacity={0.3} />
+              <linearGradient id={`colorBar-${seriesLabel.replace(/\s/g, '')}`} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor={barColor} stopOpacity={0.85} />
+                <stop offset="95%" stopColor={barColor} stopOpacity={0.3} />
+              </linearGradient>
+              <linearGradient id={`colorBarSecondary-${seriesLabel.replace(/\s/g, '')}`} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor={secondaryBarColor} stopOpacity={0.85} />
+                <stop offset="95%" stopColor={secondaryBarColor} stopOpacity={0.3} />
               </linearGradient>
             </defs>
             <CartesianGrid strokeDasharray="3 3" stroke="rgba(255, 255, 255, 0.08)" />
@@ -271,14 +291,43 @@ export default function EnergyChart({
               width={isMobile ? 36 : 44}
               label={isMobile ? undefined : { value: unit, angle: -90, position: 'insideLeft' }}
             />
+            {typeof peakValue === 'number' && Number.isFinite(peakValue) && peakValue > 0 && (
+              <ReferenceLine
+                y={peakValue}
+                stroke="rgba(234, 233, 229, 0.45)"
+                strokeDasharray="4 4"
+                ifOverflow="extendDomain"
+              />
+            )}
             <Tooltip {...commonTooltipProps} />
-            <Bar
-              dataKey="power"
-              fill="url(#colorGas)"
-              maxBarSize={isMobile ? 14 : 20}
-              radius={[8, 8, 0, 0]}
-              isAnimationActive={false}
-            />
+            {barMode === 'stacked' || hasSecondaryBarSeries ? (
+              <>
+                <Bar
+                  dataKey="power"
+                  stackId="usage"
+                  fill={`url(#colorBar-${seriesLabel.replace(/\s/g, '')})`}
+                  maxBarSize={isMobile ? 14 : 20}
+                  radius={[0, 0, 0, 0]}
+                  isAnimationActive={false}
+                />
+                <Bar
+                  dataKey="exportPower"
+                  stackId="usage"
+                  fill={`url(#colorBarSecondary-${seriesLabel.replace(/\s/g, '')})`}
+                  maxBarSize={isMobile ? 14 : 20}
+                  radius={[8, 8, 0, 0]}
+                  isAnimationActive={false}
+                />
+              </>
+            ) : (
+              <Bar
+                dataKey="power"
+                fill={`url(#colorBar-${seriesLabel.replace(/\s/g, '')})`}
+                maxBarSize={isMobile ? 14 : 20}
+                radius={[8, 8, 0, 0]}
+                isAnimationActive={false}
+              />
+            )}
           </BarChart>
         ) : (
           <LineChart data={signedDisplayData} margin={{ top: 8, right: isMobile ? 2 : 14, left: isMobile ? -8 : 4, bottom: 56 }}>

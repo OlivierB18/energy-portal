@@ -1,7 +1,21 @@
-import { useEffect, useState } from 'react'
+﻿import { useCallback, useEffect, useRef, useState } from 'react'
 import { useAuth0 } from '@auth0/auth0-react'
-import { Users as UsersIcon, ShieldAlert, Settings, Home, Zap, LogOut, ChevronDown, Lock } from 'lucide-react'
-import UserSensorConfig from '../components/UserSensorConfig'
+import {
+  Users as UsersIcon,
+  ShieldAlert,
+  Settings,
+  Home,
+  Zap,
+  LogOut,
+  ChevronDown,
+  X,
+  Plus,
+  Copy,
+  Check,
+  UserPlus,
+  Shield,
+  Eye,
+} from 'lucide-react'
 
 interface UsersProps {
   isAdmin: boolean
@@ -10,196 +24,295 @@ interface UsersProps {
   onLogout: () => void
 }
 
+interface UserEnvironment {
+  id: string
+  name: string
+  role: string
+}
+
 interface UserRow {
   user_id: string
-  email?: string
-  name?: string
-  last_login?: string
-  created_at?: string
-  environmentIds?: string[]
+  email: string
+  role: 'admin' | 'viewer'
+  environments: UserEnvironment[]
 }
 
 interface EnvironmentOption {
   id: string
   label: string
-  type?: string
 }
 
+// ---- Skeleton ---------------------------------------------------------------
+function SkeletonRow() {
+  return (
+    <div className="border border-dark-2 border-opacity-10 rounded-xl p-4 animate-pulse">
+      <div className="flex items-center gap-4">
+        <div className="w-8 h-8 bg-dark-2 bg-opacity-20 rounded-full" />
+        <div className="flex-1 space-y-2">
+          <div className="h-4 bg-dark-2 bg-opacity-20 rounded w-48" />
+          <div className="h-3 bg-dark-2 bg-opacity-10 rounded w-32" />
+        </div>
+        <div className="h-6 w-16 bg-dark-2 bg-opacity-20 rounded-full" />
+      </div>
+    </div>
+  )
+}
+
+// ---- Role badge -------------------------------------------------------------
+function RoleBadge({ role, isSuperAdmin }: { role: string; isSuperAdmin?: boolean }) {
+  if (isSuperAdmin) {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-yellow-500 bg-opacity-20 text-yellow-300">
+        <Shield className="w-3 h-3" /> SUPER ADMIN
+      </span>
+    )
+  }
+  if (role === 'admin') {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-brand-2 bg-opacity-20 text-brand-2">
+        <Shield className="w-3 h-3" /> ADMIN
+      </span>
+    )
+  }
+  return (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-dark-2 bg-opacity-20 text-dark-2">
+      <Eye className="w-3 h-3" /> VIEWER
+    </span>
+  )
+}
+
+// ---- Toast ------------------------------------------------------------------
+function Toast({ message, type }: { message: string; type: 'error' | 'success' }) {
+  return (
+    <div
+      className={`fixed bottom-6 right-6 z-50 px-4 py-3 rounded-xl shadow-xl text-sm font-medium transition-all ${
+        type === 'error'
+          ? 'bg-red-900 bg-opacity-90 text-red-200 border border-red-700'
+          : 'bg-green-900 bg-opacity-90 text-green-200 border border-green-700'
+      }`}
+    >
+      {message}
+    </div>
+  )
+}
+
+// =============================================================================
 export default function Users({ isAdmin, onOpenOverview, onOpenDashboard, onLogout }: UsersProps) {
-  const { getAccessTokenSilently, getIdTokenClaims } = useAuth0()
-  const [users, setUsers] = useState<UserRow[]>([])
-  const [isLoading, setIsLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [inviteEmail, setInviteEmail] = useState('')
-  const [inviteName, setInviteName] = useState('')
-  const [inviteEnvironments, setInviteEnvironments] = useState<string[]>([])
-  const [inviteLink, setInviteLink] = useState<string | null>(null)
-  const [isInviting, setIsInviting] = useState(false)
-  const [resettingUserId, setResettingUserId] = useState<string | null>(null)
-  const [environmentOptions, setEnvironmentOptions] = useState<EnvironmentOption[]>([])
-  const [envError, setEnvError] = useState<string | null>(null)
-  const [showSettingsDropdown, setShowSettingsDropdown] = useState(false)
-  const [selectedUserForSensorConfig, setSelectedUserForSensorConfig] = useState<{ userId: string; email: string; environmentId: string; environmentName: string } | null>(null)
-  const [expandedUserId, setExpandedUserId] = useState<string | null>(null)
+  const { user, getAccessTokenSilently } = useAuth0()
 
   const ownerEmail = ((import.meta.env.VITE_OWNER_EMAIL as string | undefined) ?? '').trim().toLowerCase()
-  const adminEmailAllowlist = ((import.meta.env.VITE_ADMIN_EMAILS as string | undefined) ?? '')
-    .split(',')
-    .map((email) => email.trim().toLowerCase())
-    .filter(Boolean)
+  const userEmail = (user?.email ?? '').trim().toLowerCase()
+  const isSuperAdmin =
+    (user as any)?.['https://brouwer-ems/app_metadata']?.role === 'super_admin' ||
+    (ownerEmail.length > 0 && userEmail === ownerEmail)
 
+  const [users, setUsers] = useState<UserRow[]>([])
+  const [environments, setEnvironments] = useState<EnvironmentOption[]>([])
+  const [isLoading, setIsLoading] = useState(true)
+  const [toast, setToast] = useState<{ message: string; type: 'error' | 'success' } | null>(null)
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Invite modal
+  const [showInviteModal, setShowInviteModal] = useState(false)
+  const [inviteEmail, setInviteEmail] = useState('')
+  const [inviteRole, setInviteRole] = useState<'admin' | 'viewer'>('viewer')
+  const [inviteEnvId, setInviteEnvId] = useState('')
+  const [isInviting, setIsInviting] = useState(false)
+  const [inviteLink, setInviteLink] = useState<string | null>(null)
+  const [inviteCopied, setInviteCopied] = useState(false)
+
+  // Per-user state
+  const [expandedUserId, setExpandedUserId] = useState<string | null>(null)
+  const [addEnvDropdownUserId, setAddEnvDropdownUserId] = useState<string | null>(null)
+  const [pendingActionUserId, setPendingActionUserId] = useState<string | null>(null)
+
+  // Nav dropdown
+  const [showSettingsDropdown, setShowSettingsDropdown] = useState(false)
+
+  const showToast = useCallback((message: string, type: 'error' | 'success') => {
+    setToast({ message, type })
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
+    toastTimerRef.current = setTimeout(() => setToast(null), 4000)
+  }, [])
+
+  const getAuthToken = useCallback(async () => {
+    const audience = import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined
+    return getAccessTokenSilently({ authorizationParams: { audience } })
+  }, [getAccessTokenSilently])
+
+  // Load environments
   useEffect(() => {
-    const loadUsers = async () => {
-      if (!isAdmin) {
-        setIsLoading(false)
-        return
-      }
-
-      try {
-        const token = await getAuthToken()
-        const response = await fetch('/.netlify/functions/list-users', {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        })
-
-        if (!response.ok) {
-          const data = await response.json().catch(() => null)
-          throw new Error(data?.error || `Unable to load users (${response.status})`)
-        }
-
-        const data = await response.json()
-        setUsers(data.users ?? [])
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Unable to load users')
-      } finally {
-        setIsLoading(false)
-      }
-    }
-
-    void loadUsers()
-  }, [getAccessTokenSilently, getIdTokenClaims, isAdmin])
-
-  useEffect(() => {
-    const loadEnvironments = async () => {
-      if (!isAdmin) {
-        return
-      }
-
+    if (!isAdmin) return
+    void (async () => {
       try {
         const token = await getAuthToken()
         const response = await fetch('/.netlify/functions/get-ha-environments', {
           headers: { Authorization: `Bearer ${token}` },
         })
-
-        if (!response.ok) {
-          throw new Error('Unable to load environments')
-        }
-
+        if (!response.ok) return
         const data = await response.json()
         const loaded = Array.isArray(data?.environments) ? data.environments : []
-        const options = loaded.map((env: { id: string; name?: string; type?: string }) => ({
-          id: String(env.id),
-          label: String(env.name || env.id),
-          type: env.type,
-        }))
-        setEnvironmentOptions(options)
-      } catch (err) {
-        setEnvError(err instanceof Error ? err.message : 'Unable to load environments')
+        setEnvironments(
+          loaded.map((env: { id: string; name?: string }) => ({
+            id: String(env.id),
+            label: String(env.name || env.id),
+          })),
+        )
+      } catch {
+        // Non-blocking
       }
-    }
+    })()
+  }, [isAdmin, getAuthToken])
 
-    void loadEnvironments()
-  }, [isAdmin])
+  // Load users
+  const loadUsers = useCallback(async () => {
+    if (!isAdmin) {
+      setIsLoading(false)
+      return
+    }
+    setIsLoading(true)
+    try {
+      const token = await getAuthToken()
+      const response = await fetch('/.netlify/functions/get-users', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!response.ok) {
+        const data = await response.json().catch(() => null)
+        throw new Error(data?.error || `Unable to load users (${response.status})`)
+      }
+      const data = await response.json()
+      setUsers(data.users ?? [])
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Unable to load users', 'error')
+    } finally {
+      setIsLoading(false)
+    }
+  }, [isAdmin, getAuthToken, showToast])
 
   useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      const target = event.target as HTMLElement
-      if (showSettingsDropdown && !target.closest('.users-settings-dropdown')) {
-        setShowSettingsDropdown(false)
-      }
+    void loadUsers()
+  }, [loadUsers])
+
+  // Close dropdowns on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      const t = e.target as HTMLElement
+      if (!t.closest('.users-settings-dropdown')) setShowSettingsDropdown(false)
+      if (!t.closest('.add-env-dropdown')) setAddEnvDropdownUserId(null)
     }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
 
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [showSettingsDropdown])
+  const handleRemoveEnvironment = async (targetUser: UserRow, envId: string) => {
+    setPendingActionUserId(targetUser.user_id)
+    try {
+      const token = await getAuthToken()
+      const response = await fetch('/.netlify/functions/update-user-environment', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user_id: targetUser.user_id,
+          user_email: targetUser.email,
+          environment_id: envId,
+          action: 'remove',
+        }),
+      })
+      if (!response.ok) {
+        const data = await response.json().catch(() => null)
+        throw new Error(data?.error || 'Failed to remove environment')
+      }
+      setUsers((prev) =>
+        prev.map((u) =>
+          u.user_id === targetUser.user_id
+            ? { ...u, environments: u.environments.filter((e) => e.id !== envId) }
+            : u,
+        ),
+      )
+      showToast('Omgeving verwijderd', 'success')
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to remove environment', 'error')
+    } finally {
+      setPendingActionUserId(null)
+    }
+  }
 
-  const getAuthToken = async () => {
-    const audience = import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined
-    return getAccessTokenSilently({
-      authorizationParams: { audience },
-    })
+  const handleAddEnvironment = async (targetUser: UserRow, envId: string) => {
+    setAddEnvDropdownUserId(null)
+    setPendingActionUserId(targetUser.user_id)
+    try {
+      const token = await getAuthToken()
+      const response = await fetch('/.netlify/functions/update-user-environment', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user_id: targetUser.user_id,
+          user_email: targetUser.email,
+          environment_id: envId,
+          action: 'add',
+          role: 'viewer',
+        }),
+      })
+      if (!response.ok) {
+        const data = await response.json().catch(() => null)
+        throw new Error(data?.error || 'Failed to add environment')
+      }
+      const envLabel = environments.find((e) => e.id === envId)?.label ?? envId
+      setUsers((prev) =>
+        prev.map((u) =>
+          u.user_id === targetUser.user_id
+            ? {
+                ...u,
+                environments: [...u.environments, { id: envId, name: envLabel, role: 'viewer' }],
+              }
+            : u,
+        ),
+      )
+      showToast('Omgeving toegevoegd', 'success')
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to add environment', 'error')
+    } finally {
+      setPendingActionUserId(null)
+    }
   }
 
   const handleInvite = async () => {
-    if (!inviteEmail) {
-      setError('Email is required to invite a user')
+    if (!inviteEmail || !inviteEnvId) {
+      showToast('Vul email en omgeving in', 'error')
       return
     }
-
-    setError(null)
-    setInviteLink(null)
     setIsInviting(true)
-
+    setInviteLink(null)
     try {
       const token = await getAuthToken()
-      const response = await fetch('/.netlify/functions/create-user', {
+      const response = await fetch('/.netlify/functions/invite-user', {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          email: inviteEmail,
-          name: inviteName,
-          environmentIds: inviteEnvironments,
-        }),
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: inviteEmail, role: inviteRole, environment_id: inviteEnvId }),
       })
-
-      if (!response.ok) {
-        const data = await response.json().catch(() => null)
-        throw new Error(data?.error || 'Unable to create user')
-      }
-
       const data = await response.json()
-      setInviteLink(data.inviteLink ?? null)
-      setInviteEmail('')
-      setInviteName('')
-      setInviteEnvironments([])
-      setUsers((prev) => [data.user, ...prev])
+      if (!response.ok) throw new Error(data?.error || 'Failed to send invite')
+      setInviteLink(data.invite_url)
+      showToast(`Uitnodiging aangemaakt voor ${inviteEmail}`, 'success')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to create user')
+      showToast(err instanceof Error ? err.message : 'Failed to send invite', 'error')
     } finally {
       setIsInviting(false)
     }
   }
 
-  const sendPasswordReset = async (email: string) => {
-    setError(null)
-    setResettingUserId(email)
-
+  const copyInviteLink = async () => {
+    if (!inviteLink) return
     try {
-      const token = await getAuthToken()
-      const response = await fetch('/.netlify/functions/send-password-reset', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ email }),
-      })
-
-      if (!response.ok) {
-        const data = await response.json().catch(() => null)
-        throw new Error(data?.error || 'Unable to send reset email')
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to send reset email')
-    } finally {
-      setResettingUserId(null)
+      await navigator.clipboard.writeText(inviteLink)
+      setInviteCopied(true)
+      setTimeout(() => setInviteCopied(false), 2000)
+    } catch {
+      showToast('KopiÃ«ren mislukt', 'error')
     }
   }
 
+  // ---------- Permission guard ----------
   if (!isAdmin) {
     return (
       <div className="app-shell min-h-screen p-4 md:p-8">
@@ -207,295 +320,273 @@ export default function Users({ isAdmin, onOpenOverview, onOpenDashboard, onLogo
           <div className="glass-panel rounded-2xl p-8 text-center">
             <ShieldAlert className="w-10 h-10 text-yellow-300 mx-auto mb-4" />
             <h1 className="text-2xl font-heavy text-light-2 mb-2">Admin access required</h1>
-            <p className="text-light-1">You don’t have permission to view users.</p>
+            <p className="text-light-1">You don't have permission to view users.</p>
           </div>
         </div>
       </div>
     )
   }
 
+  // ---------- Main render ----------
   return (
     <div className="app-shell min-h-screen p-4 md:p-8">
       <div className="max-w-5xl mx-auto">
+
+        {/* Header */}
         <div className="flex items-start justify-between gap-4 mb-6">
           <div className="flex items-center gap-3">
             <UsersIcon className="w-8 h-8 text-brand-2" />
             <div>
               <h1 className="text-3xl md:text-4xl font-heavy text-light-2">Users</h1>
-              <p className="text-light-1">Manage and review portal accounts</p>
+              <p className="text-light-1">Beheer portal toegang en uitnodigingen</p>
             </div>
           </div>
 
-          <div className="relative users-settings-dropdown shrink-0">
+          <div className="flex items-center gap-2">
             <button
-              onClick={() => setShowSettingsDropdown((prev) => !prev)}
-              className="p-2 bg-light-2 bg-opacity-20 text-light-2 border border-light-2 border-opacity-30 rounded-lg hover:bg-opacity-30 transition-all backdrop-blur-sm"
-              aria-label="Open settings"
+              onClick={() => {
+                setShowInviteModal(true)
+                setInviteLink(null)
+                setInviteEmail('')
+                setInviteRole('viewer')
+                setInviteEnvId(environments[0]?.id ?? '')
+              }}
+              className="flex items-center gap-2 px-4 py-2 bg-brand-2 text-light-2 rounded-lg font-medium hover:bg-brand-3 transition-all text-sm"
             >
-              <Settings className="w-5 h-5" />
+              <UserPlus className="w-4 h-4" />
+              + Gebruiker uitnodigen
             </button>
 
-            {showSettingsDropdown && (
-              <div className="absolute right-0 mt-2 w-56 bg-dark-1 border border-light-2 border-opacity-30 rounded-lg shadow-xl z-50">
-                <div className="py-1">
-                  <button
-                    onClick={() => {
-                      onOpenOverview()
-                      setShowSettingsDropdown(false)
-                    }}
-                    className="w-full flex items-center gap-3 px-4 py-3 text-light-2 hover:bg-light-2 hover:bg-opacity-10 transition-all text-left"
-                  >
-                    <Home className="w-5 h-5" />
-                    <span className="font-medium">Overview</span>
-                  </button>
+            <div className="relative users-settings-dropdown">
+              <button
+                onClick={() => setShowSettingsDropdown((prev) => !prev)}
+                className="p-2 bg-light-2 bg-opacity-20 text-light-2 border border-light-2 border-opacity-30 rounded-lg hover:bg-opacity-30 transition-all backdrop-blur-sm"
+                aria-label="Open settings"
+              >
+                <Settings className="w-5 h-5" />
+              </button>
+              {showSettingsDropdown && (
+                <div className="absolute right-0 mt-2 w-56 bg-dark-1 border border-light-2 border-opacity-30 rounded-lg shadow-xl z-50">
+                  <div className="py-1">
+                    <button
+                      onClick={() => { onOpenOverview(); setShowSettingsDropdown(false) }}
+                      className="w-full flex items-center gap-3 px-4 py-3 text-light-2 hover:bg-light-2 hover:bg-opacity-10 transition-all text-left"
+                    >
+                      <Home className="w-5 h-5" /> <span className="font-medium">Overview</span>
+                    </button>
+                    <button
+                      onClick={() => { onOpenDashboard(); setShowSettingsDropdown(false) }}
+                      className="w-full flex items-center gap-3 px-4 py-3 text-light-2 hover:bg-light-2 hover:bg-opacity-10 transition-all text-left"
+                    >
+                      <Zap className="w-5 h-5" /> <span className="font-medium">Open Dashboard</span>
+                    </button>
+                    <button
+                      onClick={() => { onLogout(); setShowSettingsDropdown(false) }}
+                      className="w-full flex items-center gap-3 px-4 py-3 text-red-200 hover:bg-red-500 hover:bg-opacity-20 transition-all text-left border-t border-light-2 border-opacity-10"
+                    >
+                      <LogOut className="w-5 h-5" /> <span className="font-medium">Logout</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
 
-                  <button
-                    onClick={() => {
-                      onOpenDashboard()
-                      setShowSettingsDropdown(false)
-                    }}
-                    className="w-full flex items-center gap-3 px-4 py-3 text-light-2 hover:bg-light-2 hover:bg-opacity-10 transition-all text-left"
-                  >
-                    <Zap className="w-5 h-5" />
-                    <span className="font-medium">Open Dashboard</span>
-                  </button>
+        {/* User list */}
+        <div className="glass-panel rounded-2xl p-6 shadow-xl space-y-3">
+          {isLoading && (
+            <>
+              <SkeletonRow />
+              <SkeletonRow />
+              <SkeletonRow />
+            </>
+          )}
 
+          {!isLoading && users.length === 0 && (
+            <p className="text-dark-2 text-center py-8">
+              Nog geen gebruikers. Stuur een uitnodiging om te beginnen.
+            </p>
+          )}
+
+          {!isLoading && users.map((u) => {
+            const isExpanded = expandedUserId === u.user_id
+            const isUserSuperAdmin = ownerEmail.length > 0 && u.email.toLowerCase() === ownerEmail
+            const isPending = pendingActionUserId === u.user_id
+            const userEnvIds = new Set(u.environments.map((e) => e.id))
+            const availableToAdd = environments.filter((e) => !userEnvIds.has(e.id))
+
+            return (
+              <div key={u.user_id} className="border border-dark-2 border-opacity-10 rounded-xl overflow-visible">
+                {/* Row header */}
+                <div
+                  className="bg-dark-2 bg-opacity-5 p-4 flex items-center gap-3 hover:bg-opacity-10 transition-colors cursor-pointer"
+                  onClick={() => setExpandedUserId(isExpanded ? null : u.user_id)}
+                >
+                  <ChevronDown
+                    className={`w-4 h-4 text-dark-2 shrink-0 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
+                  />
+                  <div className="flex-1 min-w-0">
+                    <p className="font-semibold text-dark-1 truncate">{u.email}</p>
+                  </div>
+                  <RoleBadge role={u.role} isSuperAdmin={isUserSuperAdmin} />
+                </div>
+
+                {/* Expanded details */}
+                {isExpanded && (
+                  <div className="p-4 border-t border-dark-2 border-opacity-10">
+                    <p className="text-xs font-semibold text-dark-2 uppercase tracking-wide mb-3">Omgevingen</p>
+
+                    <div className="flex flex-wrap gap-2 mb-4">
+                      {u.environments.length === 0 && (
+                        <span className="text-xs text-dark-2 italic">Geen omgevingen</span>
+                      )}
+                      {u.environments.map((env) => (
+                        <span
+                          key={env.id}
+                          className="inline-flex items-center gap-1.5 px-3 py-1 bg-brand-2 bg-opacity-15 text-brand-2 rounded-full text-sm font-medium"
+                        >
+                          {env.name}
+                          {!isUserSuperAdmin && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); void handleRemoveEnvironment(u, env.id) }}
+                              disabled={isPending}
+                              className="hover:text-red-300 transition-colors disabled:opacity-40"
+                              aria-label={`Verwijder toegang tot ${env.name}`}
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          )}
+                        </span>
+                      ))}
+
+                      {/* + Omgeving dropdown */}
+                      {!isUserSuperAdmin && availableToAdd.length > 0 && (
+                        <div className="relative add-env-dropdown">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setAddEnvDropdownUserId(addEnvDropdownUserId === u.user_id ? null : u.user_id)
+                            }}
+                            disabled={isPending}
+                            className="inline-flex items-center gap-1 px-3 py-1 border border-dark-2 border-opacity-30 text-dark-2 rounded-full text-sm hover:border-brand-2 hover:text-brand-2 transition-colors disabled:opacity-40"
+                          >
+                            <Plus className="w-3 h-3" /> Omgeving
+                          </button>
+
+                          {addEnvDropdownUserId === u.user_id && (
+                            <div className="absolute left-0 top-full mt-1 z-50 bg-dark-1 border border-light-2 border-opacity-20 rounded-xl shadow-xl min-w-[180px] py-1">
+                              {availableToAdd.map((env) => (
+                                <button
+                                  key={env.id}
+                                  onClick={(e) => { e.stopPropagation(); void handleAddEnvironment(u, env.id) }}
+                                  className="w-full text-left px-4 py-2 text-sm text-light-2 hover:bg-light-2 hover:bg-opacity-10 transition-colors"
+                                >
+                                  {env.label}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* Invite modal */}
+      {showInviteModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black bg-opacity-60 backdrop-blur-sm">
+          <div className="bg-dark-1 border border-light-2 border-opacity-20 rounded-2xl shadow-2xl w-full max-w-md p-6">
+            <div className="flex items-center justify-between mb-5">
+              <h2 className="text-xl font-heavy text-light-2">Gebruiker uitnodigen</h2>
+              <button
+                onClick={() => setShowInviteModal(false)}
+                className="p-1 text-light-2 hover:text-white transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-light-1 mb-1">Email</label>
+                <input
+                  type="email"
+                  value={inviteEmail}
+                  onChange={(e) => setInviteEmail(e.target.value)}
+                  placeholder="gebruiker@voorbeeld.nl"
+                  className="w-full px-3 py-2 rounded-lg bg-dark-2 bg-opacity-30 border border-light-2 border-opacity-20 text-light-2 placeholder-light-1 focus:outline-none focus:ring-2 focus:ring-brand-2"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-light-1 mb-1">Rol</label>
+                <select
+                  value={inviteRole}
+                  onChange={(e) => setInviteRole(e.target.value as 'admin' | 'viewer')}
+                  className="w-full px-3 py-2 rounded-lg bg-dark-2 bg-opacity-30 border border-light-2 border-opacity-20 text-light-2 focus:outline-none focus:ring-2 focus:ring-brand-2"
+                >
+                  <option value="viewer">Viewer</option>
+                  {isSuperAdmin && <option value="admin">Admin</option>}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-light-1 mb-1">Omgeving</label>
+                <select
+                  value={inviteEnvId}
+                  onChange={(e) => setInviteEnvId(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg bg-dark-2 bg-opacity-30 border border-light-2 border-opacity-20 text-light-2 focus:outline-none focus:ring-2 focus:ring-brand-2"
+                >
+                  <option value="">â€” Kies omgeving â€”</option>
+                  {environments.map((env) => (
+                    <option key={env.id} value={env.id}>{env.label}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {inviteLink && (
+              <div className="mt-4 p-3 bg-green-900 bg-opacity-30 border border-green-700 border-opacity-40 rounded-xl">
+                <p className="text-xs text-green-300 font-medium mb-2">Uitnodigingslink:</p>
+                <div className="flex items-center gap-2">
+                  <p className="text-xs text-green-200 truncate flex-1 font-mono">{inviteLink}</p>
                   <button
-                    onClick={() => {
-                      onLogout()
-                      setShowSettingsDropdown(false)
-                    }}
-                    className="w-full flex items-center gap-3 px-4 py-3 text-red-200 hover:bg-red-500 hover:bg-opacity-20 transition-all text-left border-t border-light-2 border-opacity-10"
+                    onClick={copyInviteLink}
+                    className="shrink-0 p-1.5 rounded-lg bg-green-700 bg-opacity-40 text-green-200 hover:bg-opacity-60 transition-colors"
                   >
-                    <LogOut className="w-5 h-5" />
-                    <span className="font-medium">Logout</span>
+                    {inviteCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
                   </button>
                 </div>
               </div>
             )}
-          </div>
-        </div>
 
-        <div className="glass-panel rounded-2xl p-6 shadow-xl mb-6">
-          <h2 className="text-xl font-heavy text-dark-1 mb-4">Invite user</h2>
-          {envError && <p className="text-red-600 mb-4">{envError}</p>}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <input
-              value={inviteName}
-              onChange={(event) => setInviteName(event.target.value)}
-              placeholder="Name (optional)"
-              className="w-full rounded-lg border border-dark-2 border-opacity-20 px-3 py-2"
-            />
-            <input
-              value={inviteEmail}
-              onChange={(event) => setInviteEmail(event.target.value)}
-              placeholder="Email"
-              type="email"
-              className="w-full rounded-lg border border-dark-2 border-opacity-20 px-3 py-2"
-            />
-            <div className="flex flex-wrap gap-2">
-              {environmentOptions.map((env) => (
-                <label key={env.id} className="flex items-center gap-2 text-sm text-dark-2">
-                  <input
-                    type="checkbox"
-                    checked={inviteEnvironments.includes(env.id)}
-                    onChange={(event) => {
-                      setInviteEnvironments((prev) =>
-                        event.target.checked
-                          ? [...prev, env.id]
-                          : prev.filter((id) => id !== env.id),
-                      )
-                    }}
-                  />
-                  {env.label}
-                </label>
-              ))}
-              {environmentOptions.length === 0 && (
-                <span className="text-xs text-dark-2">No environments available</span>
-              )}
+            <div className="mt-5 flex items-center gap-3">
+              <button
+                onClick={handleInvite}
+                disabled={isInviting}
+                className="flex-1 px-4 py-2 rounded-lg bg-brand-2 text-light-2 font-medium hover:bg-brand-3 transition-all disabled:opacity-60"
+              >
+                {isInviting ? 'Uitnodiging versturen...' : 'Uitnodiging versturen'}
+              </button>
+              <button
+                onClick={() => setShowInviteModal(false)}
+                className="px-4 py-2 rounded-lg bg-dark-2 bg-opacity-20 text-dark-2 font-medium hover:bg-opacity-30 transition-all"
+              >
+                Sluiten
+              </button>
             </div>
           </div>
-          <div className="mt-4 flex items-center gap-3">
-            <button
-              onClick={handleInvite}
-              disabled={isInviting}
-              className="px-4 py-2 rounded-lg bg-brand-2 text-light-2 font-medium hover:bg-brand-3 transition-all disabled:opacity-60"
-            >
-              {isInviting ? 'Creating...' : 'Create user'}
-            </button>
-            {inviteLink && (
-              <div className="text-sm text-dark-2">
-                Invite link: <a href={inviteLink} className="text-brand-2 underline" target="_blank">Open</a>
-              </div>
-            )}
-          </div>
         </div>
-
-        <div className="glass-panel rounded-2xl p-6 shadow-xl">
-          {isLoading && <p className="text-dark-2">Loading users...</p>}
-          {error && <p className="text-red-600">{error}</p>}
-          {!isLoading && !error && users.length === 0 && (
-            <p className="text-dark-2">No users found.</p>
-          )}
-
-          {!isLoading && !error && users.length > 0 && (
-            <div className="space-y-2">
-              {users.map((user) => {
-                const isAdminUser = !!user.email && (adminEmailAllowlist.includes(user.email.toLowerCase()) || (ownerEmail.length > 0 && user.email.toLowerCase() === ownerEmail))
-                const isExpanded = expandedUserId === user.user_id
-
-                return (
-                  <div key={user.user_id} className="border border-dark-2 border-opacity-10 rounded-xl overflow-hidden">
-                    {/* User Header Row */}
-                    <div className="bg-dark-2 bg-opacity-5 p-4 flex items-center justify-between hover:bg-opacity-10 transition-colors">
-                      <div className="flex items-center gap-4 flex-1">
-                        <button
-                          onClick={() => setExpandedUserId(isExpanded ? null : user.user_id)}
-                          className="p-1 hover:bg-dark-2 hover:bg-opacity-20 rounded transition-colors"
-                        >
-                          <ChevronDown
-                            className={`w-5 h-5 text-dark-2 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
-                          />
-                        </button>
-                        <div className="flex-1">
-                          <h3 className="font-semibold text-dark-1">{user.name ?? user.email ?? '—'}</h3>
-                          <p className="text-sm text-dark-2">{user.email ?? '—'}</p>
-                        </div>
-                        {isAdminUser && (
-                          <div className="flex items-center gap-1 px-2 py-1 bg-brand-2 bg-opacity-20 rounded-lg">
-                            <Lock className="w-3 h-3 text-brand-2" />
-                            <span className="text-xs font-medium text-brand-2">Admin</span>
-                          </div>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2 text-xs text-dark-2">
-                        <div className="text-right">
-                          <div className="font-medium">Last login</div>
-                          <div>{user.last_login ? new Date(user.last_login).toLocaleDateString() : '—'}</div>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Expanded Content */}
-                    {isExpanded && (
-                      <div className="p-4 bg-dark-2 bg-opacity-2 border-t border-dark-2 border-opacity-10 space-y-4">
-                        {/* Environments & Sensors Section */}
-                        <div>
-                          <h4 className="text-sm font-semibold text-dark-1 mb-3">Environments & Sensors</h4>
-                          <div className="space-y-2">
-                            {environmentOptions.length === 0 ? (
-                              <p className="text-xs text-dark-2">No environments available</p>
-                            ) : (
-                              environmentOptions.map((env) => {
-                                const hasAccess = user.environmentIds?.includes(env.id) ?? false
-                                return (
-                                  <div key={env.id} className="flex items-center justify-between p-3 bg-dark-2 bg-opacity-5 rounded-lg border border-dark-2 border-opacity-10">
-                                    <div className="flex items-center gap-3 flex-1">
-                                      <label className="flex items-center gap-2 cursor-pointer">
-                                        <input
-                                          type="checkbox"
-                                          checked={hasAccess}
-                                          disabled={isAdminUser}
-                                          onChange={(event) => {
-                                            if (isAdminUser) return
-                                            const next = event.target.checked
-                                              ? [...(user.environmentIds ?? []), env.id]
-                                              : (user.environmentIds ?? []).filter((id) => id !== env.id)
-                                            setUsers((prev) =>
-                                              prev.map((u) =>
-                                                u.user_id === user.user_id
-                                                  ? { ...u, environmentIds: next }
-                                                  : u,
-                                              ),
-                                            )
-                                          }}
-                                          className="rounded"
-                                        />
-                                        <span className="text-sm font-medium text-dark-1">{env.label}</span>
-                                      </label>
-                                    </div>
-                                    {!isAdminUser && hasAccess && user.email && (
-                                      <button
-                                        onClick={() => {
-                                          if (user.email) {
-                                            setSelectedUserForSensorConfig({
-                                              userId: user.user_id,
-                                              email: user.email,
-                                              environmentId: env.id,
-                                              environmentName: env.label,
-                                            })
-                                          }
-                                        }}
-                                        className="px-3 py-1 text-xs font-medium rounded-lg bg-green-600 bg-opacity-30 text-green-200 hover:bg-opacity-50 transition-all"
-                                      >
-                                        Configure Sensors
-                                      </button>
-                                    )}
-                                  </div>
-                                )
-                              })
-                            )}
-                          </div>
-                        </div>
-
-                        {/* Actions */}
-                        <div className="border-t border-dark-2 border-opacity-10 pt-3">
-                          <p className="text-xs font-semibold text-dark-2 mb-2">Account Actions</p>
-                          {user.email && (
-                            <button
-                              onClick={() => sendPasswordReset(user.email ?? '')}
-                              disabled={resettingUserId === user.email}
-                              className="w-full px-3 py-2 rounded-lg bg-dark-2 bg-opacity-10 text-dark-2 text-sm font-medium hover:bg-opacity-20 transition-all disabled:opacity-60"
-                            >
-                              {resettingUserId === user.email ? 'Sending Password Reset...' : 'Send Password Reset Email'}
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )
-              })}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {selectedUserForSensorConfig && (
-        <UserSensorConfig
-          userId={selectedUserForSensorConfig.userId}
-          userEmail={selectedUserForSensorConfig.email}
-          environmentId={selectedUserForSensorConfig.environmentId}
-          environmentName={selectedUserForSensorConfig.environmentName}
-          onClose={() => setSelectedUserForSensorConfig(null)}
-          onSaved={() => {
-            setSelectedUserForSensorConfig(null)
-            // Reload users to show updated state
-            const loadUsers = async () => {
-              try {
-                const token = await getAuthToken()
-                const response = await fetch('/.netlify/functions/list-users', {
-                  headers: {
-                    Authorization: `Bearer ${token}`,
-                  },
-                })
-
-                if (!response.ok) {
-                  const data = await response.json().catch(() => null)
-                  throw new Error(data?.error || `Unable to load users (${response.status})`)
-                }
-
-                const data = await response.json()
-                setUsers(data.users ?? [])
-              } catch (err) {
-                setError(err instanceof Error ? err.message : 'Unable to load users')
-              }
-            }
-
-            void loadUsers()
-          }}
-        />
       )}
+
+      {/* Toast */}
+      {toast && <Toast message={toast.message} type={toast.type} />}
     </div>
   )
 }

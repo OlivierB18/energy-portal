@@ -4,12 +4,11 @@ interface EnergyCardProps {
   title: string
   value: string | number
   unit: string
-  cost: number | null
   icon: 'zap' | 'calendar' | 'activity' | 'flame'
   status?: 'connecting' | 'connected' | 'error'
 }
 
-export default function EnergyCard({ title, value, unit, cost, icon, status }: EnergyCardProps) {
+export default function EnergyCard({ title, value, unit, icon, status }: EnergyCardProps) {
   const getIcon = () => {
     switch (icon) {
       case 'zap':
@@ -44,11 +43,6 @@ export default function EnergyCard({ title, value, unit, cost, icon, status }: E
         </div>
         <div className="bg-gradient-to-br from-brand-2 to-brand-3 p-3 rounded-xl">{getIcon()}</div>
       </div>
-      {cost !== null && (
-        <div className="pt-4 border-t border-dark-2 border-opacity-10">
-          <p className="text-xl font-heavy text-light-2">EUR {cost.toFixed(2)}</p>
-        </div>
-      )}
     </div>
   )
 }

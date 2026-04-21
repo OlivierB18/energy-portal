@@ -1,6 +1,7 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { stripShardedEnvironmentMetadata } from './_environment-storage.js'
 import { getMergedPricingMap, saveBlobPricingMap } from './_pricing-storage.js'
+import { resolveEnvironmentReference } from './_environment-storage.js'
 
 const getEnv = (key) => {
   const value = process.env[key]
@@ -8,6 +9,11 @@ const getEnv = (key) => {
     throw new Error(`Missing ${key}`)
   }
   return value
+}
+
+const getOptionalEnv = (key) => {
+  const value = process.env[key]
+  return value && value.trim().length > 0 ? value : null
 }
 
 const managementTokenCache = { token: null, expiresAt: 0 }
@@ -194,10 +200,10 @@ export const handler = async (event) => {
     await verifyAuth(event)
 
     const body = JSON.parse(event.body || '{}')
-    const environmentId = String(body.environmentId || '').trim()
+    const requestedEnvironmentId = String(body.environmentId || '').trim()
     const config = normalizePricingConfig(body.config)
 
-    if (!environmentId) {
+    if (!requestedEnvironmentId) {
       return { statusCode: 400, body: JSON.stringify({ error: 'Missing environmentId' }) }
     }
 
@@ -205,13 +211,35 @@ export const handler = async (event) => {
       return { statusCode: 400, body: JSON.stringify({ error: 'Missing or invalid pricing config' }) }
     }
 
+    const domain = getEnv('AUTH0_DOMAIN')
+    const managementToken = await getManagementToken(domain)
+    const metadata = await getClientMetadata(domain, managementToken)
+    const resolvedReference = await resolveEnvironmentReference({
+      event,
+      metadata,
+      environmentId: requestedEnvironmentId,
+      getOptionalEnv,
+    })
+    const environmentId = resolvedReference.environmentId
+    const aliases = resolvedReference.aliases
+
     const { pricingMap: currentPricingMap } = await getMergedPricingMap({
       event,
       metadata: {},
     })
 
+    const migratedPricingMap = { ...currentPricingMap }
+    aliases
+      .filter((alias) => alias && alias !== environmentId)
+      .forEach((alias) => {
+        if (migratedPricingMap[alias] && !migratedPricingMap[environmentId]) {
+          migratedPricingMap[environmentId] = migratedPricingMap[alias]
+        }
+        delete migratedPricingMap[alias]
+      })
+
     const nextPricingMap = {
-      ...currentPricingMap,
+      ...migratedPricingMap,
       [environmentId]: config,
     }
 
@@ -221,10 +249,6 @@ export const handler = async (event) => {
 
     // Best effort: clean legacy metadata field to avoid Auth0 schema errors.
     try {
-      const domain = getEnv('AUTH0_DOMAIN')
-      const managementToken = await getManagementToken(domain)
-      const metadata = await getClientMetadata(domain, managementToken)
-
       await updateClientMetadata(domain, managementToken, sanitizeClientMetadata(metadata))
     } catch (cleanupError) {
       metadataCleanupWarning = cleanupError instanceof Error

@@ -1,5 +1,5 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose'
-import { stripShardedEnvironmentMetadata } from './_environment-storage.js'
+import { resolveEnvironmentReference, stripShardedEnvironmentMetadata } from './_environment-storage.js'
 
 const getEnv = (key) => {
   const value = process.env[key]
@@ -7,6 +7,11 @@ const getEnv = (key) => {
     throw new Error(`Missing ${key}`)
   }
   return value
+}
+
+const getOptionalEnv = (key) => {
+  const value = process.env[key]
+  return value && value.trim().length > 0 ? value : null
 }
 
 const managementTokenCache = { token: null, expiresAt: 0 }
@@ -258,12 +263,12 @@ export const handler = async (event) => {
     await verifyAdmin(event)
 
     const body = JSON.parse(event.body || '{}')
-    const environmentId = body.environmentId?.trim()
+    const requestedEnvironmentId = body.environmentId?.trim()
     const visibleEntityIds = Array.isArray(body.visibleEntityIds)
       ? body.visibleEntityIds.map((entityId) => String(entityId))
       : []
 
-    if (!environmentId) {
+    if (!requestedEnvironmentId) {
       return { statusCode: 400, body: JSON.stringify({ error: 'Missing environmentId' }) }
     }
 
@@ -272,6 +277,15 @@ export const handler = async (event) => {
     const metadata = await getClientMetadata(domain, managementToken)
     const haConfig = parseHaConfig(metadata.ha_config)
 
+    const resolvedReference = await resolveEnvironmentReference({
+      event,
+      metadata,
+      environmentId: requestedEnvironmentId,
+      getOptionalEnv,
+    })
+    const environmentId = resolvedReference.environmentId
+    const aliases = resolvedReference.aliases
+
     const nextConfig = {
       ...haConfig,
       [environmentId]: {
@@ -279,6 +293,12 @@ export const handler = async (event) => {
         updated_at: new Date().toISOString(),
       },
     }
+
+    aliases
+      .filter((alias) => alias && alias !== environmentId)
+      .forEach((alias) => {
+        delete nextConfig[alias]
+      })
 
     await updateClientMetadata(domain, managementToken, {
       ...sanitizeClientMetadata(metadata),
