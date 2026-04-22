@@ -1,5 +1,23 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { clampNonNegative, createServiceSupabaseClient, getViewRange, toDayString } from './_supabase.js'
+import { resolveEnvironmentConfig } from './_environment-storage.js'
+
+const _getOptionalEnvFallback = (key) => {
+  const value = process.env[key]
+  return value && value.trim().length > 0 ? value : null
+}
+
+async function getHaFallback(event, environmentId) {
+  try {
+    const config = await resolveEnvironmentConfig({ event, environmentId, getOptionalEnv: _getOptionalEnvFallback })
+    return {
+      haUrl: config?.baseUrl || null,
+      haToken: config?.token || null,
+    }
+  } catch {
+    return null
+  }
+}
 
 const getEnv = (key) => {
   const value = process.env[key]
@@ -334,6 +352,13 @@ export const handler = async (event) => {
 
     // Compatibility mode for existing Dashboard fetches while migrating frontend calls.
     if (query.mode === 'statistics') {
+      if (!hourlyRows || hourlyRows.length === 0) {
+        const creds = await getHaFallback(event, environmentId)
+        if (creds?.haUrl && creds?.haToken) {
+          const { handler } = await import('./ha-history.js')
+          return handler(event)
+        }
+      }
       const entities = buildLegacyStatisticsEntityRows({
         hourlyRows: hourlyRows || [],
         entityIds: query.entityIds,
@@ -352,6 +377,13 @@ export const handler = async (event) => {
     }
 
     if (query.mode === 'history' || query.entityIds) {
+      if (!readings || readings.length === 0) {
+        const creds = await getHaFallback(event, environmentId)
+        if (creds?.haUrl && creds?.haToken) {
+          const { handler } = await import('./ha-history.js')
+          return handler(event)
+        }
+      }
       const entities = buildLegacyHistoryEntityRows({
         readings: readings || [],
         entityIds: query.entityIds,
