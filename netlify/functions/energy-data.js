@@ -401,6 +401,73 @@ export const handler = async (event) => {
 
     // Compatibility for old gas endpoint style
     if (query.hoursBack) {
+      if (!hourlyRows || hourlyRows.length === 0) {
+        // Fallback: fetch directly from HA history API and compute hourly gas deltas
+        const creds = await getHaFallback(event, environmentId)
+        if (creds?.haUrl && creds?.haToken) {
+          try {
+            const entityId = String(query.entityId || '').trim()
+            const histUrl = new URL(creds.haUrl)
+            histUrl.pathname = `/api/history/period/${range.startIso}`
+            if (entityId) histUrl.searchParams.set('filter_entity_id', entityId)
+            histUrl.searchParams.set('end_time', range.endIso)
+            histUrl.searchParams.set('significant_changes_only', 'false')
+            histUrl.searchParams.set('no_attributes', 'true')
+
+            const histRes = await fetch(histUrl.toString(), {
+              headers: { Authorization: `Bearer ${creds.haToken}`, 'Content-Type': 'application/json' },
+            })
+
+            if (histRes.ok) {
+              const rawHistory = await histRes.json()
+              const entityHistory = Array.isArray(rawHistory) && rawHistory.length > 0 ? rawHistory[0] : []
+              const points = (Array.isArray(entityHistory) ? entityHistory : [])
+                .map((row) => {
+                  const ts = row?.last_changed || row?.last_updated
+                  const timestamp = ts ? new Date(ts).getTime() : NaN
+                  const value = Number.parseFloat(String(row?.state ?? '').replace(',', '.'))
+                  return Number.isFinite(timestamp) && Number.isFinite(value) ? { timestamp, value } : null
+                })
+                .filter(Boolean)
+                .sort((a, b) => a.timestamp - b.timestamp)
+
+              // Build hourly delta buckets
+              const bucketMs = 3_600_000
+              const bucketMap = new Map()
+              for (const p of points) {
+                const bucket = Math.floor(p.timestamp / bucketMs) * bucketMs
+                if (!bucketMap.has(bucket)) {
+                  bucketMap.set(bucket, { first: p.value, last: p.value })
+                } else {
+                  bucketMap.get(bucket).last = p.value
+                }
+              }
+
+              // Inter-bucket deltas for accuracy
+              const sortedBuckets = Array.from(bucketMap.entries()).sort((a, b) => a[0] - b[0])
+              const hourly = sortedBuckets.map(([bucket, bkt], idx) => {
+                let delta
+                if (idx === 0) {
+                  delta = Math.max(0, bkt.last - bkt.first)
+                } else {
+                  const prevLast = sortedBuckets[idx - 1][1].last
+                  delta = Math.max(0, bkt.last - prevLast)
+                }
+                if (delta > 10) delta = 0 // cap unrealistic spikes
+                return { hour: new Date(bucket).toISOString(), delta: Number(delta.toFixed(4)) }
+              })
+
+              return {
+                statusCode: 200,
+                body: JSON.stringify({ environmentId, hourly, source: 'ha-fallback' }),
+              }
+            }
+          } catch (gasErr) {
+            console.error('[energy-data] gas HA fallback error:', gasErr?.message || gasErr)
+          }
+        }
+      }
+
       return {
         statusCode: 200,
         body: JSON.stringify({
