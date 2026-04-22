@@ -27,6 +27,8 @@ const ENV_METADATA_PREFIX = 'ha_env_v1_'
 const managementTokenCache = { token: null, expiresAt: 0 }
 const metadataCache = { value: null, expiresAt: 0 }
 const metricsHistoryCache = new Map()
+const entitiesResponseCache = new Map() // key: environmentId, value: { body, expiresAt }
+const ENTITIES_CACHE_TTL_MS = 30_000
 
 const parseCsvEnv = (value, fallback = []) => {
   const raw = String(value || '').trim()
@@ -1580,6 +1582,17 @@ export const handler = async (event) => {
       return { statusCode: 400, body: JSON.stringify({ error: 'Missing environmentId' }) }
     }
 
+    // Return cached response if still fresh (avoids repeated 15s HA fetches)
+    const cached = entitiesResponseCache.get(environmentId)
+    if (cached && Date.now() < cached.expiresAt) {
+      console.log('[HA-ENTITIES] Serving from cache for', environmentId)
+      return {
+        statusCode: 200,
+        headers: { 'Cache-Control': 'public, max-age=30' },
+        body: cached.body,
+      }
+    }
+
     const { isAdmin, payload, resolvedEmail } = await verifyAuth(event)
     console.log('[HA-ENTITIES] Auth resolved. isAdmin:', isAdmin, 'email:', resolvedEmail || 'unknown')
 
@@ -1737,9 +1750,13 @@ export const handler = async (event) => {
       }
     }
 
+    const responseBody = JSON.stringify({ entities, metrics })
+    entitiesResponseCache.set(environmentId, { body: responseBody, expiresAt: Date.now() + ENTITIES_CACHE_TTL_MS })
+
     return {
       statusCode: 200,
-      body: JSON.stringify({ entities, metrics }),
+      headers: { 'Cache-Control': 'public, max-age=30' },
+      body: responseBody,
     }
   } catch (error) {
     console.error('ha-entities handler error:', error);

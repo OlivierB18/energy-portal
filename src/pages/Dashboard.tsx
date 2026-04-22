@@ -2407,7 +2407,7 @@ export default function Dashboard({
       ['gas', 'price', 'cost', 'tariff', ...productionKeywords],
     )
     const totalEnergyEntity = findEntity(
-      ['energy_total', 'total_energy', 'total_consumption', 'kwh_total', 'consumption_total'],
+      ['energy_total', 'total_energy', 'total_consumption', 'kwh_total', 'consumption_total', 'p1_meter_energy_import', 'energy_import'],
       ['gas', 'price', 'cost', 'tariff', ...productionKeywords],
     )
     const dailyProductionEntity = findEntity(
