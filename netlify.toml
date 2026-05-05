@@ -11,3 +11,6 @@
 
 [functions."aggregate-energy"]
   schedule = "5 * * * *"
+
+[functions."keep-alive"]
+  schedule = "0 6 * * *"
