@@ -217,7 +217,7 @@ export default function MultiEnvironmentOverview({
 
       try {
         const token = await getAuthToken()
-        const response = await fetch('/.netlify/functions/get-ha-environments', {
+        const response = await fetch('/.netlify/functions/environments', {
           headers: { Authorization: `Bearer ${token}` },
         })
 
@@ -226,9 +226,18 @@ export default function MultiEnvironmentOverview({
         }
 
         const data = await response.json()
-        const loaded: HaEnvironmentPayload[] = Array.isArray(data?.environments)
+        const loaded: HaEnvironmentPayload[] = (Array.isArray(data?.environments)
           ? data.environments
           : []
+        ).map((env: Record<string, unknown>) => ({
+          id: String(env.id || ''),
+          name: String(env.display_name || env.name || env.id || ''),
+          type: 'home_assistant',
+          config: {
+            baseUrl: String(env.ha_base_url || ''),
+            apiKey: String(env.ha_api_token || ''),
+          },
+        }))
 
         // Build a map of current environments to preserve their status across reloads
         const currentById = new Map(environments.map((env) => [String(env.id), env]))
@@ -846,52 +855,61 @@ export default function MultiEnvironmentOverview({
     )
   }
 
+  const toSlug = (value: string) =>
+    String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '')
+      .slice(0, 63) || 'environment'
+
   const persistEnvironments = async (nextEnvironments: Environment[]) => {
-    const requestBody = JSON.stringify({
-      environments: nextEnvironments.map((env) => ({
-        id: env.id,
+    const token = await getAuthToken()
+
+    const saveOne = async (authToken: string, env: Environment) => {
+      const isNew = env.id.startsWith('tmp_')
+      const environmentId = isNew ? toSlug(env.name) : env.id
+      const payload = {
+        id: environmentId,
         name: env.name,
-        type: env.type,
-        config: env.config,
-      })),
-    })
-
-    const performSaveRequest = async (token: string) => {
-      const response = await fetch('/.netlify/functions/save-ha-environments', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: requestBody,
-      })
-
-      if (response.ok) {
-        return
+        ha_base_url: env.config.baseUrl || '',
+        ha_api_token: env.config.apiKey || '',
+        is_active: true,
+        timezone: 'Europe/Amsterdam',
       }
-
-      const data = await response.json().catch(() => null)
-      throw new Error(data?.error || 'Unable to save environments')
+      const method = isNew ? 'POST' : 'PUT'
+      const url = isNew
+        ? '/.netlify/functions/environments'
+        : `/.netlify/functions/environments?id=${encodeURIComponent(env.id)}`
+      const response = await fetch(url, {
+        method,
+        headers: { Authorization: `Bearer ${authToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      if (!response.ok) {
+        const data = await response.json().catch(() => null)
+        throw new Error(data?.error || `Unable to save environment ${env.name}`)
+      }
+      const result = await response.json()
+      return { ...env, id: result?.environment?.id || environmentId }
     }
 
-    const accessToken = await getAuthToken()
+    let savedEnvironments: Environment[] = []
     try {
-      await performSaveRequest(accessToken)
+      savedEnvironments = await Promise.all(nextEnvironments.map((env) => saveOne(token, env)))
     } catch (error) {
       const message = error instanceof Error ? error.message : ''
       const idTokenClaims = await getIdTokenClaims().catch(() => null)
       const idToken = typeof idTokenClaims?.__raw === 'string' ? idTokenClaims.__raw : ''
-
       if (message !== 'Admin only' || !idToken) {
         throw error
       }
-
-      await performSaveRequest(idToken)
+      savedEnvironments = await Promise.all(nextEnvironments.map((env) => saveOne(idToken, env)))
     }
 
-    const updated = nextEnvironments.map((env) => ({
+    const updated = savedEnvironments.map((env) => ({
       ...env,
-      status: env.status || 'offline',
+      status: env.status || ('offline' as const),
       lastUpdate: env.lastUpdate || 'just now',
     }))
     setEnvironments(updated)

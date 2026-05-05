@@ -112,6 +112,7 @@ export const handler = async (event) => {
       const { data, error } = await supabase
         .from('environments')
         .select('*')
+        .eq('is_active', true)
         .order('name', { ascending: true })
 
       if (error) throw error
@@ -168,6 +169,10 @@ export const handler = async (event) => {
       }
 
       const updatePayload = normalizeEnvironmentInput({ ...body, id })
+      // Don't overwrite ha_api_token if not provided (e.g. name-only update)
+      if (!updatePayload.ha_api_token) {
+        delete updatePayload.ha_api_token
+      }
       const { data, error } = await supabase
         .from('environments')
         .update({ ...updatePayload, updated_at: new Date().toISOString() })
