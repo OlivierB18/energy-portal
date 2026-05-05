@@ -1,6 +1,7 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { createServiceSupabaseClient } from './_supabase.js'
 import { detectEnergyEntities } from './shared/entity-detection.js'
+import { loadBlobEnvironments } from './_environment-storage.js'
 
 const getEnv = (key) => {
   const value = process.env[key]
@@ -116,7 +117,37 @@ export const handler = async (event) => {
         .order('name', { ascending: true })
 
       if (error) throw error
-      return { statusCode: 200, body: JSON.stringify({ environments: data || [] }) }
+      const environments = data || []
+
+      // Auto-migrate HA credentials from Netlify Blob storage if any environment is missing them
+      const needsMigration = environments.filter((env) => !env.ha_base_url || !env.ha_api_token)
+      if (needsMigration.length > 0) {
+        try {
+          const blobEnvs = await loadBlobEnvironments(event)
+          for (const env of needsMigration) {
+            const blobMatch = blobEnvs.find(
+              (b) =>
+                b.id === env.id ||
+                b.id.toLowerCase() === env.id.toLowerCase() ||
+                (b.name || '').toLowerCase() === (env.name || '').toLowerCase(),
+            )
+            if (blobMatch?.config?.baseUrl && blobMatch?.config?.apiKey) {
+              const patch = {
+                ha_base_url: blobMatch.config.baseUrl,
+                ha_api_token: blobMatch.config.apiKey,
+                updated_at: new Date().toISOString(),
+              }
+              await supabase.from('environments').update(patch).eq('id', env.id)
+              Object.assign(env, patch)
+              console.log(`[ENV MIGRATE] Auto-migrated credentials for ${env.id} from Blob → Supabase`)
+            }
+          }
+        } catch (migrateError) {
+          console.warn('[ENV MIGRATE] Blob migration skipped:', migrateError?.message)
+        }
+      }
+
+      return { statusCode: 200, body: JSON.stringify({ environments }) }
     }
 
     if (event.httpMethod === 'POST') {
