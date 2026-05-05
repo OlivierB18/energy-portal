@@ -1,6 +1,7 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { resolveEnvironmentConfig } from './_environment-storage.js'
 import { detectEnergyEntities } from './shared/entity-detection.js'
+import { createServiceSupabaseClient } from './_supabase.js'
 
 const getEnv = (key) => {
   const value = process.env[key]
@@ -1642,12 +1643,39 @@ export const handler = async (event) => {
       console.warn('ha-entities metadata warning:', metadataError instanceof Error ? metadataError.message : metadataError)
     }
 
-    const { baseUrl, token } = await resolveEnvironmentConfig({
-      event,
-      metadata,
-      environmentId,
-      getOptionalEnv,
-    })
+    let baseUrl, token
+    try {
+      const resolved = await resolveEnvironmentConfig({
+        event,
+        metadata,
+        environmentId,
+        getOptionalEnv,
+      })
+      baseUrl = resolved.baseUrl
+      token = resolved.token
+    } catch (resolveError) {
+      // Fallback: try Supabase environments table (new system)
+      console.warn('ha-entities: resolveEnvironmentConfig failed, trying Supabase fallback:', resolveError?.message)
+      try {
+        const supabase = createServiceSupabaseClient()
+        const { data: envRow } = await supabase
+          .from('environments')
+          .select('ha_base_url, ha_api_token')
+          .eq('id', environmentId)
+          .maybeSingle()
+        if (envRow?.ha_base_url && envRow?.ha_api_token) {
+          baseUrl = envRow.ha_base_url
+          token = envRow.ha_api_token
+        } else {
+          throw new Error(`No credentials found for environment ${environmentId}`)
+        }
+      } catch (supabaseError) {
+        return {
+          statusCode: 404,
+          body: JSON.stringify({ error: `Environment not found: ${environmentId}` }),
+        }
+      }
+    }
     
     console.log('Fetching from Home Assistant:', baseUrl);
     const controller = new AbortController()
