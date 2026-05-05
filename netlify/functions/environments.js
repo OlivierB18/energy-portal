@@ -1,7 +1,65 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { createServiceSupabaseClient } from './_supabase.js'
 import { detectEnergyEntities } from './shared/entity-detection.js'
-import { loadBlobEnvironments } from './_environment-storage.js'
+
+const ENV_METADATA_PREFIX = 'ha_env_v1_'
+
+const getAuth0ManagementToken = async () => {
+  const domain = process.env.AUTH0_DOMAIN
+  const clientId = process.env.AUTH0_M2M_CLIENT_ID
+  const clientSecret = process.env.AUTH0_M2M_CLIENT_SECRET
+  if (!domain || !clientId || !clientSecret) return null
+  const response = await fetch(`https://${domain}/oauth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      client_id: clientId,
+      client_secret: clientSecret,
+      audience: `https://${domain}/api/v2/`,
+      grant_type: 'client_credentials',
+    }),
+  })
+  if (!response.ok) return null
+  const data = await response.json()
+  return data.access_token || null
+}
+
+const getAuth0ClientMetadata = async () => {
+  const domain = process.env.AUTH0_DOMAIN
+  const appClientId = process.env.AUTH0_APP_CLIENT_ID
+  if (!domain || !appClientId) return {}
+  const token = await getAuth0ManagementToken()
+  if (!token) return {}
+  const response = await fetch(`https://${domain}/api/v2/clients/${encodeURIComponent(appClientId)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  if (!response.ok) return {}
+  const client = await response.json()
+  return client.client_metadata || {}
+}
+
+const parseCredentialsFromAuth0Metadata = (metadata) => {
+  const urlKeys = Object.keys(metadata || {}).filter(
+    (key) => key.startsWith(ENV_METADATA_PREFIX) && key.endsWith('_url'),
+  )
+  return urlKeys.reduce((acc, urlKey) => {
+    const encodedId = urlKey.slice(ENV_METADATA_PREFIX.length, -'_url'.length)
+    let environmentId
+    try {
+      environmentId = Buffer.from(encodedId, 'base64url').toString('utf8').trim()
+    } catch {
+      return acc
+    }
+    if (!environmentId) return acc
+    const tokenKey = `${ENV_METADATA_PREFIX}${encodedId}_token`
+    const nameKey = `${ENV_METADATA_PREFIX}${encodedId}_name`
+    const baseUrl = String(metadata[urlKey] || '').trim()
+    const apiKey = String(metadata[tokenKey] || '').trim()
+    if (!baseUrl || !apiKey) return acc
+    acc.push({ id: environmentId, name: String(metadata[nameKey] || '').trim(), baseUrl, apiKey })
+    return acc
+  }, [])
+}
 
 const getEnv = (key) => {
   const value = process.env[key]
@@ -119,31 +177,36 @@ export const handler = async (event) => {
       if (error) throw error
       const environments = data || []
 
-      // Auto-migrate HA credentials from Netlify Blob storage if any environment is missing them
+      // Auto-migrate HA credentials from Auth0 client metadata if any environment is missing them
       const needsMigration = environments.filter((env) => !env.ha_base_url || !env.ha_api_token)
       if (needsMigration.length > 0) {
         try {
-          const blobEnvs = await loadBlobEnvironments(event)
+          const auth0Metadata = await getAuth0ClientMetadata()
+          const credSources = parseCredentialsFromAuth0Metadata(auth0Metadata)
+          console.log(`[ENV MIGRATE] Found ${credSources.length} credential entries in Auth0 metadata`)
+
           for (const env of needsMigration) {
-            const blobMatch = blobEnvs.find(
+            const match = credSources.find(
               (b) =>
                 b.id === env.id ||
                 b.id.toLowerCase() === env.id.toLowerCase() ||
-                (b.name || '').toLowerCase() === (env.name || '').toLowerCase(),
+                (b.name && b.name.toLowerCase() === (env.name || '').toLowerCase()),
             )
-            if (blobMatch?.config?.baseUrl && blobMatch?.config?.apiKey) {
+            if (match?.baseUrl && match?.apiKey) {
               const patch = {
-                ha_base_url: blobMatch.config.baseUrl,
-                ha_api_token: blobMatch.config.apiKey,
+                ha_base_url: match.baseUrl,
+                ha_api_token: match.apiKey,
                 updated_at: new Date().toISOString(),
               }
               await supabase.from('environments').update(patch).eq('id', env.id)
               Object.assign(env, patch)
-              console.log(`[ENV MIGRATE] Auto-migrated credentials for ${env.id} from Blob → Supabase`)
+              console.log(`[ENV MIGRATE] Auto-migrated credentials for ${env.id} from Auth0 → Supabase`)
+            } else {
+              console.warn(`[ENV MIGRATE] No Auth0 credentials found for ${env.id}. Available IDs: ${credSources.map(c => c.id).join(', ')}`)
             }
           }
         } catch (migrateError) {
-          console.warn('[ENV MIGRATE] Blob migration skipped:', migrateError?.message)
+          console.warn('[ENV MIGRATE] Migration skipped:', migrateError?.message)
         }
       }
 
