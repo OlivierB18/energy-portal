@@ -292,8 +292,7 @@ export const handler = async (event) => {
       }
       const { data, error } = await supabase
         .from('environments')
-        .update({ ...updatePayload, updated_at: new Date().toISOString() })
-        .eq('id', id)
+        .upsert({ ...updatePayload, updated_at: new Date().toISOString() }, { onConflict: 'id' })
         .select('*')
         .single()
 
