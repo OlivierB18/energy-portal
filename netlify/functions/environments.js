@@ -72,6 +72,23 @@ const getEmailFromPayload = (payload) => {
   return typeof emailValue === 'string' ? emailValue.toLowerCase() : ''
 }
 
+const getEmailFromManagementApi = async (domain, userId) => {
+  if (!userId) return ''
+  try {
+    const mgmtToken = await getAuth0ManagementToken()
+    if (!mgmtToken) return ''
+    const response = await fetch(
+      `https://${domain}/api/v2/users/${encodeURIComponent(userId)}?fields=email&include_fields=true`,
+      { headers: { Authorization: `Bearer ${mgmtToken}` } },
+    )
+    if (!response.ok) return ''
+    const data = await response.json()
+    return typeof data.email === 'string' ? data.email.toLowerCase() : ''
+  } catch {
+    return ''
+  }
+}
+
 const isAdminEmail = (email) => {
   const allowlist = (process.env.ADMIN_EMAILS || process.env.VITE_ADMIN_EMAILS || '')
     .split(',')
@@ -93,7 +110,13 @@ const verifyAuth = async (event) => {
   const domain = getEnv('AUTH0_DOMAIN')
   const jwks = createRemoteJWKSet(new URL(`https://${domain}/.well-known/jwks.json`))
   const { payload } = await jwtVerify(token, jwks, { issuer: `https://${domain}/` })
-  const email = getEmailFromPayload(payload)
+
+  let email = getEmailFromPayload(payload)
+  // Fallback: fetch email from Auth0 management API using the sub (user ID)
+  if (!email && payload.sub) {
+    email = await getEmailFromManagementApi(domain, String(payload.sub))
+  }
+
   return {
     email,
     isAdmin: isAdminEmail(email),
