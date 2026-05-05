@@ -5,6 +5,7 @@ import {
   mapMetadataEnvironments,
   mergeEnvironments,
 } from './_ha-config.js'
+import { createServiceSupabaseClient } from './_supabase.js'
 
 const ENVIRONMENT_STORE_NAME = 'ha-environments'
 const ENVIRONMENT_STORE_KEY = 'environments'
@@ -280,22 +281,40 @@ export const resolveEnvironmentConfig = async ({ event, metadata = {}, environme
     || environments.find((env) => normalizeText(env.name).toLowerCase() === lowerRequestedId)
     || environments.find((env) => Array.isArray(env.legacyIds) && env.legacyIds.some((id) => normalizeKey(id) === lowerRequestedId))
 
+  if (matched) {
+    const baseUrl = normalizeText(matched.config?.baseUrl)
+    const token = normalizeText(matched.config?.apiKey)
+    if (baseUrl && token) {
+      return { baseUrl, token, environment: matched }
+    }
+  }
+
+  // Fallback: look up credentials in Supabase (new system)
+  try {
+    const supabase = createServiceSupabaseClient()
+    const { data: envRow } = await supabase
+      .from('environments')
+      .select('id, name, ha_base_url, ha_api_token')
+      .or(`id.eq.${requestedId},name.ilike.${requestedId}`)
+      .eq('is_active', true)
+      .maybeSingle()
+    if (envRow?.ha_base_url && envRow?.ha_api_token) {
+      console.log(`[ENV STORAGE] Resolved ${requestedId} via Supabase fallback`)
+      return {
+        baseUrl: envRow.ha_base_url,
+        token: envRow.ha_api_token,
+        environment: matched || { id: envRow.id, name: envRow.name, type: 'home_assistant', config: { baseUrl: envRow.ha_base_url, apiKey: envRow.ha_api_token } },
+      }
+    }
+  } catch (supabaseError) {
+    console.warn('[ENV STORAGE] Supabase fallback failed:', supabaseError?.message)
+  }
+
   if (!matched) {
     throw new Error(`Unknown environment: ${environmentId}`)
   }
 
-  const baseUrl = normalizeText(matched.config?.baseUrl)
-  const token = normalizeText(matched.config?.apiKey)
-
-  if (!baseUrl || !token) {
-    throw new Error(`Environment '${matched.id}' is missing Home Assistant baseUrl or token`)
-  }
-
-  return {
-    baseUrl,
-    token,
-    environment: matched,
-  }
+  throw new Error(`Environment '${matched.id}' is missing Home Assistant baseUrl or token`)
 }
 
 export const resolveEnvironmentReference = async ({ event, metadata = {}, environmentId, getOptionalEnv }) => {
