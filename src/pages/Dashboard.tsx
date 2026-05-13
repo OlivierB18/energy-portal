@@ -1147,7 +1147,7 @@ export default function Dashboard({
 
       try {
         const token = await getAuthToken()
-        const response = await fetch('/.netlify/functions/get-ha-environments', {
+        const response = await fetch('/.netlify/functions/environments', {
           headers: { Authorization: `Bearer ${token}` },
         })
 
@@ -1159,10 +1159,10 @@ export default function Dashboard({
         const loaded: HaEnvironmentPayload[] = Array.isArray(data?.environments)
           ? data.environments
           : []
-        const next = loaded.map((env: HaEnvironmentPayload) => ({
+        const next = loaded.map((env: HaEnvironmentPayload & { display_name?: string }) => ({
           id: String(env.id),
-          name: String(env.name || env.id),
-          type: env.type,
+          name: String(env.display_name || env.name || env.id),
+          type: env.type || 'home_assistant',
         }))
         if (!isDisposed) {
           setEnvironments(next)
